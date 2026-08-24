@@ -13,11 +13,11 @@
 #include <utility>
 
 namespace {
-constexpr std::array<const char *, 9> listenedParameterIDs{
+constexpr std::array listenedParameterIDs{
     openyourbox::params::depth,       openyourbox::params::kernelSize,
-    openyourbox::params::channels,    openyourbox::params::activation,  openyourbox::params::randomize,
-    openyourbox::params::randomizeCC, openyourbox::params::globalSeed,
-    openyourbox::params::dryWet};
+    openyourbox::params::channels,    openyourbox::params::activation,
+    openyourbox::params::randomize,   openyourbox::params::randomizeCC,
+    openyourbox::params::globalSeed,  openyourbox::params::dryWet};
 
 constexpr std::uint64_t maximumRealtimeHistory = 1U << 20U;
 constexpr int minimumPreparedBlockSize = 8192;
