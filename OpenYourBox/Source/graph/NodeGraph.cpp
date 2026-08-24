@@ -97,6 +97,12 @@ void normalizePhase3Node(openyourbox::graph::GraphNode &node) {
   ensureInt("dilation_growth", "Dilation growth", defaultDilationGrowth,
             minimumDilationGrowth, maximumDilationGrowth);
   ensureInt("residual", "Residual", 0, 0, 1);
+  node.properties.erase(
+      std::remove_if(node.properties.begin(), node.properties.end(),
+                     [](const NodeProperty &property) {
+                       return property.key == "dilation";
+                     }),
+      node.properties.end());
   for (auto &property : node.properties)
     ensureActivationChoices(property);
   if (node.hasWeights)
@@ -716,7 +722,6 @@ void NodeGraph::rebuildFromModel(const dsp::TCNConfiguration &configuration) {
     setProperty(tcnId, "depth", configuration.depth);
     setProperty(tcnId, "kernel_size", configuration.kernelSize);
     setProperty(tcnId, "channels", configuration.channels);
-    setProperty(tcnId, "dilation", configuration.dilation);
     setProperty(tcnId, "activation",
                 static_cast<int>(configuration.activation));
     tcn->detail = std::to_string(configuration.channels) + " ch, RF model";
@@ -1621,7 +1626,6 @@ GraphNode NodeGraph::makeNode(NodeType type, juce::Point<float> position) {
     node.properties.push_back(property("depth", "Depth", 4, 1, 30));
     node.properties.push_back(property("kernel_size", "Kernel Size", 3, 2, 65));
     node.properties.push_back(property("channels", "Channels", 16, 1, 512));
-    node.properties.push_back(property("dilation", "Dilation", 1, 1, 64));
     node.properties.push_back(property("dilation_growth", "Dilation growth",
                                        defaultDilationGrowth,
                                        minimumDilationGrowth,

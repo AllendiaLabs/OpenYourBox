@@ -41,22 +41,22 @@ DEFAULT_MLFLOW_TAGS = ["train", "steerable"]
 MLFLOW_PARAM_MAX_LENGTH = 6000
 
 
-def dilation_for_layer(growth: int, layer: int, base: int = 1) -> int:
-    """Return saturated ``base * growth**layer``."""
+def dilation_for_layer(growth: int, layer: int) -> int:
+    """Return saturated ``growth**layer``."""
     value = 1
     growth = max(1, int(growth))
     for _ in range(max(0, layer)):
         value *= growth
         if value > 2**30:
             return 2**30
-    return max(1, int(base)) * value
+    return value
 
 
-def receptive_field_samples(depth: int, kernel_size: int, growth: int, base: int = 1) -> int:
+def receptive_field_samples(depth: int, kernel_size: int, growth: int) -> int:
     """Return the causal receptive field of a growth^n TCN stack."""
     field = 1
     for layer in range(max(0, depth)):
-        field += (kernel_size - 1) * dilation_for_layer(growth, layer, base)
+        field += (kernel_size - 1) * dilation_for_layer(growth, layer)
     return field
 
 
@@ -183,7 +183,6 @@ class SteerableTCN(nn.Module):
         output_channels: int,
         depth: int,
         kernel_size: int,
-        dilation: int,
         dilation_growth: int,
         activation: int,
         residual: bool,
@@ -197,7 +196,7 @@ class SteerableTCN(nn.Module):
                 TCNBlock(
                     hidden_channels,
                     kernel_size,
-                    dilation_for_layer(dilation_growth, layer, dilation),
+                    dilation_for_layer(dilation_growth, layer),
                     activation,
                     residual,
                     cond_dim,
@@ -351,7 +350,6 @@ def build_module(
             hidden = int(properties.get("channels", channels))
             depth = int(properties.get("depth", 4))
             kernel_size = int(properties.get("kernel_size", 3))
-            dilation = int(properties.get("dilation", 1))
             growth = int(properties.get("dilation_growth", 2))
             activation = int(properties.get("activation", 0))
             residual = bool(int(properties.get("residual", 0)))
@@ -362,7 +360,6 @@ def build_module(
                     channels,
                     depth,
                     kernel_size,
-                    dilation,
                     growth,
                     activation,
                     residual,

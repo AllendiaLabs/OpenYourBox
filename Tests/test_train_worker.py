@@ -32,11 +32,11 @@ class TrainWorkerRecipeTests(unittest.TestCase):
         self.assertEqual(train_worker.STEER_CONDITIONING, 0.0)
 
     def test_dilation_growth_schedule(self) -> None:
-        """Layer dilations follow G^n with optional base scale."""
+        """Layer dilations follow G^n."""
         self.assertEqual(train_worker.dilation_for_layer(2, 0), 1)
         self.assertEqual(train_worker.dilation_for_layer(2, 3), 8)
         self.assertEqual(train_worker.dilation_for_layer(8, 2), 64)
-        self.assertEqual(train_worker.dilation_for_layer(10, 1, 1), 10)
+        self.assertEqual(train_worker.dilation_for_layer(10, 1), 10)
 
     def test_rf_aware_crop_includes_context(self) -> None:
         """Each crop must prepend receptive-field context before the target."""
@@ -58,7 +58,6 @@ class TrainWorkerRecipeTests(unittest.TestCase):
                         {"key": "channels", "value": 4},
                         {"key": "depth", "value": 2},
                         {"key": "kernel_size", "value": 3},
-                        {"key": "dilation", "value": 1},
                         {"key": "dilation_growth", "value": 8},
                         {"key": "residual", "value": 1},
                         {"key": "activation", "value": 4},
@@ -86,7 +85,6 @@ class TrainWorkerRecipeTests(unittest.TestCase):
                         {"key": "channels", "value": 16},
                         {"key": "depth", "value": 1},
                         {"key": "kernel_size", "value": 3},
-                        {"key": "dilation", "value": 1},
                         {"key": "dilation_growth", "value": 2},
                         {"key": "residual", "value": 0},
                         {"key": "activation", "value": 0},
@@ -146,7 +144,6 @@ class TrainWorkerRecipeTests(unittest.TestCase):
                         {"key": "channels", "value": 4},
                         {"key": "depth", "value": 1},
                         {"key": "kernel_size", "value": 3},
-                        {"key": "dilation", "value": 1},
                         {"key": "dilation_growth", "value": 2},
                         {"key": "residual", "value": 0},
                         {"key": "activation", "value": 0},
@@ -192,7 +189,6 @@ class TrainWorkerRecipeTests(unittest.TestCase):
                         {"key": "channels", "value": 4},
                         {"key": "depth", "value": 1},
                         {"key": "kernel_size", "value": 3},
-                        {"key": "dilation", "value": 1},
                         {"key": "dilation_growth", "value": 2},
                         {"key": "residual", "value": 0},
                         {"key": "activation", "value": 0},

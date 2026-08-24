@@ -37,7 +37,7 @@ struct CompiledElement {
   int outputChannels = 0;
   /** @brief Kernel size for Conv1D or TCN elements. */
   int kernelSize = 1;
-  /** @brief Dilation for Conv1D or base dilation for TCN elements. */
+  /** @brief Dilation for Conv1D elements. */
   int dilation = 1;
   /** @brief Number of internal temporal layers in a TCN element. */
   int depth = 0;
@@ -978,8 +978,7 @@ void LiveGraphRuntime::executeElement(std::size_t index,
                                  historyLength);
     for (int layer = 0; layer < element.depth; ++layer) {
       const auto layerDilation = static_cast<std::int64_t>(
-          openyourbox::graph::tcnLayerDilation(element.dilationGrowth, layer,
-                                               element.dilation));
+          openyourbox::graph::tcnLayerDilation(element.dilationGrowth, layer));
       const auto leftPadding =
           static_cast<std::int64_t>(element.kernelSize - 1) * layerDilation;
       auto residual = value;
@@ -1568,7 +1567,6 @@ LiveGraphEngine::compile(const graph::NodeGraph &graphDocument,
         if (!readProperty(node, "depth", element.depth) ||
             !readProperty(node, "kernel_size", element.kernelSize) ||
             !readProperty(node, "channels", element.hiddenChannels) ||
-            !readProperty(node, "dilation", element.dilation) ||
             !readProperty(node, "activation", activation))
           return failure(LiveGraphErrorCode::invalidProperty, node.id,
                          "TCN is missing one or more required properties");
@@ -1580,7 +1578,7 @@ LiveGraphEngine::compile(const graph::NodeGraph &graphDocument,
 
         const auto dilationRepresentable =
             element.depth >= 1 && element.depth <= 30 &&
-            element.dilation >= 1 && element.dilationGrowth >= 1;
+            element.dilationGrowth >= 1;
         if (!dilationRepresentable || element.kernelSize < 2 ||
             element.kernelSize > 65 || element.hiddenChannels < 1 ||
             element.hiddenChannels > 512 || element.inputChannels < 1 ||
@@ -1622,8 +1620,7 @@ LiveGraphEngine::compile(const graph::NodeGraph &graphDocument,
         std::uint64_t receptiveField = 1;
         for (int layer = 0; layer < element.depth; ++layer) {
           const auto layerDilation = static_cast<std::uint64_t>(
-              graph::tcnLayerDilation(element.dilationGrowth, layer,
-                                      element.dilation));
+              graph::tcnLayerDilation(element.dilationGrowth, layer));
           receptiveField = saturatedAdd(
               receptiveField, saturatedMultiply(static_cast<std::uint64_t>(
                                                     element.kernelSize - 1),

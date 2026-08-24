@@ -183,15 +183,15 @@ class ZeroPreservingSigmoid(nn.Module):
         )
 
 
-def dilation_for_layer(growth: int, layer: int, base: int = 1) -> int:
-    """Return saturated ``base * growth**layer`` matching the live TCN."""
+def dilation_for_layer(growth: int, layer: int) -> int:
+    """Return saturated ``growth**layer`` matching the live TCN."""
     value = 1
     growth = max(1, int(growth))
     for _ in range(max(0, layer)):
         value *= growth
         if value > 2**30:
             return 2**30
-    return max(1, int(base)) * value
+    return value
 
 
 class FiLM(nn.Module):
@@ -257,7 +257,6 @@ class SteerableTCN(nn.Module):
         output_channels: int,
         depth: int,
         kernel_size: int,
-        dilation: int,
         dilation_growth: int,
         activation: int,
         residual: bool,
@@ -271,7 +270,7 @@ class SteerableTCN(nn.Module):
                 TCNBlock(
                     hidden_channels,
                     kernel_size,
-                    dilation_for_layer(dilation_growth, layer, dilation),
+                    dilation_for_layer(dilation_growth, layer),
                     activation,
                     residual,
                     cond_dim,
@@ -424,7 +423,6 @@ def build_module(
             hidden = properties.get("channels", channels)
             depth = properties.get("depth", 1)
             kernel_size = properties.get("kernel_size", 3)
-            dilation = properties.get("dilation", 1)
             growth = properties.get("dilation_growth", 2)
             activation = properties.get("activation", 0)
             residual = bool(properties.get("residual", 0))
@@ -434,7 +432,6 @@ def build_module(
                 channels,
                 depth,
                 kernel_size,
-                dilation,
                 growth,
                 activation,
                 residual,

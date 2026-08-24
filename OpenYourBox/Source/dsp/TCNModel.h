@@ -17,9 +17,7 @@ struct TCNConfiguration {
   int depth = 4;
   int kernelSize = 3;
   int channels = 16;
-  /** @brief Base dilation multiplied by each layer's growth^n schedule. */
-  int dilation = 1;
-  /** @brief Dilation growth G so layer n uses dilation `dilation * G^n`. */
+  /** @brief Dilation growth G so layer n uses dilation G^n. */
   int dilationGrowth = 2;
   int inputChannels = 2;
   int outputChannels = 2;

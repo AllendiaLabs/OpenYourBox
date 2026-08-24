@@ -42,13 +42,6 @@ int main() {
   passed &= expect(first->getParameterCount() > 0,
                    "model must own trainable parameters");
 
-  auto dilatedConfiguration = configuration;
-  dilatedConfiguration.dilation = 2;
-  const auto dilated = std::make_shared<TCNModel>(dilatedConfiguration);
-  passed &= expect(
-      dilated->getReceptiveField() == 61,
-      "base dilation=2 must double each TCN layer's receptive contribution");
-
   const auto firstParameters = first->parameters();
   const auto secondParameters = second->parameters();
   passed &=

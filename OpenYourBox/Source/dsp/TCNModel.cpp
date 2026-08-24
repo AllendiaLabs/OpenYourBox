@@ -27,11 +27,11 @@ void hashCombine(std::uint64_t &hash, std::uint64_t value) noexcept {
 namespace openyourbox::dsp {
 bool TCNConfiguration::isValid() const noexcept {
   if (depth < 1 || depth > 30 || kernelSize < 2 || channels < 1 ||
-      dilation < 1 || dilationGrowth < 1 || dilationGrowth > 16 ||
+      dilationGrowth < 1 || dilationGrowth > 16 ||
       inputChannels < 1 || inputChannels > 2 ||
       outputChannels != inputChannels)
     return false;
-  long long value = dilation;
+  long long value = 1;
   for (int layer = 0; layer < depth; ++layer) {
     if (value > std::numeric_limits<int>::max())
       return false;
@@ -59,8 +59,7 @@ TCNModel::TCNModel(TCNConfiguration configuration) : config(configuration) {
   long long growthPower = 1;
   for (int layer = 0; layer < config.depth; ++layer) {
     const auto dilation = static_cast<int>(
-        std::min<long long>(config.dilation * growthPower,
-                            std::numeric_limits<int>::max()));
+        std::min<long long>(growthPower, std::numeric_limits<int>::max()));
     convolutions->push_back(torch::nn::Conv1d(
         torch::nn::Conv1dOptions(config.channels, config.channels,
                                  config.kernelSize)
@@ -106,8 +105,7 @@ torch::Tensor TCNModel::forward(const torch::Tensor &input) {
     for (std::size_t index = 0; index < layer; ++index)
       growthPower *= std::max(1, config.dilationGrowth);
     const auto dilation = static_cast<std::int64_t>(
-        std::min<long long>(config.dilation * growthPower,
-                            std::numeric_limits<int>::max()));
+        std::min<long long>(growthPower, std::numeric_limits<int>::max()));
     const auto leftPadding =
         static_cast<std::int64_t>(config.kernelSize - 1) * dilation;
     auto residual = value;
@@ -179,7 +177,6 @@ std::uint64_t TCNModel::getArchitectureHash() const noexcept {
   hashCombine(hash, static_cast<std::uint64_t>(config.depth));
   hashCombine(hash, static_cast<std::uint64_t>(config.kernelSize));
   hashCombine(hash, static_cast<std::uint64_t>(config.channels));
-  hashCombine(hash, static_cast<std::uint64_t>(config.dilation));
   hashCombine(hash, static_cast<std::uint64_t>(config.inputChannels));
   hashCombine(hash, static_cast<std::uint64_t>(config.outputChannels));
   hashCombine(hash, static_cast<std::uint64_t>(config.activation));

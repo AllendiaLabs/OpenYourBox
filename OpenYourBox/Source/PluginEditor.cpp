@@ -18,7 +18,7 @@ namespace {
 bool sameArchitecture(const openyourbox::dsp::TCNConfiguration &left,
                       const openyourbox::dsp::TCNConfiguration &right) noexcept {
   return left.depth == right.depth && left.kernelSize == right.kernelSize &&
-         left.channels == right.channels && left.dilation == right.dilation &&
+         left.channels == right.channels &&
          left.inputChannels == right.inputChannels &&
          left.outputChannels == right.outputChannels &&
          left.activation == right.activation;
@@ -383,7 +383,6 @@ void OpenYourBoxAudioProcessorEditor::updateGraphIfNeeded() {
       nodeGraph.setProperty(tcn->id, "depth", requested.depth);
       nodeGraph.setProperty(tcn->id, "kernel_size", requested.kernelSize);
       nodeGraph.setProperty(tcn->id, "channels", requested.channels);
-      nodeGraph.setProperty(tcn->id, "dilation", requested.dilation);
       nodeGraph.setProperty(tcn->id, "activation",
                             static_cast<int>(requested.activation));
       persistGraph();
@@ -511,8 +510,6 @@ void OpenYourBoxAudioProcessorEditor::handlePropertyChanged(
       configuration.kernelSize = property.value;
     else if (property.key == "channels")
       configuration.channels = property.value;
-    else if (property.key == "dilation")
-      configuration.dilation = property.value;
     else if (property.key == "activation")
       configuration.activation =
           static_cast<openyourbox::dsp::ActivationType>(property.value);

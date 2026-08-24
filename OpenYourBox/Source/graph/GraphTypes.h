@@ -138,18 +138,13 @@ inline int dilationGrowthPower(int growth, int layer) noexcept {
 }
 
 /**
- * @brief Returns the per-layer dilation G^n scaled by an optional base.
+ * @brief Returns the per-layer dilation G^n for a TCN stack.
  * @param growth Dilation growth G.
  * @param layer Zero-based layer index.
- * @param base Optional base dilation (legacy `dilation` property, default 1).
  * @return Saturated layer dilation.
  */
-inline int tcnLayerDilation(int growth, int layer, int base = 1) noexcept {
-  const auto power = dilationGrowthPower(growth, layer);
-  const auto scale = std::max(1, base);
-  if (power > std::numeric_limits<int>::max() / scale)
-    return std::numeric_limits<int>::max();
-  return power * scale;
+inline int tcnLayerDilation(int growth, int layer) noexcept {
+  return dilationGrowthPower(growth, layer);
 }
 
 /**

@@ -15,8 +15,7 @@
 namespace {
 constexpr std::array<const char *, 9> listenedParameterIDs{
     openyourbox::params::depth,       openyourbox::params::kernelSize,
-    openyourbox::params::channels,    openyourbox::params::dilation,
-    openyourbox::params::activation,  openyourbox::params::randomize,
+    openyourbox::params::channels,    openyourbox::params::activation,  openyourbox::params::randomize,
     openyourbox::params::randomizeCC, openyourbox::params::globalSeed,
     openyourbox::params::dryWet};
 
@@ -28,7 +27,7 @@ bool sameConfiguration(
     const openyourbox::dsp::TCNConfiguration &left,
     const openyourbox::dsp::TCNConfiguration &right) noexcept {
   return left.depth == right.depth && left.kernelSize == right.kernelSize &&
-         left.channels == right.channels && left.dilation == right.dilation &&
+         left.channels == right.channels &&
          left.inputChannels == right.inputChannels &&
          left.outputChannels == right.outputChannels &&
          left.activation == right.activation;
@@ -364,8 +363,6 @@ OpenYourBoxAudioProcessor::getRequestedConfiguration() const noexcept {
       parameters.getRawParameterValue(openyourbox::params::kernelSize)->load());
   configuration.channels = juce::roundToInt(
       parameters.getRawParameterValue(openyourbox::params::channels)->load());
-  configuration.dilation = juce::roundToInt(
-      parameters.getRawParameterValue(openyourbox::params::dilation)->load());
   configuration.activation =
       static_cast<openyourbox::dsp::ActivationType>(juce::roundToInt(
           parameters.getRawParameterValue(openyourbox::params::activation)
@@ -427,8 +424,6 @@ void OpenYourBoxAudioProcessor::applyGraphConfiguration(
          static_cast<float>(configuration.kernelSize));
   update(openyourbox::params::channels,
          static_cast<float>(configuration.channels));
-  update(openyourbox::params::dilation,
-         static_cast<float>(configuration.dilation));
   update(openyourbox::params::activation,
          static_cast<float>(configuration.activation));
 }
@@ -589,7 +584,6 @@ void OpenYourBoxAudioProcessor::parameterChanged(const juce::String &parameterID
   } else if (parameterID == openyourbox::params::depth ||
              parameterID == openyourbox::params::kernelSize ||
              parameterID == openyourbox::params::channels ||
-             parameterID == openyourbox::params::dilation ||
              parameterID == openyourbox::params::activation) {
     architectureChangePending.store(true, std::memory_order_release);
   } else {

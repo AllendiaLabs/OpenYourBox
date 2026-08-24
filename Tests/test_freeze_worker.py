@@ -99,13 +99,13 @@ class FreezeWorkerTests(unittest.TestCase):
                 response["blackbox_metadata"]["receptive_field_samples"], 3
             )
 
-    def test_tcn_uses_cpp_base_dilation_schedule(self) -> None:
-        """TCN layers must use baseDilation multiplied by powers of two."""
-        module = freeze_worker.SteerableTCN(2, 2, 2, 3, 3, 3, 2, 0, False, 0)
+    def test_tcn_uses_dilation_growth_schedule(self) -> None:
+        """TCN layers must follow G^n dilations."""
+        module = freeze_worker.SteerableTCN(2, 2, 2, 3, 3, 2, 0, False, 0)
         dilations = [
             block.convolution.convolution.dilation[0] for block in module.blocks
         ]
-        self.assertEqual(dilations, [3, 6, 12])
+        self.assertEqual(dilations, [1, 2, 4])
 
     def test_sigmoid_preserves_digital_silence(self) -> None:
         """Frozen sigmoid must match the live engine's exact-zero behavior."""
@@ -212,7 +212,6 @@ class FreezeWorkerTests(unittest.TestCase):
                             {"key": "channels", "value": 4},
                             {"key": "depth", "value": 1},
                             {"key": "kernel_size", "value": 3},
-                            {"key": "dilation", "value": 1},
                             {"key": "dilation_growth", "value": 2},
                             {"key": "residual", "value": 0},
                             {"key": "activation", "value": 0},
