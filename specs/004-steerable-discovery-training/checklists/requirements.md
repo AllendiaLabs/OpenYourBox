@@ -37,3 +37,4 @@
 - Constitution gates PASS in plan post-design re-check.
 - Spec status: **Ready for planning / tasks** — next `/speckit-tasks`.
 - Out of Scope section documents Phase 4, hyperparameter UI, etc.
+- Implementation (`/speckit-implement` 2026-08-20): graph FiLM/growth/residual/PReLU, Training Library, Capture pairing, Train worker recipe, Gold auto-load, Weights browse. Automated coverage: `Tests/test_train_worker.py` (recipe/RF crop) and `Tests/LiveGraphEngineTests.cpp` (growth^n, FiLM pin, library SR gate). Full DAW quickstart scenarios 1–8 remain manual host validation.

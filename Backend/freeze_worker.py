@@ -55,6 +55,37 @@ def _make_weight(
     )
 
 
+def _make_linear_weight(
+    output_features: int, input_features: int, state: int
+) -> tuple[torch.Tensor, int]:
+    """Reproduce one deterministic LiveGraphEngine Linear weight tensor."""
+    scale = _float32(math.sqrt(6.0 / max(1, input_features)))
+    values: list[float] = []
+    for _ in range(output_features * input_features):
+        state, bits = _split_mix_64(state)
+        unit = float(bits >> 11) / float(1 << 53)
+        signed = _float32(unit * 2.0 - 1.0)
+        values.append(_float32(signed * scale))
+    return (
+        torch.tensor(values, dtype=torch.float32).reshape(
+            output_features, input_features
+        ),
+        state,
+    )
+
+
+def _make_bias(features: int, state: int) -> tuple[torch.Tensor, int]:
+    """Reproduce one deterministic LiveGraphEngine Linear bias tensor."""
+    scale = _float32(math.sqrt(6.0 / max(1, features)))
+    values: list[float] = []
+    for _ in range(features):
+        state, bits = _split_mix_64(state)
+        unit = float(bits >> 11) / float(1 << 53)
+        signed = _float32(unit * 2.0 - 1.0)
+        values.append(_float32(signed * scale))
+    return torch.tensor(values, dtype=torch.float32), state
+
+
 def _assign_deterministic_weights(module: nn.Module, seed: int) -> None:
     """Copy the live C++ engine's seeded weights into one weighted element."""
     state = (seed & 0xFFFF_FFFF) ^ 0xA0761D6478BD642F
@@ -69,6 +100,42 @@ def _assign_deterministic_weights(module: nn.Module, seed: int) -> None:
                 state,
             )
             layer.weight.copy_(weight)
+
+
+def _assign_tcn_weights(module: "SteerableTCN", seed: int) -> None:
+    """Copy live TCN conv then FiLM weights in LiveGraphEngine seed order."""
+    state = (seed & 0xFFFF_FFFF) ^ 0xA0761D6478BD642F
+    with torch.no_grad():
+        projection, state = _make_weight(
+            module.input_projection.out_channels,
+            module.input_projection.in_channels,
+            1,
+            state,
+        )
+        module.input_projection.weight.copy_(projection)
+        for block in module.blocks:
+            conv = block.convolution.convolution
+            weight, state = _make_weight(
+                conv.out_channels, conv.in_channels, conv.kernel_size[0], state
+            )
+            conv.weight.copy_(weight)
+        output, state = _make_weight(
+            module.output_projection.out_channels,
+            module.output_projection.in_channels,
+            1,
+            state,
+        )
+        module.output_projection.weight.copy_(output)
+        if module.cond_dim < 1:
+            return
+        for block in module.blocks:
+            if block.film is None:
+                continue
+            film_out = block.film.adaptor.out_features
+            weight, state = _make_linear_weight(film_out, module.cond_dim, state)
+            bias, state = _make_bias(film_out, state)
+            block.film.adaptor.weight.copy_(weight)
+            block.film.adaptor.bias.copy_(bias)
 
 
 class CausalConv1d(nn.Module):
@@ -116,43 +183,147 @@ class ZeroPreservingSigmoid(nn.Module):
         )
 
 
-class ResidualTCN(nn.Module):
-    """Small causal temporal-convolution stack used for frozen TCN elements."""
+def dilation_for_layer(growth: int, layer: int, base: int = 1) -> int:
+    """Return saturated ``base * growth**layer`` matching the live TCN."""
+    value = 1
+    growth = max(1, int(growth))
+    for _ in range(max(0, layer)):
+        value *= growth
+        if value > 2**30:
+            return 2**30
+    return max(1, int(base)) * value
+
+
+class FiLM(nn.Module):
+    """Per-sample feature-wise linear modulation from a conditioning trajectory."""
+
+    def __init__(self, cond_dim: int, num_features: int) -> None:
+        """Create a linear adaptor mapping ``c`` to per-channel scale and shift."""
+        super().__init__()
+        self.cond_dim = max(1, int(cond_dim))
+        self.adaptor = nn.Linear(self.cond_dim, num_features * 2)
+
+    def forward(self, samples: torch.Tensor, cond: torch.Tensor) -> torch.Tensor:
+        """Apply FiLM: ``y_t = g(c_t) * x_t + b(c_t)``."""
+        if cond.dim() == 1:
+            cond = cond.view(1, -1, 1)
+        elif cond.dim() == 2:
+            cond = cond.unsqueeze(-1)
+        layout = cond.transpose(1, 2)
+        padded = functional.pad(layout, (0, self.cond_dim))
+        adapted = self.adaptor(padded[:, :, : self.cond_dim])
+        scale, shift = torch.chunk(adapted, 2, dim=-1)
+        return samples * scale.transpose(1, 2) + shift.transpose(1, 2)
+
+
+class TCNBlock(nn.Module):
+    """One causal TCN block with optional FiLM and identity residual."""
+
+    def __init__(
+        self,
+        channels: int,
+        kernel_size: int,
+        dilation: int,
+        activation: int,
+        residual: bool,
+        cond_dim: int,
+    ) -> None:
+        """Create one temporal block matching the live TCN element."""
+        super().__init__()
+        self.convolution = CausalConv1d(channels, channels, kernel_size, dilation)
+        self.film = FiLM(cond_dim, channels) if cond_dim > 0 else None
+        self.activation = _activation(activation)
+        self.residual = residual
+
+    def forward(self, samples: torch.Tensor, cond: torch.Tensor) -> torch.Tensor:
+        """Run convolution, optional FiLM, activation, and residual add."""
+        residual = samples
+        value = self.convolution(samples)
+        if self.film is not None:
+            value = self.film(value, cond)
+        value = self.activation(value)
+        if self.residual:
+            value = value + residual[..., -value.shape[-1] :]
+        return value
+
+
+class SteerableTCN(nn.Module):
+    """FiLM-conditioned TCN matching the live graph TCN element."""
 
     def __init__(
         self,
         input_channels: int,
         hidden_channels: int,
+        output_channels: int,
         depth: int,
         kernel_size: int,
         dilation: int,
+        dilation_growth: int,
         activation: int,
+        residual: bool,
+        cond_dim: int,
     ) -> None:
-        """Create a deterministic stack matching the serialized TCN controls."""
+        """Create input projection, temporal blocks, and output projection."""
         super().__init__()
-        layers: list[nn.Module] = []
-        layers.append(ChannelLinear(input_channels, hidden_channels))
-        receptive_field = 1
-        for layer_index in range(depth):
-            effective_dilation = dilation * (1 << layer_index)
-            receptive_field += (kernel_size - 1) * effective_dilation
-            if receptive_field > 1 << 20:
-                raise ValueError("TCN receptive field exceeds the runtime limit")
-            layers.append(
-                CausalConv1d(
-                    hidden_channels,
+        self.input_projection = nn.Conv1d(input_channels, hidden_channels, 1, bias=False)
+        self.blocks = nn.ModuleList(
+            [
+                TCNBlock(
                     hidden_channels,
                     kernel_size,
-                    effective_dilation,
+                    dilation_for_layer(dilation_growth, layer, dilation),
+                    activation,
+                    residual,
+                    cond_dim,
                 )
-            )
-            layers.append(_activation(activation))
-        layers.append(ChannelLinear(hidden_channels, input_channels))
-        self.network = nn.Sequential(*layers)
+                for layer in range(depth)
+            ]
+        )
+        self.output_projection = nn.Conv1d(hidden_channels, output_channels, 1, bias=False)
+        self.cond_dim = max(0, int(cond_dim))
 
-    def forward(self, samples: torch.Tensor) -> torch.Tensor:
-        """Run the frozen temporal stack."""
-        return self.network(samples)
+    def forward(self, samples: torch.Tensor, cond: torch.Tensor | None = None) -> torch.Tensor:
+        """Process audio, applying ca=0 when conditioning is omitted."""
+        if cond is None:
+            cond = torch.zeros(
+                samples.shape[0],
+                max(1, self.cond_dim),
+                1,
+                device=samples.device,
+                dtype=samples.dtype,
+            )
+        value = self.input_projection(samples)
+        for block in self.blocks:
+            value = block(value, cond)
+        return self.output_projection(value)
+
+
+class ConditionedSequential(nn.Module):
+    """Sequential graph that forwards live control into TCN blocks."""
+
+    def __init__(self, modules: list[nn.Module], cond_dim: int) -> None:
+        """Store ordered modules and the conditioning width."""
+        super().__init__()
+        self.layers = nn.ModuleList(modules)
+        self.cond_dim = max(1, int(cond_dim))
+
+    def forward(self, samples: torch.Tensor, cond: torch.Tensor | None = None) -> torch.Tensor:
+        """Run each layer, passing ``cond`` into steerable TCN modules."""
+        if cond is None:
+            cond = torch.zeros(
+                samples.shape[0],
+                self.cond_dim,
+                1,
+                device=samples.device,
+                dtype=samples.dtype,
+            )
+        value = samples
+        for layer in self.layers:
+            if isinstance(layer, SteerableTCN):
+                value = layer(value, cond)
+            else:
+                value = layer(value)
+        return value
 
 
 def _activation(index: int) -> nn.Module:
@@ -162,6 +333,7 @@ def _activation(index: int) -> nn.Module:
         ZeroPreservingSigmoid(),
         nn.Tanh(),
         nn.LeakyReLU(0.01),
+        nn.PReLU(),
     )
     if index < 0 or index >= len(activations):
         raise ValueError(f"unsupported activation index {index}")
@@ -210,16 +382,24 @@ def _topological_elements(fragment: dict[str, Any]) -> list[dict[str, Any]]:
     return ordered
 
 
-def build_module(fragment: dict[str, Any], input_channels: int = 1) -> nn.Module:
-    """Construct a module for a fragment with the specified input channels."""
+def build_module(
+    fragment: dict[str, Any], input_channels: int = 1, cond_dim: int = 0
+) -> nn.Module:
+    """Construct a module for a fragment with the specified input channels.
+
+    When ``cond_dim`` is positive, TCN elements keep a live Control pin: the
+    returned module is ``(audio, cond)`` so Knob/XY still steer after freeze.
+    """
     modules: list[nn.Module] = []
     channels = input_channels
+    cond_dim = max(0, int(cond_dim))
+    has_conditioned_tcn = False
     for element in _topological_elements(fragment):
         element_type = str(element["type"])
         properties = _properties(element)
         seed = int(element.get("seed", 42))
 
-        if element_type in {"audio_input", "audio_output"}:
+        if element_type in {"audio_input", "audio_output", "knob_input", "xy_trackpad"}:
             continue
         if element_type == "activation":
             modules.append(_activation(properties.get("activation", 0)))
@@ -241,22 +421,39 @@ def build_module(fragment: dict[str, Any], input_channels: int = 1) -> nn.Module
             modules.append(module)
             channels = output_channels
         elif element_type == "tcn":
-            module = ResidualTCN(
+            hidden = properties.get("channels", channels)
+            depth = properties.get("depth", 1)
+            kernel_size = properties.get("kernel_size", 3)
+            dilation = properties.get("dilation", 1)
+            growth = properties.get("dilation_growth", 2)
+            activation = properties.get("activation", 0)
+            residual = bool(properties.get("residual", 0))
+            module = SteerableTCN(
                 channels,
-                properties.get("channels", channels),
-                properties.get("depth", 1),
-                properties.get("kernel_size", 3),
-                properties.get("dilation", 1),
-                properties.get("activation", 0),
+                hidden,
+                channels,
+                depth,
+                kernel_size,
+                dilation,
+                growth,
+                activation,
+                residual,
+                cond_dim,
             )
-            _assign_deterministic_weights(module, seed)
+            _assign_tcn_weights(module, seed)
             modules.append(module)
+            if cond_dim > 0:
+                has_conditioned_tcn = True
         elif element_type in {"merge", "sum", "multiply"}:
             raise ValueError(
                 "mixer elements cannot be frozen by the linear freeze worker"
             )
 
-    return nn.Sequential(*modules) if modules else nn.Identity()
+    if not modules:
+        return nn.Identity()
+    if has_conditioned_tcn:
+        return ConditionedSequential(modules, cond_dim)
+    return nn.Sequential(*modules)
 
 
 def _receptive_field(module: nn.Module) -> int:
@@ -284,22 +481,35 @@ def compile_request(request: dict[str, Any], artifact_dir: Path) -> dict[str, An
         raise ValueError("invalid freeze example block size")
 
     started = time.perf_counter()
-    module = build_module(request["graph_fragment"], input_channels).eval()
+    cond_dim = max(0, int(options.get("cond_dim", 0)))
+    if not bool(options.get("conditioning", cond_dim > 0)):
+        cond_dim = 0
+    module = build_module(request["graph_fragment"], input_channels, cond_dim).eval()
     receptive_field = _receptive_field(module)
     example = torch.zeros(1, input_channels, example_samples)
+    conditioned = isinstance(module, ConditionedSequential)
     with torch.inference_mode():
-        scripted = torch.jit.trace(module, example, strict=True)
-        scripted = torch.jit.freeze(scripted)
-        output = scripted(example)
+        if conditioned:
+            example_c = torch.zeros(1, max(1, cond_dim), example_samples)
+            scripted = torch.jit.trace(module, (example, example_c), strict=False)
+            scripted = torch.jit.freeze(scripted)
+            output = scripted(example, example_c)
+        else:
+            scripted = torch.jit.trace(module, example, strict=True)
+            scripted = torch.jit.freeze(scripted)
+            output = scripted(example)
         if output.dim() != 3 or output.size(1) != output_channels:
             raise ValueError(
                 "compiled artifact output channels do not match the host configuration"
             )
         for _ in range(2):
-            output = scripted(example)
+            output = scripted(example, example_c) if conditioned else scripted(example)
         latency_started = time.perf_counter()
         for _ in range(8):
-            scripted(example)
+            if conditioned:
+                scripted(example, example_c)
+            else:
+                scripted(example)
         latency_ms = (time.perf_counter() - latency_started) * 1000.0 / 8.0
 
     artifact_dir.mkdir(parents=True, exist_ok=True)
@@ -320,6 +530,8 @@ def compile_request(request: dict[str, Any], artifact_dir: Path) -> dict[str, An
                 "output_channels": output_channels,
             },
             "receptive_field_samples": receptive_field,
+            "conditioning": conditioned,
+            "cond_dim": int(cond_dim) if conditioned else 0,
             "baseline_metrics": {
                 "compile_time_ms": compile_ms,
                 "estimated_latency_ms": latency_ms,

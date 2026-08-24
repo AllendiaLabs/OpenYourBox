@@ -4,7 +4,7 @@
 
 **Input**: Feature specification from `specs/004-steerable-discovery-training/spec.md`
 
-**Status**: Design + tasks complete. Ready for `/speckit-implement`.
+**Status**: Design + tasks complete. Path conventions verified against `OpenYourBox/Source/` (`graph/`, `dsp/`, `freeze/`, `train/`, `capture/`, `library/`, `ui/`) and `Backend/` / `Tests/`. Ready for `/speckit-implement`.
 
 Next: `/speckit-implement` (or begin Phase 1 tasks in `tasks.md`).
 

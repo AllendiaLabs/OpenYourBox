@@ -15,3 +15,6 @@
 - [ ] Find good compressor DDSP to add too.
 - [ ] Implement element set for RAVE.
 - [ ] Implement element set for MRT2.
+- [ ] add positional encoding
+- [ ] add diffusion process? (IRCAM AFTER?)
+

@@ -30,6 +30,22 @@ enum class MergeMode : int { add = 0, multiply = 1, concatenate = 2 };
 /** @brief Distinguishes tensor audio paths from scalar conditioning paths. */
 enum class SignalKind { audio, conditioning };
 
+/** @brief Provenance shown by the Weights property on weight-bearing nodes. */
+enum class WeightsProvenance {
+  /** @brief Weights were drawn from a randomization seed. */
+  random,
+  /** @brief Weights were loaded from a trained or browsed file. */
+  file
+};
+
+/** @brief How a Gold BlackBox was produced. */
+enum class BlackBoxOrigin {
+  /** @brief Manual Freeze Selection. */
+  manualFreeze,
+  /** @brief Successful Train auto-load. */
+  trainAutoload
+};
+
 /** @brief Per-element analysis plot family requested by the editor. */
 enum class AnalysisView {
   transfer = 0,
@@ -69,6 +85,71 @@ inline bool isFixedIoType(NodeType type) noexcept {
 /** @brief Returns true for Knob Input and XY Trackpad source elements. */
 inline bool isConditioningSourceType(NodeType type) noexcept {
   return type == NodeType::knobInput || type == NodeType::xyTrackpad;
+}
+
+/** @brief Returns true for nodes that never participate in train arm/absorb. */
+inline bool isControlSourceType(NodeType type) noexcept {
+  return isFixedIoType(type) || isConditioningSourceType(type);
+}
+
+/** @brief Returns true for live elements that own trainable parameters. */
+inline bool isTrainableType(NodeType type) noexcept {
+  return type == NodeType::linear || type == NodeType::convolution ||
+         type == NodeType::tcn || type == NodeType::activation ||
+         type == NodeType::blackBox;
+}
+
+/** @brief Default TCN dilation growth (RONN/WaveNet-like 2^n). */
+inline constexpr int defaultDilationGrowth = 2;
+/** @brief Inclusive lower bound for TCN dilation growth. */
+inline constexpr int minimumDilationGrowth = 1;
+/** @brief Inclusive upper bound for TCN dilation growth. */
+inline constexpr int maximumDilationGrowth = 16;
+/** @brief Default Train optimization steps (steerable NAfx recipe). */
+inline constexpr int defaultTrainSteps = 2500;
+/** @brief Default RF-aware train crop length in samples. */
+inline constexpr int defaultTrainSegmentLength = 228308;
+/** @brief Default Adam learning rate before the 80%/95% schedule. */
+inline constexpr float defaultTrainLearningRate = 1.0e-3f;
+/** @brief Default interval between hear-while-training checkpoint exports. */
+inline constexpr int defaultTrainCheckpointInterval = 50;
+/** @brief Default MLflow experiment name for Train logging. */
+inline constexpr const char *defaultMlflowExperiment = "openyourbox";
+/** @brief Default MLflow tracking server origin for Train logging. */
+inline constexpr const char *defaultMlflowTrackingUri = "http://127.0.0.1:5000";
+
+/**
+ * @brief Computes integer G^n without overflowing `int`.
+ * @param growth Dilation growth G ≥ 1.
+ * @param layer Zero-based layer index n.
+ * @return Saturated `growth^layer`.
+ */
+inline int dilationGrowthPower(int growth, int layer) noexcept {
+  if (layer <= 0)
+    return 1;
+  const auto g = std::max(1, growth);
+  long long value = 1;
+  for (int index = 0; index < layer; ++index) {
+    if (value > static_cast<long long>(std::numeric_limits<int>::max()) / g)
+      return std::numeric_limits<int>::max();
+    value *= g;
+  }
+  return static_cast<int>(value);
+}
+
+/**
+ * @brief Returns the per-layer dilation G^n scaled by an optional base.
+ * @param growth Dilation growth G.
+ * @param layer Zero-based layer index.
+ * @param base Optional base dilation (legacy `dilation` property, default 1).
+ * @return Saturated layer dilation.
+ */
+inline int tcnLayerDilation(int growth, int layer, int base = 1) noexcept {
+  const auto power = dilationGrowthPower(growth, layer);
+  const auto scale = std::max(1, base);
+  if (power > std::numeric_limits<int>::max() / scale)
+    return std::numeric_limits<int>::max();
+  return power * scale;
 }
 
 /**
@@ -115,6 +196,9 @@ struct ShapeSignature {
   }
 };
 
+/** @brief User-visible label of the TCN/BlackBox control (former FiLM) pin. */
+inline constexpr const char *controlPinLabel = "control";
+
 /** @brief A stable endpoint belonging to one graph node. */
 struct Pin {
   /** @brief Stable graph-wide endpoint identifier. */
@@ -128,6 +212,16 @@ struct Pin {
   /** @brief Whether this pin carries audio or scalar conditioning. */
   SignalKind signalKind = SignalKind::audio;
 };
+
+/**
+ * @brief Returns true for the TCN/BlackBox control input (accepts any signal).
+ * @param pin Endpoint to inspect.
+ */
+inline bool isControlInputPin(const Pin &pin) noexcept {
+  return pin.kind == PinKind::input &&
+         (pin.signalKind == SignalKind::conditioning || pin.label == "film" ||
+          pin.label == controlPinLabel);
+}
 
 /** @brief Value type accepted by an inline graph property. */
 enum class PropertyKind { integer, choice, readOnly, real };
@@ -220,6 +314,22 @@ struct GraphNode {
   float conditioningX = 0.0f;
   /** @brief Current XY Trackpad Y conditioning scalar. */
   float conditioningY = 0.0f;
+  /**
+   * @brief Whether this trainable node is included in the next train snapshot.
+   *
+   * Default true on nodes with trainable parameters. Control sources ignore this.
+   */
+  bool armedForTraining = true;
+  /** @brief Whether TCN blocks use a residual path. */
+  bool residual = false;
+  /** @brief TCN dilation growth G so layer n uses dilation G^n. */
+  int dilationGrowth = defaultDilationGrowth;
+  /** @brief Whether Weights currently shows a seed or a file path. */
+  WeightsProvenance weightsProvenance = WeightsProvenance::random;
+  /** @brief Filesystem path of trained or browsed weights when provenance is file. */
+  std::string weightsPath;
+  /** @brief How a Gold BlackBox was produced. */
+  BlackBoxOrigin blackBoxOrigin = BlackBoxOrigin::manualFreeze;
 };
 
 /** @brief Directed connection between two graph pins. */
@@ -278,6 +388,52 @@ struct FreezeSelectionResult {
   int outputChannels = 0;
   /** @brief Causal receptive field required for continuous block processing. */
   std::uint64_t receptiveFieldSamples = 1;
+  /** @brief True when the frozen module accepts a live Control tensor. */
+  bool acceptsConditioning = false;
+  /** @brief FiLM control width the artifact was traced with, or 0 if unused. */
+  int condDim = 0;
+};
+
+/** @brief Serializable train job sent to the Python train worker. */
+struct TrainJobRequest {
+  /** @brief Unique request identifier used for response correlation. */
+  std::string requestId;
+  /** @brief JSON envelope consumed by `train_worker.py`. */
+  std::string graphFragment;
+  /** @brief Armed trainable node identifiers captured at Run. */
+  std::vector<std::int32_t> armedNodeIds;
+};
+
+/** @brief Progress or completion snapshot produced by a train worker. */
+struct TrainJobResult {
+  /** @brief Request identifier echoed by the worker. */
+  std::string requestId;
+  /** @brief Latest status string (`running`, `paused`, `success`, ...). */
+  std::string status;
+  /** @brief Current optimization step. */
+  int step = 0;
+  /** @brief Configured total steps. */
+  int totalSteps = 2500;
+  /** @brief Latest scalar loss. */
+  double loss = 0.0;
+  /** @brief Lowest loss observed while the job was running. */
+  double bestLoss = 0.0;
+  /** @brief Current learning rate. */
+  double learningRate = 1.0e-3;
+  /** @brief Absolute trained TorchScript path on success. */
+  std::string artifactPath;
+  /** @brief User-facing failure or stop message. */
+  std::string errorMessage;
+  /** @brief Exact input channel count accepted by the artifact. */
+  int inputChannels = 0;
+  /** @brief Exact output channel count produced by the artifact. */
+  int outputChannels = 0;
+  /** @brief Causal receptive field of the trained model. */
+  std::uint64_t receptiveFieldSamples = 1;
+  /** @brief True when the trained module accepts a conditioning tensor. */
+  bool acceptsConditioning = false;
+  /** @brief FiLM control width the artifact was traced with, or 0 if unknown. */
+  int condDim = 0;
 };
 
 /** @brief Inclusive lower bound for element randomization seeds. */

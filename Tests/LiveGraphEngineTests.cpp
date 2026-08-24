@@ -1,9 +1,12 @@
 #include "dsp/LiveGraphEngine.h"
+#include "library/TrainingLibrary.h"
+#include "library/UserDataPaths.h"
 
 #include <torch/torch.h>
 
 #include <cmath>
 #include <iostream>
+#include <memory>
 
 namespace {
 /**
@@ -58,6 +61,52 @@ public:
 };
 
 /**
+ * @class TestConditioningKernel
+ * @brief Frozen executor that scales audio by the live Control value.
+ */
+class TestConditioningKernel final : public openyourbox::dsp::FrozenBlackBoxKernel {
+public:
+  /** @brief Returns the audio unchanged when Control is absent. */
+  torch::Tensor forward(const torch::Tensor &input) override { return input; }
+
+  /**
+   * @brief Scales audio by the last Control sample.
+   * @param input Current audio block, possibly history-extended.
+   * @param conditioning Live Knob/XY trajectory, or undefined.
+   */
+  torch::Tensor forwardWithConditioning(
+      const torch::Tensor &input, const torch::Tensor &conditioning) override {
+    if (!conditioning.defined() || conditioning.dim() != 3 ||
+        conditioning.size(2) < 1)
+      return input;
+    return input * conditioning[0][0][conditioning.size(2) - 1];
+  }
+};
+
+/**
+ * @class TestConditioningFactory
+ * @brief Frozen factory used to verify Control still reaches a Gold node.
+ */
+class TestConditioningFactory final : public openyourbox::dsp::FrozenBlackBoxFactory {
+public:
+  /** @brief Returns the stereo test input width. */
+  int getInputChannels() const noexcept override { return 2; }
+  /** @brief Returns the stereo test output width. */
+  int getOutputChannels() const noexcept override { return 2; }
+  /** @brief Returns a single-sample receptive field. */
+  std::uint64_t getReceptiveField() const noexcept override { return 1; }
+  /** @brief Reports that the test kernel owns no trainable parameters. */
+  std::uint64_t getParameterCount() const noexcept override { return 0; }
+  /** @brief FiLM Control injects bias, so silence is not preserved. */
+  bool preservesSilence() const noexcept override { return false; }
+  /** @brief Creates one runtime-local Control-aware test kernel. */
+  std::unique_ptr<openyourbox::dsp::FrozenBlackBoxKernel>
+  createKernel() const override {
+    return std::make_unique<TestConditioningKernel>();
+  }
+};
+
+/**
  * @brief Builds a valid stereo Conv1D graph for runtime tests.
  * @param firstConvolution Receives the first weighted node identifier.
  * @param secondConvolution Receives the second weighted node identifier.
@@ -88,6 +137,206 @@ openyourbox::graph::NodeGraph makeGraph(std::int32_t &firstConvolution,
                   outputNode->inputs.front().id);
   }
   return graph;
+}
+
+/**
+ * @brief Checks that an unused XY axis does not change TCN control.
+ * @param yAxis When true only Y is cabled; otherwise only X is cabled.
+ * @param options Host compile options used by the surrounding tests.
+ * @return True when the unused axis is ignored and the used axis still modulates.
+ */
+bool unusedXyAxisDoesNotModulateTcn(
+    bool yAxis, const openyourbox::dsp::LiveGraphCompileOptions &options) {
+  using namespace openyourbox::dsp;
+  using namespace openyourbox::graph;
+  NodeGraph graph;
+  const auto input = graph.addNode(NodeType::audioInput, {0.0f, 0.0f});
+  const auto pad = graph.addNode(NodeType::xyTrackpad, {0.0f, 80.0f});
+  const auto tcn = graph.addNode(NodeType::tcn, {180.0f, 0.0f});
+  const auto output = graph.addNode(NodeType::audioOutput, {360.0f, 0.0f});
+  graph.setSeed(tcn, 23);
+  const auto *tcnNode = graph.findNode(tcn);
+  const auto *padNode = graph.findNode(pad);
+  if (tcnNode == nullptr || padNode == nullptr || padNode->outputs.size() < 2)
+    return false;
+  if (!graph
+           .connect(graph.findNode(input)->outputs.front().id,
+                    tcnNode->inputs.front().id)
+           .accepted)
+    return false;
+  const auto sourcePin =
+      yAxis ? padNode->outputs[1].id : padNode->outputs[0].id;
+  if (!graph.connect(sourcePin, tcnNode->inputs[1].id).accepted)
+    return false;
+  if (!graph
+           .connect(tcnNode->outputs.front().id,
+                    graph.findNode(output)->inputs.front().id)
+           .accepted)
+    return false;
+
+  const auto compiled = LiveGraphEngine::compile(graph, options);
+  if (!compiled.succeeded())
+    return false;
+
+  auto processAt = [&](float x, float y) -> torch::Tensor {
+    graph.setConditioningPad(pad, x, y);
+    LiveGraphCompileError prepareError;
+    const auto runtime = LiveGraphEngine::prepare(compiled.snapshot, prepareError);
+    if (runtime == nullptr)
+      return {};
+    runtime->bindControls(std::make_shared<const RuntimeControlState>(
+        collectRuntimeControlState(graph)));
+    return runtime->processTensor(torch::ones({1, 2, 32}, torch::kFloat32));
+  };
+
+  const auto baseline = processAt(0.35f, 0.15f);
+  const auto unusedChanged =
+      yAxis ? processAt(0.95f, 0.15f) : processAt(0.35f, 0.95f);
+  const auto usedChanged =
+      yAxis ? processAt(0.35f, 0.85f) : processAt(0.85f, 0.15f);
+  return baseline.defined() && unusedChanged.defined() &&
+         usedChanged.defined() &&
+         torch::allclose(baseline, unusedChanged, 1.0e-6, 1.0e-6) &&
+         !torch::allclose(baseline, usedChanged, 1.0e-5, 1.0e-5);
+}
+
+/**
+ * @brief Checks that concatenated XY controls TCN as `[x, y]`, not `x+y`.
+ * @param options Host compile options used by the surrounding tests.
+ * @return True when `(1,0)` and `(0,1)` produce different TCN outputs.
+ */
+bool concatenatedXyControlsTcnAsVector(
+    const openyourbox::dsp::LiveGraphCompileOptions &options) {
+  using namespace openyourbox::dsp;
+  using namespace openyourbox::graph;
+  NodeGraph graph;
+  const auto input = graph.addNode(NodeType::audioInput, {0.0f, 0.0f});
+  const auto pad = graph.addNode(NodeType::xyTrackpad, {0.0f, 80.0f});
+  const auto merge = graph.addNode(NodeType::merge, {180.0f, 80.0f});
+  const auto tcn = graph.addNode(NodeType::tcn, {360.0f, 0.0f});
+  const auto output = graph.addNode(NodeType::audioOutput, {540.0f, 0.0f});
+  graph.setSeed(tcn, 23);
+  graph.setProperty(merge, "mode", static_cast<int>(MergeMode::concatenate));
+  const auto *tcnNode = graph.findNode(tcn);
+  const auto *padNode = graph.findNode(pad);
+  const auto *mergeNode = graph.findNode(merge);
+  if (tcnNode == nullptr || padNode == nullptr || mergeNode == nullptr ||
+      padNode->outputs.size() < 2 || mergeNode->inputs.size() < 2 ||
+      tcnNode->inputs.size() < 2)
+    return false;
+  if (!graph
+           .connect(graph.findNode(input)->outputs.front().id,
+                    tcnNode->inputs.front().id)
+           .accepted)
+    return false;
+  if (!graph.connect(padNode->outputs[0].id, mergeNode->inputs[0].id).accepted)
+    return false;
+  if (!graph.connect(padNode->outputs[1].id, mergeNode->inputs[1].id).accepted)
+    return false;
+  if (!graph.connect(mergeNode->outputs.front().id, tcnNode->inputs[1].id)
+           .accepted)
+    return false;
+  if (!graph
+           .connect(tcnNode->outputs.front().id,
+                    graph.findNode(output)->inputs.front().id)
+           .accepted)
+    return false;
+
+  LiveGraphCompileOptions local = options;
+  local.controlRampSeconds = 0.0;
+  const auto compiled = LiveGraphEngine::compile(graph, local);
+  if (!compiled.succeeded())
+    return false;
+
+  auto processAt = [&](float x, float y) -> torch::Tensor {
+    graph.setConditioningPad(pad, x, y);
+    LiveGraphCompileError prepareError;
+    const auto runtime = LiveGraphEngine::prepare(compiled.snapshot, prepareError);
+    if (runtime == nullptr)
+      return {};
+    runtime->bindControls(std::make_shared<const RuntimeControlState>(
+        collectRuntimeControlState(graph)));
+    return runtime->processTensor(torch::ones({1, 2, 32}, torch::kFloat32));
+  };
+
+  const auto xOnly = processAt(1.0f, 0.0f);
+  const auto yOnly = processAt(0.0f, 1.0f);
+  return xOnly.defined() && yOnly.defined() &&
+         !torch::allclose(xOnly, yOnly, 1.0e-5, 1.0e-5);
+}
+
+/**
+ * @brief Checks that FiLM control history is causal across audio blocks.
+ *
+ * Splitting a ramping Knob across two buffers must match one long buffer.
+ * Repeating the first sample of each block over the TCN RF would diverge.
+ *
+ * @param options Host compile options used by the surrounding tests.
+ * @return True when streamed blocks match the long-block reference.
+ */
+bool filmControlHistoryIsCausalAcrossBlocks(
+    const openyourbox::dsp::LiveGraphCompileOptions &options) {
+  using namespace openyourbox::dsp;
+  using namespace openyourbox::graph;
+  NodeGraph graph;
+  const auto input = graph.addNode(NodeType::audioInput, {0.0f, 0.0f});
+  const auto knob = graph.addNode(NodeType::knobInput, {0.0f, 80.0f});
+  const auto tcn = graph.addNode(NodeType::tcn, {180.0f, 0.0f});
+  const auto output = graph.addNode(NodeType::audioOutput, {360.0f, 0.0f});
+  graph.setSeed(tcn, 23);
+  graph.setProperty(tcn, "depth", 2);
+  graph.setProperty(tcn, "kernel_size", 3);
+  graph.setProperty(tcn, "channels", 8);
+  const auto *tcnNode = graph.findNode(tcn);
+  if (tcnNode == nullptr || tcnNode->inputs.size() < 2)
+    return false;
+  if (!graph
+           .connect(graph.findNode(input)->outputs.front().id,
+                    tcnNode->inputs.front().id)
+           .accepted)
+    return false;
+  if (!graph.connect(graph.findNode(knob)->outputs.front().id,
+                     tcnNode->inputs[1].id)
+           .accepted)
+    return false;
+  if (!graph
+           .connect(tcnNode->outputs.front().id,
+                    graph.findNode(output)->inputs.front().id)
+           .accepted)
+    return false;
+
+  LiveGraphCompileOptions local = options;
+  local.sampleRate = 48000.0;
+  local.controlRampSeconds = 0.001;
+  const auto compiled = LiveGraphEngine::compile(graph, local);
+  if (!compiled.succeeded())
+    return false;
+
+  RuntimeControlState controls;
+  controls.conditioningByNodeId[knob] = {1.0f, 0.0f};
+
+  LiveGraphCompileError streamedError;
+  const auto streamed = LiveGraphEngine::prepare(compiled.snapshot, streamedError);
+  if (streamed == nullptr)
+    return false;
+  streamed->bindControls(
+      std::make_shared<const RuntimeControlState>(controls));
+  auto first = streamed->processTensor(torch::ones({1, 2, 16}, torch::kFloat32));
+  auto second =
+      streamed->processTensor(torch::ones({1, 2, 16}, torch::kFloat32));
+
+  LiveGraphCompileError longError;
+  const auto combined = LiveGraphEngine::prepare(compiled.snapshot, longError);
+  if (combined == nullptr)
+    return false;
+  combined->bindControls(
+      std::make_shared<const RuntimeControlState>(controls));
+  auto reference =
+      combined->processTensor(torch::ones({1, 2, 32}, torch::kFloat32));
+  if (!first.defined() || !second.defined() || !reference.defined())
+    return false;
+  const auto streamedOut = torch::cat({first, second}, 2);
+  return torch::allclose(streamedOut, reference, 1.0e-4, 1.0e-4);
 }
 } // namespace
 
@@ -125,6 +374,11 @@ int main() {
   const auto silentOutput = runtime->processTensor(silence);
   passed &= expect(silentOutput.abs().max().item<float>() == 0.0f,
                    "bias-free live graph must preserve digital silence");
+  const auto excited = runtime->processTensor(torch::ones({1, 2, 128}, torch::kFloat32));
+  const auto tail = runtime->processTensor(silence);
+  passed &= expect(excited.defined() && tail.defined() &&
+                       tail.abs().max().item<float>() > 1.0e-6f,
+                   "causal history must keep sounding into following silence");
 
   openyourbox::graph::NodeGraph linearGraph;
   const auto linearInput = linearGraph.addNode(
@@ -216,6 +470,68 @@ int main() {
   passed &= expect(
       splitRuntime->getFrozenInferenceTimeMilliseconds(frozenNode) > 0.0,
       "frozen runtime must publish a live per-buffer inference duration");
+
+  openyourbox::graph::NodeGraph frozenControlGraph;
+  const auto frozenControlInput = frozenControlGraph.addNode(
+      openyourbox::graph::NodeType::audioInput, {0.0f, 0.0f});
+  const auto frozenControlKnob = frozenControlGraph.addNode(
+      openyourbox::graph::NodeType::knobInput, {0.0f, 80.0f});
+  const auto frozenControlBox = frozenControlGraph.addNode(
+      openyourbox::graph::NodeType::blackBox, {180.0f, 0.0f});
+  const auto frozenControlOutput = frozenControlGraph.addNode(
+      openyourbox::graph::NodeType::audioOutput, {360.0f, 0.0f});
+  frozenControlGraph.findNode(frozenControlBox)->artifactPath =
+      "test-conditioned-frozen-artifact";
+  frozenControlGraph.setConditioningValue(frozenControlKnob, 2.0f);
+  passed &= expect(
+      frozenControlGraph
+          .connect(frozenControlGraph.findNode(frozenControlInput)
+                       ->outputs.front()
+                       .id,
+                   frozenControlGraph.findNode(frozenControlBox)
+                       ->inputs.front()
+                       .id)
+          .accepted &&
+          frozenControlGraph
+              .connect(frozenControlGraph.findNode(frozenControlKnob)
+                           ->outputs.front()
+                           .id,
+                       frozenControlGraph.findNode(frozenControlBox)->inputs[1].id)
+              .accepted &&
+          frozenControlGraph
+              .connect(frozenControlGraph.findNode(frozenControlBox)
+                           ->outputs.front()
+                           .id,
+                       frozenControlGraph.findNode(frozenControlOutput)
+                           ->inputs.front()
+                           .id)
+              .accepted,
+      "frozen BlackBox Control pin must accept Knob");
+  const auto conditionedFactory = std::make_shared<TestConditioningFactory>();
+  LiveGraphCompileOptions freezeControlOptions = options;
+  freezeControlOptions.controlRampSeconds = 0.0;
+  const auto frozenControlCompiled = LiveGraphEngine::compile(
+      frozenControlGraph, freezeControlOptions,
+      [conditionedFactory](const openyourbox::graph::GraphNode &) {
+        return conditionedFactory;
+      });
+  LiveGraphCompileError freezeControlError;
+  const auto frozenControlRuntime = LiveGraphEngine::prepare(
+      frozenControlCompiled.snapshot, freezeControlError);
+  passed &= expect(frozenControlCompiled.succeeded() &&
+                       frozenControlRuntime != nullptr,
+                   "frozen BlackBox with Control must compile and prepare");
+  if (frozenControlRuntime != nullptr) {
+    frozenControlRuntime->bindControls(
+        std::make_shared<const RuntimeControlState>(
+            collectRuntimeControlState(frozenControlGraph)));
+    const auto scaled = frozenControlRuntime->processTensor(
+        torch::ones({1, 2, 8}, torch::kFloat32));
+    passed &= expect(
+        scaled.defined() &&
+            std::abs(scaled[0][0][0].item<float>() - 2.0f) < 1.0e-4f,
+        "frozen Gold node must still be steered by live Knob Control");
+  }
 
   const auto invalidRandomization =
       compiled.snapshot->withRandomizedElement(999999, 1, error);
@@ -617,6 +933,52 @@ int main() {
                      "concatenated XY must scale stereo audio per channel");
   }
 
+  passed &= expect(unusedXyAxisDoesNotModulateTcn(false, options),
+                   "unused XY Y must not change TCN control when only X is cabled");
+  passed &= expect(unusedXyAxisDoesNotModulateTcn(true, options),
+                   "unused XY X must not change TCN control when only Y is cabled");
+  passed &= expect(
+      concatenatedXyControlsTcnAsVector(options),
+      "XY concatenate into TCN control must keep independent X and Y");
+  passed &= expect(
+      filmControlHistoryIsCausalAcrossBlocks(options),
+      "FiLM control history must match a long block when Knob ramps across buffers");
+
+  {
+    openyourbox::graph::NodeGraph freezeGraph;
+    const auto freezeIn = freezeGraph.addNode(
+        openyourbox::graph::NodeType::audioInput, {0.0f, 0.0f});
+    const auto freezeKnob = freezeGraph.addNode(
+        openyourbox::graph::NodeType::knobInput, {0.0f, 80.0f});
+    const auto freezeTcn =
+        freezeGraph.addNode(openyourbox::graph::NodeType::tcn, {180.0f, 0.0f});
+    const auto freezeOut = freezeGraph.addNode(
+        openyourbox::graph::NodeType::audioOutput, {360.0f, 0.0f});
+    freezeGraph.connect(freezeGraph.findNode(freezeIn)->outputs.front().id,
+                        freezeGraph.findNode(freezeTcn)->inputs.front().id);
+    freezeGraph.connect(freezeGraph.findNode(freezeKnob)->outputs.front().id,
+                        freezeGraph.findNode(freezeTcn)->inputs[1].id);
+    freezeGraph.connect(freezeGraph.findNode(freezeTcn)->outputs.front().id,
+                        freezeGraph.findNode(freezeOut)->inputs.front().id);
+    const auto freezeRequest = freezeGraph.createFreezeRequest({freezeTcn});
+    passed &= expect(freezeRequest.has_value(),
+                     "TCN with Knob Control must be freezable");
+    if (freezeRequest.has_value()) {
+      const auto payload =
+          juce::JSON::parse(juce::String(freezeRequest->graphFragment));
+      const auto *root = payload.getDynamicObject();
+      const auto *compileOptions =
+          root != nullptr
+              ? root->getProperty("compile_options").getDynamicObject()
+              : nullptr;
+      passed &= expect(
+          compileOptions != nullptr &&
+              static_cast<bool>(compileOptions->getProperty("conditioning")) &&
+              static_cast<int>(compileOptions->getProperty("cond_dim")) == 1,
+          "freeze request must keep Control width so Knob/XY still steer");
+    }
+  }
+
   openyourbox::graph::NodeGraph rampGraph;
   const auto rampInput =
       rampGraph.addNode(openyourbox::graph::NodeType::audioInput, {0.0f, 0.0f});
@@ -676,9 +1038,169 @@ int main() {
         ramped.defined() && ramped.size(2) == 64 &&
             ramped[0][0][0].item<float>() < ramped[0][0][32].item<float>() &&
             ramped[0][0][32].item<float>() < ramped[0][0][63].item<float>() &&
-            std::abs(ramped[0][0][63].item<float>() - 2.0f) < 1.0e-4f,
-        "Gain, Knob, and XY must linear-ramp across the block to the target");
+            ramped[0][0][63].item<float>() > 1.5f,
+        "Gain, Knob, and XY must chase the new target across the block");
   }
+
+  openyourbox::graph::NodeGraph growthGraph;
+  const auto growthInput = growthGraph.addNode(
+      openyourbox::graph::NodeType::audioInput, {0.0f, 0.0f});
+  const auto growthTcn = growthGraph.addNode(
+      openyourbox::graph::NodeType::tcn, {180.0f, 0.0f});
+  const auto growthOutput = growthGraph.addNode(
+      openyourbox::graph::NodeType::audioOutput, {360.0f, 0.0f});
+  const auto *growthTcnNode = growthGraph.findNode(growthTcn);
+  passed &= expect(
+      growthTcnNode != nullptr && growthTcnNode->inputs.size() >= 2 &&
+          growthTcnNode->inputs[1].signalKind ==
+              openyourbox::graph::SignalKind::conditioning &&
+          growthTcnNode->inputs[1].label ==
+              openyourbox::graph::controlPinLabel,
+      "TCN must expose a control conditioning pin");
+  passed &= expect(openyourbox::graph::tcnLayerDilation(8, 0) == 1 &&
+                       openyourbox::graph::tcnLayerDilation(8, 1) == 8 &&
+                       openyourbox::graph::tcnLayerDilation(8, 2) == 64,
+                   "dilation growth 8 must produce 1, 8, 64");
+  growthGraph.setProperty(growthTcn, "dilation_growth", 8);
+  growthGraph.setProperty(growthTcn, "residual", 1);
+  growthGraph.setProperty(growthTcn, "activation", 4);
+  passed &=
+      expect(growthGraph
+                 .connect(growthGraph.findNode(growthInput)->outputs.front().id,
+                          growthTcnNode->inputs.front().id)
+                 .accepted,
+             "TCN audio pin must accept host input");
+  passed &= expect(growthGraph.setProperty(growthTcn, "activation", 4),
+                   "PReLU must be a selectable activation index");
+  {
+    int activation = -1;
+    for (const auto &property : growthTcnNode->properties) {
+      if (property.key == "activation")
+        activation = property.value;
+    }
+    passed &= expect(activation == 4, "selecting PReLU must store index 4");
+  }
+  passed &= expect(
+      growthGraph
+          .connect(growthGraph.findNode(growthInput)->outputs.front().id,
+                   growthTcnNode->inputs[1].id)
+          .accepted,
+      "TCN control pin must accept an audio signal of any width");
+  {
+    std::int32_t controlLink = 0;
+    for (const auto &link : growthGraph.getLinks()) {
+      if (link.destinationPinId == growthTcnNode->inputs[1].id)
+        controlLink = link.id;
+    }
+    passed &= expect(controlLink != 0 && growthGraph.removeLink(controlLink),
+                     "temporary audio-to-control cable must be removable");
+  }
+  const auto growthXy = growthGraph.addNode(
+      openyourbox::graph::NodeType::xyTrackpad, {180.0f, 120.0f});
+  passed &= expect(
+      growthGraph
+          .connect(growthGraph.findNode(growthXy)->outputs.front().id,
+                   growthTcnNode->inputs[1].id)
+          .accepted,
+      "TCN control pin must accept XY conditioning");
+  {
+    std::int32_t xyControlLink = 0;
+    for (const auto &link : growthGraph.getLinks()) {
+      if (link.destinationPinId == growthTcnNode->inputs[1].id)
+        xyControlLink = link.id;
+    }
+    const auto inserted = growthGraph.insertNodeOnLink(
+        xyControlLink, openyourbox::graph::NodeType::merge, {180.0f, 80.0f});
+    passed &= expect(inserted.has_value(),
+                     "Merge must insert between XY and the control pin");
+  }
+  passed &= expect(
+      !growthGraph
+           .connect(growthGraph.findNode(growthXy)->outputs.front().id,
+                    growthGraph.findNode(growthOutput)->inputs.front().id)
+           .accepted,
+      "audio input must reject a conditioning cable");
+  passed &= expect(
+      growthGraph
+          .connect(growthGraph.findNode(growthTcn)->outputs.front().id,
+                   growthGraph.findNode(growthOutput)->inputs.front().id)
+          .accepted,
+      "TCN output must connect to host output");
+  const auto growthCompiled = LiveGraphEngine::compile(growthGraph, options);
+  passed &= expect(growthCompiled.succeeded(),
+                   "Control TCN with growth 8, residual, and PReLU must compile");
+
+  openyourbox::graph::NodeGraph trainGraph;
+  const auto trainIn =
+      trainGraph.addNode(openyourbox::graph::NodeType::audioInput, {0.0f, 0.0f});
+  const auto trainTcn =
+      trainGraph.addNode(openyourbox::graph::NodeType::tcn, {180.0f, 0.0f});
+  const auto trainOut = trainGraph.addNode(
+      openyourbox::graph::NodeType::audioOutput, {360.0f, 0.0f});
+  const auto *trainTcnNode = trainGraph.findNode(trainTcn);
+  trainGraph.connect(trainGraph.findNode(trainIn)->outputs.front().id,
+                     trainTcnNode->inputs.front().id);
+  trainGraph.connect(trainTcnNode->outputs.front().id,
+                     trainGraph.findNode(trainOut)->inputs.front().id);
+  const auto linksBefore = static_cast<int>(trainGraph.getLinks().size());
+  const auto nodesBefore = static_cast<int>(trainGraph.getNodes().size());
+  openyourbox::graph::TrainJobResult trainResult;
+  trainResult.artifactPath = "/tmp/openyourbox-test-trained.pt";
+  trainResult.inputChannels = 2;
+  trainResult.outputChannels = 2;
+  trainResult.acceptsConditioning = true;
+  const auto absorbed = trainGraph.absorbArmedChain(trainResult);
+  passed &= expect(absorbed.has_value(),
+                   "train auto-load must replace the armed chain");
+  passed &= expect(trainGraph.unfreeze(*absorbed) &&
+                       static_cast<int>(trainGraph.getNodes().size()) ==
+                           nodesBefore &&
+                       static_cast<int>(trainGraph.getLinks().size()) ==
+                           linksBefore,
+                   "unfreeze must restore trained-chain nodes and cables");
+
+  const auto weightsRoot = openyourbox::library::weightsDirectory();
+  const auto samplesRoot = openyourbox::library::samplesDirectory();
+  passed &= expect(weightsRoot.getFileName() == "Weights" &&
+                       weightsRoot.getParentDirectory().getFileName() ==
+                           "OpenYourBox",
+                   "trained weights must live under OpenYourBox/Weights");
+  passed &= expect(samplesRoot.getFileName() == "Samples" ||
+                       samplesRoot.getFileName() == "TrainingLibrary",
+                   "sample library must live under Samples (or the legacy folder)");
+
+  const auto tempRoot =
+      juce::File::getSpecialLocation(juce::File::tempDirectory)
+          .getChildFile("OpenYourBoxLibraryTest")
+          .getChildFile(juce::Uuid().toDashedString());
+  tempRoot.createDirectory();
+  openyourbox::library::TrainingLibrary library(tempRoot);
+  juce::AudioBuffer<float> tone(1, 512);
+  for (int i = 0; i < 512; ++i)
+    tone.setSample(0, i, 0.1f);
+  juce::WavAudioFormat wav;
+  const auto xFile = tempRoot.getChildFile("x.wav");
+  const auto yFile = tempRoot.getChildFile("y.wav");
+  auto writeTone = [&](const juce::File &file) {
+    auto *stream = file.createOutputStream().release();
+    std::unique_ptr<juce::AudioFormatWriter> writer(
+        wav.createWriterFor(stream, 44100.0, 1, 32, {}, 0));
+    return writer != nullptr && writer->writeFromAudioSampleBuffer(tone, 0, 512);
+  };
+  passed &= expect(writeTone(xFile) && writeTone(yFile),
+                   "library test fixtures must write");
+  juce::String importError;
+  passed &= expect(library.importPair(xFile, yFile, importError).has_value(),
+                   "library import must succeed for aligned files");
+  passed &= expect(library.getSelectedCount() == 1,
+                   "imported pairs are selected for train by default");
+  juce::String mixed;
+  passed &= expect(library.selectedSampleRatesMatch(mixed),
+                   "single selected pair must pass sample-rate gate");
+  library.selectNone();
+  passed &= expect(!library.selectedSampleRatesMatch(mixed),
+                   "empty selection must block Train");
+  tempRoot.deleteRecursively();
 
   if (passed)
     std::cout << "OpenYourBox live graph engine tests passed\n";

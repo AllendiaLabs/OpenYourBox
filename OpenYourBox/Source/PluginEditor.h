@@ -4,9 +4,21 @@
 #include "freeze/FreezeCoordinator.h"
 #include "graph/NodeGraph.h"
 #include "graph/NodeRenderer.h"
+#include "library/CopyrightAcknowledgment.h"
+#include "train/TrainCoordinator.h"
+#include "ui/CaptureSamplesPanel.h"
+#include "ui/CopyrightModal.h"
+#include "ui/ErrorModal.h"
 #include "ui/ImGuiHost.h"
 #include "ui/InfoPanel.h"
+#include "ui/TrainPanel.h"
+#include "ui/TrainingLibraryPanel.h"
 #include <JuceHeader.h>
+
+#include <memory>
+#include <optional>
+#include <string>
+#include <vector>
 
 /**
  * @class OpenYourBoxAudioProcessorEditor
@@ -106,18 +118,79 @@ private:
   /** @brief Applies a completed background freeze result on the message thread.
    */
   void applyCompletedFreeze();
+  /** @brief Applies a completed train job on the message thread. */
+  void applyCompletedTrain();
   /**
-   * @brief Displays transient graph feedback.
+   * @brief Loads a training checkpoint into the live graph when hear-while-training is on.
+   */
+  void pollTrainingPreview();
+  /** @brief Starts a Train job when gates pass. */
+  void handleTrainRun();
+  /** @brief Requests the Library side tab on the next frame. */
+  void focusLibraryTab();
+  /** @brief Imports a file pair chosen via native file choosers. */
+  void handleLibraryImport();
+  /** @brief Opens the clean-file chooser on the message thread. */
+  void promptLibraryImportClean();
+  /** @brief Opens the processed-file chooser on the message thread. */
+  void promptLibraryImportProcessed();
+  /**
+   * @brief Decodes and stores one imported pair off the UI/OpenGL threads.
+   * @param clean Selected x file.
+   * @param processed Selected y file.
+   */
+  void importLibraryPair(const juce::File &clean, const juce::File &processed);
+  /** @brief Opens a native chooser to load compatible weights. */
+  void handleBrowseWeights(std::int32_t nodeId);
+  /**
+   * @brief Displays transient non-error graph feedback.
    * @param message Human-readable status or validation text.
    */
   void showGraphMessage(const std::string &message);
+  /**
+   * @brief Opens the copyable error dialog for a plugin failure.
+   * @param message Human-readable error text.
+   * @param forceReopen True to show even when this text was already dismissed.
+   */
+  void showError(const juce::String &message, bool forceReopen = false);
+  /**
+   * @brief Opens the error dialog when the live graph reports a new failure.
+   */
+  void pollModelError();
 
   OpenYourBoxAudioProcessor &audioProcessor;
-  /** @brief Owns detached worker execution and thread-safe completion state. */
+  /** @brief Owns detached freeze worker execution. */
   openyourbox::freeze::FreezeCoordinator freezeCoordinator;
+  /** @brief Owns detached train worker execution. */
+  openyourbox::train::TrainCoordinator trainCoordinator;
   openyourbox::graph::NodeGraph nodeGraph;
   openyourbox::ui::ImGuiHost imguiHost;
   openyourbox::graph::NodeRenderer nodeRenderer;
+  openyourbox::library::CopyrightAcknowledgment copyrightAcknowledgment;
+  openyourbox::ui::TrainingLibraryPanel libraryPanel;
+  openyourbox::ui::CaptureSamplesPanel capturePanel;
+  openyourbox::ui::TrainPanel trainPanel;
+  openyourbox::ui::CopyrightModal copyrightModal;
+  /** @brief Copyable error dialog for plugin, train, freeze, and model failures. */
+  openyourbox::ui::ErrorModal errorModal;
+  /** @brief Side-panel tab: 0 info, 1 library, 2 capture, 3 train. */
+  int sidePanelTab = 0;
+  /** @brief Tab index to select on the next frame, or -1. */
+  int pendingSidePanelTab = -1;
+  /** @brief True while the copyright modal should be shown. */
+  bool copyrightModalVisible = false;
+  /** @brief Last model/runtime error already presented in the error dialog. */
+  juce::String lastPresentedError;
+  /** @brief Last hear-while-training checkpoint path already applied. */
+  std::string lastTrainPreviewPath;
+  /** @brief Armed node identifiers captured when the current job started. */
+  std::vector<std::int32_t> trainPreviewNodeIds;
+  /** @brief True while an off-thread checkpoint load is in flight. */
+  bool trainPreviewLoadInFlight = false;
+  /** @brief Last successful train result retained for retry-load. */
+  std::optional<openyourbox::graph::TrainJobResult> retryTrainResult;
+  /** @brief Bypass state restored when leaving capture. */
+  bool restoreBypassOnExit = false;
   openyourbox::dsp::TCNConfiguration displayedConfiguration;
   bool graphInitialized = false;
   /** @brief Current transient graph workflow message. */
@@ -142,6 +215,10 @@ private:
   double lastAnalysisTime = 0.0;
   /** @brief True while the Dry/Wet slider is recording a host gesture. */
   bool dryWetGestureActive = false;
+  /** @brief Native file chooser kept alive across async host dialogs. */
+  std::shared_ptr<juce::FileChooser> fileChooser;
+  /** @brief Clean file chosen before the processed-file dialog. */
+  juce::File pendingImportClean;
 
   JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(OpenYourBoxAudioProcessorEditor)
 };

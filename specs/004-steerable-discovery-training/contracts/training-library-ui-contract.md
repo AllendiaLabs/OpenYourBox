@@ -66,3 +66,10 @@ Internal (may surface in detail/inspector): file paths for x/y, byte size, pair 
 - Cloud sync / marketplace sample packs (Phase 4).
 - Editing audio inside the library (trim/fade) in v1 — out of scope; re-capture or external edit + re-import.
 - Slave instance library editing.
+
+## Implementation Anchors
+
+- Store + index persistence: `OpenYourBox/Source/library/TrainingLibrary.h`, `OpenYourBox/Source/library/TrainingLibrary.cpp`
+- Copyright acknowledgment log: `OpenYourBox/Source/library/CopyrightAcknowledgment.h`
+- List+detail ImGui panel: `OpenYourBox/Source/ui/TrainingLibraryPanel.cpp`
+- Editor orchestration (master-only): `OpenYourBox/Source/PluginEditor.cpp`

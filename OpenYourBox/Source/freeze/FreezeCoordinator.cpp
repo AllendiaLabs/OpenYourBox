@@ -243,6 +243,9 @@ void FreezeCoordinator::run() {
   result.receptiveFieldSamples =
       static_cast<std::uint64_t>(static_cast<juce::int64>(
           metadata.getProperty("receptive_field_samples", 0)));
+  result.acceptsConditioning =
+      static_cast<bool>(metadata.getProperty("conditioning", false));
+  result.condDim = static_cast<int>(metadata.getProperty("cond_dim", 0));
 
   std::string preparationError;
   if (result.artifactPath.empty() || prepareArtifact == nullptr ||

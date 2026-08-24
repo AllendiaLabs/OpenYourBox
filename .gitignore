@@ -5,6 +5,9 @@
 __pycache__/
 *.pyc
 
+# mlartifacts
+mlartifacts/
+
 # cursor files
 .cursor/
 
@@ -13,7 +16,10 @@ libtorch/
 
 # env
 .venv/
+venv/
 .env/
+dist/
+*.egg-info/
 
 # ignore files
 .ignore/

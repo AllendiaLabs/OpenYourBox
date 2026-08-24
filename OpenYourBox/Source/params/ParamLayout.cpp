@@ -20,7 +20,7 @@ juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout() {
       juce::AudioParameterIntAttributes().withLabel("samples")));
   layout.add(std::make_unique<juce::AudioParameterChoice>(
       makeID(activation), "Activation",
-      juce::StringArray{"ReLU", "Sigmoid", "Tanh", "LeakyReLU"}, 0));
+      juce::StringArray{"ReLU", "Sigmoid", "Tanh", "LeakyReLU", "PReLU"}, 0));
   layout.add(std::make_unique<juce::AudioParameterBool>(makeID(randomize),
                                                         "Randomize", false));
   layout.add(std::make_unique<juce::AudioParameterInt>(

@@ -121,24 +121,35 @@ juce_add_plugin(OpenYourBox
 juce_generate_juce_header(OpenYourBox)
 
 juce_add_binary_data(OpenYourBoxResources
-    SOURCES Backend/freeze_worker.py)
+    SOURCES Backend/freeze_worker.py Backend/train_worker.py)
 
 target_sources(OpenYourBox PRIVATE
     OpenYourBox/Source/PluginEditor.cpp
     OpenYourBox/Source/PluginProcessor.cpp
+    OpenYourBox/Source/capture/CapturePairing.cpp
+    OpenYourBox/Source/capture/CaptureRecorder.cpp
     OpenYourBox/Source/dsp/LiveGraphEngine.cpp
     OpenYourBox/Source/dsp/LiveGraphPublisher.cpp
     OpenYourBox/Source/dsp/LookbackBuffer.cpp
     OpenYourBox/Source/dsp/TCNModel.cpp
     OpenYourBox/Source/dsp/TorchScriptBlackBox.cpp
+    OpenYourBox/Source/dsp/WeightLoader.cpp
     OpenYourBox/Source/dsp/WeightRandomizer.cpp
     OpenYourBox/Source/freeze/FreezeCoordinator.cpp
     OpenYourBox/Source/graph/NodeGraph.cpp
     OpenYourBox/Source/graph/NodeRenderer.cpp
+    OpenYourBox/Source/library/CopyrightAcknowledgment.cpp
+    OpenYourBox/Source/library/TrainingLibrary.cpp
     OpenYourBox/Source/params/ParamLayout.cpp
+    OpenYourBox/Source/train/TrainCoordinator.cpp
+    OpenYourBox/Source/ui/CaptureSamplesPanel.cpp
+    OpenYourBox/Source/ui/CopyrightModal.cpp
+    OpenYourBox/Source/ui/ErrorModal.cpp
     OpenYourBox/Source/ui/ImGuiHost.cpp
     OpenYourBox/Source/ui/InfoPanel.cpp
-    OpenYourBox/Source/ui/RandomizeButton.cpp)
+    OpenYourBox/Source/ui/RandomizeButton.cpp
+    OpenYourBox/Source/ui/TrainPanel.cpp
+    OpenYourBox/Source/ui/TrainingLibraryPanel.cpp)
 
 target_include_directories(OpenYourBox PRIVATE
     OpenYourBox/Source
@@ -167,6 +178,8 @@ target_link_libraries(OpenYourBox PRIVATE
     juce::juce_recommended_warning_flags)
 
 if(APPLE)
+    target_sources(OpenYourBox PRIVATE
+        OpenYourBox/Source/capture/HostTransport.mm)
     set(OPENYOURBOX_USER_VST3_DIR "$ENV{HOME}/Library/Audio/Plug-Ins/VST3")
     set_target_properties(OpenYourBox PROPERTIES
         XCODE_ATTRIBUTE_CODE_SIGNING_ALLOWED "NO")
@@ -236,4 +249,7 @@ if(BUILD_TESTING)
     add_test(NAME OpenYourBoxFreezeWorker
         COMMAND "${Python3_EXECUTABLE}"
             "${CMAKE_CURRENT_SOURCE_DIR}/Tests/test_freeze_worker.py")
+    add_test(NAME OpenYourBoxTrainWorker
+        COMMAND "${Python3_EXECUTABLE}"
+            "${CMAKE_CURRENT_SOURCE_DIR}/Tests/test_train_worker.py")
 endif()

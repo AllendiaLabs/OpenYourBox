@@ -2,6 +2,8 @@
 
 #include "TCNModel.h"
 
+#include <torch/nn/functional.h>
+
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -72,6 +74,22 @@ struct CompiledElement {
   std::vector<int> inputExtractChannels;
   /** @brief True when the corresponding compiled input is conditioning. */
   std::vector<char> inputIsConditioning;
+  /** @brief TCN dilation growth G (layer n uses base * G^n). */
+  int dilationGrowth = 2;
+  /** @brief Whether TCN blocks add a residual path. */
+  bool residual = false;
+  /** @brief Compiled index of the FiLM source, or -1 when disconnected. */
+  std::int64_t filmInputIndex = -1;
+  /**
+   * @brief Channel extracted from the FiLM source, or -1 for the full tensor.
+   */
+  int filmExtractChannel = -1;
+  /** @brief Control width for per-layer FiLM adaptors, or 0 when unwired. */
+  int condDim = 0;
+  /** @brief Per-layer FiLM Linear weights shaped `[2 * hidden, condDim]`. */
+  std::vector<torch::Tensor> filmWeights;
+  /** @brief Per-layer FiLM Linear biases shaped `[2 * hidden]`. */
+  std::vector<torch::Tensor> filmBiases;
 };
 
 /** @brief Pin ownership and direction used during graph validation. */
@@ -156,28 +174,68 @@ bool readFloatProperty(const openyourbox::graph::GraphNode &node, const char *ke
   return true;
 }
 
+/**
+ * @brief Fills a tensor with signed uniform values scaled by fan-in.
+ * @param tensor Writable CPU float tensor.
+ * @param state SplitMix64 random state.
+ * @param fanIn Denominator used for Xavier-style scaling.
+ */
+void fillRandomized(torch::Tensor tensor, std::uint64_t &state,
+                    std::int64_t fanIn) {
+  auto *data = tensor.data_ptr<float>();
+  const auto count = tensor.numel();
+  const auto scale = static_cast<float>(
+      std::sqrt(6.0 / static_cast<double>(std::max<std::int64_t>(1, fanIn))));
+  for (std::int64_t index = 0; index < count; ++index)
+    data[index] = uniformSigned(state) * scale;
+}
+
 /** @brief Creates one deterministic bias-free convolution weight tensor. */
 torch::Tensor makeWeight(int outputChannels, int inputChannels, int kernelSize,
                          std::uint64_t &state) {
   auto weight = torch::empty(
       {outputChannels, inputChannels, kernelSize},
       torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCPU));
-  auto *data = weight.data_ptr<float>();
-  const auto count = weight.numel();
-  const auto fanIn =
-      std::max<std::int64_t>(1, static_cast<std::int64_t>(inputChannels) *
-                                    static_cast<std::int64_t>(kernelSize));
-  const auto scale =
-      static_cast<float>(std::sqrt(6.0 / static_cast<double>(fanIn)));
-  for (std::int64_t index = 0; index < count; ++index)
-    data[index] = uniformSigned(state) * scale;
+  fillRandomized(weight, state,
+                 static_cast<std::int64_t>(inputChannels) *
+                     static_cast<std::int64_t>(kernelSize));
   return weight;
+}
+
+/**
+ * @brief Creates one deterministic Linear weight tensor `[out, in]`.
+ * @param outputFeatures Output (FiLM adaptor) width.
+ * @param inputFeatures Conditioning width.
+ * @param state SplitMix64 random state.
+ */
+torch::Tensor makeLinearWeight(int outputFeatures, int inputFeatures,
+                               std::uint64_t &state) {
+  auto weight = torch::empty(
+      {outputFeatures, inputFeatures},
+      torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCPU));
+  fillRandomized(weight, state, static_cast<std::int64_t>(inputFeatures));
+  return weight;
+}
+
+/**
+ * @brief Creates one deterministic Linear bias tensor.
+ * @param features Bias width.
+ * @param state SplitMix64 random state.
+ */
+torch::Tensor makeBias(int features, std::uint64_t &state) {
+  auto bias = torch::empty(
+      {features},
+      torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCPU));
+  fillRandomized(bias, state, static_cast<std::int64_t>(features));
+  return bias;
 }
 
 /** @brief Rebuilds all immutable parameters for one weighted element. */
 void randomizeElementWeights(CompiledElement &element, std::int32_t seed) {
   auto state = seedState(seed);
   element.weights.clear();
+  element.filmWeights.clear();
+  element.filmBiases.clear();
 
   switch (element.type) {
   case openyourbox::graph::NodeType::linear:
@@ -198,6 +256,14 @@ void randomizeElementWeights(CompiledElement &element, std::int32_t seed) {
                                            element.kernelSize, state));
     element.weights.push_back(
         makeWeight(element.outputChannels, element.hiddenChannels, 1, state));
+    if (element.condDim > 0) {
+      const auto filmOut = element.hiddenChannels * 2;
+      for (int layer = 0; layer < element.depth; ++layer) {
+        element.filmWeights.push_back(
+            makeLinearWeight(filmOut, element.condDim, state));
+        element.filmBiases.push_back(makeBias(filmOut, state));
+      }
+    }
     break;
   default:
     throw std::invalid_argument("Element does not own randomizable weights");
@@ -220,6 +286,8 @@ torch::Tensor applyActivation(torch::Tensor value,
     return torch::tanh(value);
   case openyourbox::dsp::ActivationType::leakyRelu:
     return torch::leaky_relu(value, 0.01);
+  case openyourbox::dsp::ActivationType::prelu:
+    return torch::prelu(value, torch::full({1}, 0.25f, value.options()));
   }
   return value;
 }
@@ -252,6 +320,48 @@ torch::Tensor extendCausalInput(const torch::Tensor &input,
   return extended;
 }
 
+/**
+ * @brief Prepends retained FiLM control samples so the TCN RF sees the true
+ * trajectory.
+ *
+ * Repeating the first sample of the current block restates the whole receptive
+ * field at buffer rate, which is heard as a TV-like buzz when Knob/XY moves
+ * quickly. The first call after prepare or reset initialises history by
+ * repeating the first frame so a static control has no startup step.
+ *
+ * @param control Current-block control tensor, typically `[1, condDim, T]`.
+ * @param history Mutable causal control prefix of length @p historyLength.
+ * @param historyLength Samples to retain, matching the paired audio RF prefix.
+ * @return Control tensor whose time dimension is `historyLength + T`.
+ */
+torch::Tensor extendCausalControl(const torch::Tensor &control,
+                                  torch::Tensor &history,
+                                  std::int64_t historyLength) {
+  if (!control.defined() || historyLength <= 0)
+    return control;
+  auto timed = control;
+  if (timed.dim() == 1)
+    timed = timed.unsqueeze(0).unsqueeze(-1);
+  else if (timed.dim() == 2)
+    timed = timed.unsqueeze(-1);
+  if (timed.dim() != 3)
+    return control;
+
+  const auto needsInit = !history.defined() || history.dim() != 3 ||
+                         history.size(0) != timed.size(0) ||
+                         history.size(1) != timed.size(1) ||
+                         history.size(2) != historyLength;
+  if (needsInit) {
+    history = timed.narrow(2, 0, 1)
+                  .expand({timed.size(0), timed.size(1), historyLength})
+                  .contiguous();
+  }
+  auto extended = torch::cat({history, timed}, 2);
+  history = extended.narrow(2, extended.size(2) - historyLength, historyLength)
+                .clone();
+  return extended;
+}
+
 /** @brief Returns whether a graph node has the required port layout. */
 bool hasValidPortLayout(const openyourbox::graph::GraphNode &node) noexcept {
   using openyourbox::graph::NodeType;
@@ -265,6 +375,9 @@ bool hasValidPortLayout(const openyourbox::graph::GraphNode &node) noexcept {
     return node.inputs.empty() && node.outputs.size() == 2;
   if (openyourbox::graph::isMixerType(node.type))
     return node.inputs.size() >= 2 && node.outputs.size() == 1;
+  if (node.type == NodeType::tcn || node.type == NodeType::blackBox)
+    return node.inputs.size() >= 1 && node.inputs.size() <= 2 &&
+           node.outputs.size() == 1;
   return node.inputs.size() == 1 && node.outputs.size() == 1;
 }
 
@@ -354,9 +467,91 @@ int compiledSlotChannels(const CompiledElement &source,
  */
 torch::Tensor extractCompiledInput(const torch::Tensor &value,
                                    int extractChannel) {
-  if (extractChannel < 0 || extractChannel >= value.size(1))
+  if (!value.defined() || extractChannel < 0 || extractChannel >= value.size(1))
     return value;
   return value.narrow(1, extractChannel, 1).contiguous();
+}
+
+/**
+ * @brief Left-pads or right-crops a `[B, C, T]` control to @p targetLength.
+ *
+ * FiLM uses stored control history via `extendCausalControl`. This helper
+ * remains for Gain envelopes and as a length fallback. Repeating the first
+ * frame of the current block for the TCN RF prefix zippers at buffer rate.
+ *
+ * @param control Conditioning or Gain envelope.
+ * @param targetLength Temporal length of the activations being modulated.
+ */
+torch::Tensor alignControlTime(const torch::Tensor &control,
+                               std::int64_t targetLength) {
+  if (!control.defined() || control.dim() != 3 || targetLength < 1)
+    return control;
+  if (control.size(2) == targetLength)
+    return control;
+  if (control.size(2) > targetLength)
+    return control.narrow(2, control.size(2) - targetLength, targetLength);
+  const auto missing = targetLength - control.size(2);
+  auto head = control.narrow(2, 0, 1).expand(
+      {control.size(0), control.size(1), missing});
+  return torch::cat({head.contiguous(), control}, 2);
+}
+
+/**
+ * @brief Applies per-sample FiLM from a multi-dimensional control tensor.
+ *
+ * Concatenated XY `[x, y]` stays a 2-vector (not `x+y`). Time is not averaged,
+ * so a ramped Knob/XY trajectory actually ramps instead of stepping once per
+ * audio buffer.
+ *
+ * @param samples Hidden activations shaped `[batch, channels, time]`.
+ * @param cond Control tensor, typically `[batch, condDim, time]`.
+ * @param weight Linear adaptor weight `[2 * channels, condDim]`.
+ * @param bias Linear adaptor bias `[2 * channels]`.
+ * @param condDim Compiled control width.
+ * @return Modulated activations with the same shape as @p samples.
+ */
+torch::Tensor applyFilm(const torch::Tensor &samples, const torch::Tensor &cond,
+                        const torch::Tensor &weight, const torch::Tensor &bias,
+                        int condDim) {
+  if (!samples.defined() || !cond.defined() || !weight.defined() ||
+      !bias.defined() || condDim < 1)
+    return samples;
+  auto timed = cond;
+  if (timed.dim() == 1)
+    timed = timed.unsqueeze(0).unsqueeze(-1);
+  else if (timed.dim() == 2)
+    timed = timed.unsqueeze(-1);
+  if (timed.dim() != 3)
+    return samples;
+  timed = alignControlTime(timed, samples.size(2));
+  auto layout = timed.permute({0, 2, 1});
+  if (layout.size(2) < condDim)
+    layout = torch::nn::functional::pad(
+        layout, torch::nn::functional::PadFuncOptions(
+                    {0, condDim - static_cast<int>(layout.size(2))}));
+  else if (layout.size(2) > condDim)
+    layout = layout.narrow(2, 0, condDim);
+  const auto adapted = torch::linear(layout, weight, bias);
+  const auto parts = adapted.chunk(2, /*dim=*/-1);
+  return samples * parts[0].permute({0, 2, 1}) +
+         parts[1].permute({0, 2, 1});
+}
+
+/**
+ * @brief Returns the connected control tensor with XY pin extraction applied.
+ * @param outputs Runtime element outputs.
+ * @param element Compiled consumer with optional FiLM wiring.
+ */
+torch::Tensor resolveFilmConditioning(const std::vector<torch::Tensor> &outputs,
+                                      const CompiledElement &element) {
+  if (element.filmInputIndex < 0 ||
+      static_cast<std::size_t>(element.filmInputIndex) >= outputs.size())
+    return {};
+  const auto &cond =
+      outputs[static_cast<std::size_t>(element.filmInputIndex)];
+  if (!cond.defined())
+    return {};
+  return extractCompiledInput(cond, element.filmExtractChannel);
 }
 
 /** @brief Creates a compile failure value. */
@@ -380,6 +575,58 @@ void clearHostOutput(float *const *channels, std::size_t channelCount,
       std::fill_n(channels[channel], sampleCount, 0.0f);
   }
 }
+
+/**
+ * @brief One-pole smoother for Knob, XY, and Gain.
+ *
+ * Linear ramps restart their slope on every UI target update (~60 Hz), which
+ * is heard as a TV-like buzz. An exponential chase stays continuous when the
+ * target jumps.
+ */
+struct OnePoleSmoother {
+  /**
+   * @brief Sets the time constant so the chase settles ~60 dB in @p seconds.
+   * @param sampleRate Host sample rate in Hz.
+   * @param seconds Time to decay a step to 0.1%, or 0 for an instant jump.
+   */
+  void reset(double sampleRate, double seconds) noexcept {
+    const auto rate = std::max(1.0, sampleRate);
+    if (seconds <= 0.0) {
+      coeff = 1.0f;
+      return;
+    }
+    coeff = static_cast<float>(
+        1.0 - std::exp(-std::log(1000.0) / (seconds * rate)));
+  }
+
+  /** @brief Snaps both current and target to @p value. */
+  void setCurrentAndTargetValue(float value) noexcept { current = target = value; }
+
+  /** @brief Aims the chase at @p value without a discontinuity in current. */
+  void setTargetValue(float value) noexcept { target = value; }
+
+  /** @brief Returns the current smoothed value. */
+  [[nodiscard]] float getCurrentValue() const noexcept { return current; }
+
+  /** @brief Returns true while current has not yet reached the target. */
+  [[nodiscard]] bool isSmoothing() const noexcept {
+    return std::abs(current - target) > 1.0e-7f;
+  }
+
+  /** @brief Advances one sample toward the target and returns it. */
+  float getNextValue() noexcept {
+    current += coeff * (target - current);
+    return current;
+  }
+
+private:
+  /** @brief Per-sample mix of the remaining error, in `(0, 1]`. */
+  float coeff = 1.0f;
+  /** @brief Latest smoothed value. */
+  float current = 0.0f;
+  /** @brief Destination of the chase. */
+  float target = 0.0f;
+};
 } // namespace
 
 namespace openyourbox::dsp {
@@ -401,7 +648,7 @@ struct LiveGraphSnapshot::Impl {
   std::uint64_t parameterCount = 0;
   /** @brief Host sample rate copied from compile options. */
   double sampleRate = 44100.0;
-  /** @brief Linear control-ramp duration in seconds. */
+  /** @brief One-pole control-chase duration in seconds. */
   double controlRampSeconds = controlRampSecondsDefault;
 };
 
@@ -413,6 +660,8 @@ struct LiveGraphRuntime::Impl {
   std::vector<torch::Tensor> outputs;
   /** @brief Per-element raw-input causal histories. */
   std::vector<torch::Tensor> histories;
+  /** @brief Per-element FiLM control histories, same length as the audio RF. */
+  std::vector<torch::Tensor> conditioningHistories;
   /** @brief Per-element frozen kernels created outside the audio callback. */
   std::vector<std::unique_ptr<FrozenBlackBoxKernel>> blackBoxKernels;
   /** @brief Reusable planar-to-tensor host input storage. */
@@ -427,10 +676,9 @@ struct LiveGraphRuntime::Impl {
   /** @brief Published Gain/conditioning table, or null for compiled defaults. */
   std::shared_ptr<const RuntimeControlState> controls;
   /** @brief Per-element Gain ramps for Activation and TCN. */
-  std::vector<juce::LinearSmoothedValue<float>> gainSmoothers;
+  std::vector<OnePoleSmoother> gainSmoothers;
   /** @brief Per-element Knob/XY ramps; XY stores X in [0] and Y in [1]. */
-  std::vector<std::array<juce::LinearSmoothedValue<float>, 2>>
-      conditioningSmoothers;
+  std::vector<std::array<OnePoleSmoother, 2>> conditioningSmoothers;
 };
 
 /** @brief Constructs a snapshot from validated immutable storage. */
@@ -580,13 +828,13 @@ gatherAllInputs(const std::vector<torch::Tensor> &outputs,
 }
 
 /**
- * @brief Writes one channel of linearly smoothed control samples.
+ * @brief Writes one channel of one-pole-smoothed control samples.
  * @param destination Contiguous destination of length @p samples.
  * @param samples Number of samples to emit.
- * @param smoother Audio-thread ramp; target must already be set.
+ * @param smoother Audio-thread chase; target must already be set.
  */
 void writeSmoothedChannel(float *destination, std::int64_t samples,
-                          juce::LinearSmoothedValue<float> &smoother) {
+                          OnePoleSmoother &smoother) {
   if (destination == nullptr || samples < 1)
     return;
   if (!smoother.isSmoothing()) {
@@ -599,14 +847,13 @@ void writeSmoothedChannel(float *destination, std::int64_t samples,
 }
 
 /**
- * @brief Builds a [1, 1, T] linear Gain envelope, advancing the smoother.
- * @param smoother Audio-thread Gain ramp; target must already be set.
+ * @brief Builds a [1, 1, T] Gain envelope, advancing the smoother.
+ * @param smoother Audio-thread Gain chase; target must already be set.
  * @param samples Envelope length.
  * @param options Tensor options matching the audio block.
  * @return Broadcastable Gain trajectory.
  */
-torch::Tensor makeGainEnvelope(juce::LinearSmoothedValue<float> &smoother,
-                               std::int64_t samples,
+torch::Tensor makeGainEnvelope(OnePoleSmoother &smoother, std::int64_t samples,
                                torch::TensorOptions options) {
   auto envelope = torch::empty({1, 1, samples}, options);
   writeSmoothedChannel(envelope.data_ptr<float>(), samples, smoother);
@@ -723,12 +970,19 @@ void LiveGraphRuntime::executeElement(std::size_t index,
     value = project(value, element.weights.front());
     auto &smoother = runtime.gainSmoothers[index];
     smoother.setTargetValue(resolveGain(element, controls));
-    const auto gain = smoother.getCurrentValue();
+    const auto gainEnvelope =
+        makeGainEnvelope(smoother, samples, blockInput.options());
+    torch::Tensor cond = resolveFilmConditioning(runtime.outputs, element);
+    if (cond.defined())
+      cond = extendCausalControl(cond, runtime.conditioningHistories[index],
+                                 historyLength);
     for (int layer = 0; layer < element.depth; ++layer) {
-      const auto layerDilation =
-          static_cast<std::int64_t>(element.dilation) << layer;
+      const auto layerDilation = static_cast<std::int64_t>(
+          openyourbox::graph::tcnLayerDilation(element.dilationGrowth, layer,
+                                               element.dilation));
       const auto leftPadding =
           static_cast<std::int64_t>(element.kernelSize - 1) * layerDilation;
+      auto residual = value;
       value = torch::nn::functional::pad(
           value, torch::nn::functional::PadFuncOptions({leftPadding, 0})
                      .mode(torch::kConstant)
@@ -736,11 +990,23 @@ void LiveGraphRuntime::executeElement(std::size_t index,
       value = convolve(value,
                        element.weights[static_cast<std::size_t>(layer) + 1],
                        layerDilation);
-      value = applyActivation(std::move(value), element.activation, gain);
+      if (cond.defined() &&
+          static_cast<std::size_t>(layer) < element.filmWeights.size() &&
+          static_cast<std::size_t>(layer) < element.filmBiases.size()) {
+        const auto layerIndex = static_cast<std::size_t>(layer);
+        value = applyFilm(value, cond, element.filmWeights[layerIndex],
+                          element.filmBiases[layerIndex], element.condDim);
+      }
+      value = applyActivation(
+          value * alignControlTime(gainEnvelope, value.size(2)),
+          element.activation, 1.0f);
+      if (element.residual) {
+        value = value + residual.narrow(2, residual.size(2) - value.size(2),
+                                        value.size(2));
+      }
     }
     value = project(value, element.weights.back());
     output = value.narrow(2, value.size(2) - samples, samples);
-    smoother.skip(static_cast<int>(samples));
     break;
   }
   case openyourbox::graph::NodeType::merge:
@@ -754,7 +1020,12 @@ void LiveGraphRuntime::executeElement(std::size_t index,
         static_cast<std::int64_t>(element.receptiveField - 1);
     auto extended =
         extendCausalInput(upstream, runtime.histories[index], historyLength);
-    output = runtime.blackBoxKernels[index]->forward(extended);
+    torch::Tensor cond = resolveFilmConditioning(runtime.outputs, element);
+    if (cond.defined())
+      cond = extendCausalControl(cond, runtime.conditioningHistories[index],
+                                 historyLength);
+    output = runtime.blackBoxKernels[index]->forwardWithConditioning(extended,
+                                                                     cond);
     if (!output.defined() || output.device().type() != torch::kCPU ||
         output.scalar_type() != torch::kFloat32 || output.dim() != 3 ||
         output.size(0) != 1 || output.size(1) != element.outputChannels ||
@@ -912,6 +1183,8 @@ void LiveGraphRuntime::reset() noexcept {
       if (history.defined())
         history.zero_();
     }
+    for (auto &history : implementation->conditioningHistories)
+      history = torch::Tensor();
     const auto elementCount =
         implementation->snapshot->implementation->elements.size();
     for (std::size_t index = 0; index < elementCount; ++index)
@@ -1096,7 +1369,11 @@ LiveGraphEngine::compile(const graph::NodeGraph &graphDocument,
   std::unordered_map<std::int32_t, std::size_t> frozenGroupIndex;
   std::unordered_map<std::string, std::vector<std::int32_t>> frozenByArtifact;
   for (const auto &node : nodes) {
-    if (node.state != graph::NodeState::frozenGold)
+    const auto frozenRuntime =
+        node.state == graph::NodeState::frozenGold ||
+        (!node.artifactPath.empty() &&
+         node.blackBoxOrigin == graph::BlackBoxOrigin::trainAutoload);
+    if (!frozenRuntime)
       continue;
     const auto key =
         node.artifactPath.empty()
@@ -1206,7 +1483,8 @@ LiveGraphEngine::compile(const graph::NodeGraph &graphDocument,
             const auto &compiledSourceElement =
                 compiled->elements[compiledSource->second];
             element.inputIsConditioning[compiledInput] =
-                graph::isConditioningSourceType(sourceNode->type) ||
+                graph::isControlInputPin(pin) ||
+                        graph::isConditioningSourceType(sourceNode->type) ||
                         compiledSourceElement.outputIsConditioning
                     ? 1
                     : 0;
@@ -1273,7 +1551,7 @@ LiveGraphEngine::compile(const graph::NodeGraph &graphDocument,
       case NodeType::activation: {
         int activation = 0;
         if (!readProperty(node, "activation", activation) || activation < 0 ||
-            activation > 3)
+            activation > openyourbox::dsp::maximumActivationIndex)
           return failure(LiveGraphErrorCode::invalidProperty, node.id,
                          "Activation function selection is invalid");
         element.outputChannels = element.inputChannels;
@@ -1285,6 +1563,8 @@ LiveGraphEngine::compile(const graph::NodeGraph &graphDocument,
       }
       case NodeType::tcn: {
         int activation = 0;
+        int growth = graph::defaultDilationGrowth;
+        int residual = 0;
         if (!readProperty(node, "depth", element.depth) ||
             !readProperty(node, "kernel_size", element.kernelSize) ||
             !readProperty(node, "channels", element.hiddenChannels) ||
@@ -1292,16 +1572,20 @@ LiveGraphEngine::compile(const graph::NodeGraph &graphDocument,
             !readProperty(node, "activation", activation))
           return failure(LiveGraphErrorCode::invalidProperty, node.id,
                          "TCN is missing one or more required properties");
+        readProperty(node, "dilation_growth", growth);
+        readProperty(node, "residual", residual);
+        element.dilationGrowth = std::clamp(growth, graph::minimumDilationGrowth,
+                                            graph::maximumDilationGrowth);
+        element.residual = residual != 0;
 
         const auto dilationRepresentable =
             element.depth >= 1 && element.depth <= 30 &&
-            element.dilation >= 1 &&
-            element.dilation <=
-                (std::numeric_limits<int>::max() >> (element.depth - 1));
+            element.dilation >= 1 && element.dilationGrowth >= 1;
         if (!dilationRepresentable || element.kernelSize < 2 ||
             element.kernelSize > 65 || element.hiddenChannels < 1 ||
             element.hiddenChannels > 512 || element.inputChannels < 1 ||
-            element.inputChannels > 512 || activation < 0 || activation > 3)
+            element.inputChannels > 512 || activation < 0 ||
+            activation > openyourbox::dsp::maximumActivationIndex)
           return failure(LiveGraphErrorCode::invalidProperty, node.id,
                          "TCN configuration is outside supported bounds");
 
@@ -1309,11 +1593,37 @@ LiveGraphEngine::compile(const graph::NodeGraph &graphDocument,
         float gain = graph::gainDefault;
         readFloatProperty(node, "gain", gain);
         element.gain = graph::clampGain(gain);
+        element.filmInputIndex = -1;
+        element.filmExtractChannel = -1;
+        element.condDim = 0;
+        for (std::size_t index = 0; index < element.inputIsConditioning.size();
+             ++index) {
+          if (element.inputIsConditioning[index] != 0 &&
+              index < element.inputIndices.size()) {
+            element.filmInputIndex = element.inputIndices[index];
+            element.filmExtractChannel =
+                index < element.inputExtractChannels.size()
+                    ? element.inputExtractChannels[index]
+                    : -1;
+            const auto sourceIndex =
+                static_cast<std::size_t>(element.filmInputIndex);
+            if (sourceIndex < compiled->elements.size())
+              element.condDim = compiledSlotChannels(
+                  compiled->elements[sourceIndex], element.filmExtractChannel);
+          } else if (element.inputIsConditioning[index] == 0 &&
+                     index < element.inputIndices.size()) {
+            element.inputIndex = element.inputIndices[index];
+            element.inputChannels =
+                compiled->elements[static_cast<std::size_t>(element.inputIndex)]
+                    .outputChannels;
+          }
+        }
         element.outputChannels = element.inputChannels;
         std::uint64_t receptiveField = 1;
         for (int layer = 0; layer < element.depth; ++layer) {
-          const auto layerDilation =
-              static_cast<std::uint64_t>(element.dilation) << layer;
+          const auto layerDilation = static_cast<std::uint64_t>(
+              graph::tcnLayerDilation(element.dilationGrowth, layer,
+                                      element.dilation));
           receptiveField = saturatedAdd(
               receptiveField, saturatedMultiply(static_cast<std::uint64_t>(
                                                     element.kernelSize - 1),
@@ -1336,8 +1646,21 @@ LiveGraphEngine::compile(const graph::NodeGraph &graphDocument,
         const auto projectionOut = saturatedMultiply(
             static_cast<std::uint64_t>(element.hiddenChannels),
             static_cast<std::uint64_t>(element.outputChannels));
-        element.parameterCount =
-            saturatedAdd(saturatedAdd(projectionIn, temporal), projectionOut);
+        const auto filmOut = saturatedMultiply(
+            static_cast<std::uint64_t>(element.hiddenChannels), 2);
+        const auto filmAdaptor = saturatedAdd(
+            saturatedMultiply(filmOut,
+                              static_cast<std::uint64_t>(
+                                  std::max(0, element.condDim))),
+            filmOut);
+        const auto filmParams =
+            element.condDim > 0
+                ? saturatedMultiply(
+                      static_cast<std::uint64_t>(element.depth), filmAdaptor)
+                : 0;
+        element.parameterCount = saturatedAdd(
+            saturatedAdd(saturatedAdd(projectionIn, temporal), projectionOut),
+            filmParams);
         element.randomizable = true;
         randomizeElementWeights(element, node.seed);
         break;
@@ -1400,16 +1723,43 @@ LiveGraphEngine::compile(const graph::NodeGraph &graphDocument,
           return failure(LiveGraphErrorCode::invalidBlackBox, node.id,
                          "Frozen BlackBox requires an off-thread resolver");
         element.blackBoxFactory = blackBoxResolver(node);
+        element.filmInputIndex = -1;
+        element.filmExtractChannel = -1;
+        for (std::size_t index = 0; index < element.inputIsConditioning.size();
+             ++index) {
+          if (element.inputIsConditioning[index] != 0 &&
+              index < element.inputIndices.size()) {
+            element.filmInputIndex = element.inputIndices[index];
+            element.filmExtractChannel =
+                index < element.inputExtractChannels.size()
+                    ? element.inputExtractChannels[index]
+                    : -1;
+          } else if (element.inputIsConditioning[index] == 0 &&
+                     index < element.inputIndices.size()) {
+            element.inputIndex = element.inputIndices[index];
+            element.inputChannels =
+                compiled->elements[static_cast<std::size_t>(element.inputIndex)]
+                    .outputChannels;
+          }
+        }
         if (!element.blackBoxFactory ||
-            element.blackBoxFactory->getInputChannels() !=
-                element.inputChannels ||
             element.blackBoxFactory->getOutputChannels() < 1 ||
-            element.blackBoxFactory->getOutputChannels() > 512 ||
+            element.blackBoxFactory->getOutputChannels() > 512)
+          return failure(LiveGraphErrorCode::invalidBlackBox, node.id,
+                         "Frozen hook metadata is absent or shape-incompatible");
+        // FiLM Control injects bias, so hooked freeze cannot keep digital
+        // silence. Train autoload already allows that; a live Control pin must
+        // as well.
+        if (node.blackBoxOrigin != graph::BlackBoxOrigin::trainAutoload &&
+            element.filmInputIndex < 0 &&
             !element.blackBoxFactory->preservesSilence())
           return failure(LiveGraphErrorCode::invalidBlackBox, node.id,
                          "Frozen hook metadata is absent, shape-incompatible, "
                          "or not silence-preserving");
         element.outputChannels = element.blackBoxFactory->getOutputChannels();
+        if (node.blackBoxOrigin == graph::BlackBoxOrigin::trainAutoload &&
+            element.inputChannels > 0)
+          element.outputChannels = element.inputChannels;
         element.receptiveField = std::max<std::uint64_t>(
             1, element.blackBoxFactory->getReceptiveField());
         if (element.receptiveField - 1 > options.maximumHistorySamples)
@@ -1474,6 +1824,7 @@ LiveGraphEngine::prepare(std::shared_ptr<const LiveGraphSnapshot> snapshot,
     const auto &compiled = *snapshot->implementation;
     runtime->outputs.resize(compiled.elements.size());
     runtime->histories.resize(compiled.elements.size());
+    runtime->conditioningHistories.resize(compiled.elements.size());
     runtime->blackBoxKernels.resize(compiled.elements.size());
     runtime->inferenceMilliseconds =
         std::make_unique<std::atomic<double>[]>(compiled.elements.size());

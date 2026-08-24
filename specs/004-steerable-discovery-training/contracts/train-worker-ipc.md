@@ -48,7 +48,14 @@ Local request/response/stream contract between the master plug-in (`TrainCoordin
     ],
     "total_steps": 2500,
     "segment_length": 228308,
-    "rf_aware_crop": true
+    "rf_aware_crop": true,
+    "mlflow": {
+      "enabled": true,
+      "tracking_uri": "http://127.0.0.1:5000",
+      "experiment": "openyourbox",
+      "name": "",
+      "tags": ["train", "steerable"]
+    }
   }
 }
 ```
@@ -130,6 +137,7 @@ Allowed `status` on events: `running` | `paused` | `stopping`.
 - Control sources MUST NOT appear as trainable armed elements in the fragment.
 - When `rf_aware_crop` is true, each step MUST include receptive-field context before the target segment of `segment_length` samples (or shorter if audio is limited).
 - Loss MUST use the specified multiresolution STFT sizes (not an unspecified STFT variant).
+- When `train_options.mlflow.enabled` is true, the worker SHOULD log params, metrics, and artifacts to `tracking_uri` using the MLflow Tracking REST API (`/api/2.0/mlflow`). REST failures MUST NOT fail training.
 
 ## Response Rules
 
@@ -143,3 +151,11 @@ Allowed `status` on events: `running` | `paused` | `stopping`.
 - Pause/Resume preserve optimizer state for the same job when supported by worker implementation.
 - Stop ends the job without writing a replacement live model.
 - UI may show loss updates from progress events (≥ ~1 Hz when events available).
+
+## Implementation Anchors
+
+- Coordinator (ChildProcess + JSON lines, freeze-style): `OpenYourBox/Source/train/TrainCoordinator.h`, `OpenYourBox/Source/train/TrainCoordinator.cpp`
+- Armed subgraph snapshot: `OpenYourBox/Source/graph/NodeGraph.cpp` (`createTrainRequest`)
+- Worker recipe + TorchScript export: `Backend/train_worker.py`
+- Embedded packaging: `CMakeLists.txt` (`juce_add_binary_data` alongside `freeze_worker.py`)
+- Python recipe tests: `Tests/test_train_worker.py`

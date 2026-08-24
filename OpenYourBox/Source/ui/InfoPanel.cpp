@@ -49,7 +49,8 @@ void InfoPanel::render(std::uint64_t receptiveFieldSamples, double sampleRate,
                        const juce::String &buildError,
                        AnalysisPanelState &analysis,
                        const std::function<void(graph::AnalysisView)>
-                           &viewChanged) const {
+                           &viewChanged,
+                       const std::function<void()> &viewError) const {
   const auto milliseconds =
       sampleRate > 0.0
           ? static_cast<double>(receptiveFieldSamples) * 1000.0 / sampleRate
@@ -70,8 +71,11 @@ void InfoPanel::render(std::uint64_t receptiveFieldSamples, double sampleRate,
 
   if (buildError.isNotEmpty()) {
     ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.3f, 0.3f, 1.0f));
-    ImGui::TextWrapped("Model unchanged: %s", buildError.toRawUTF8());
+    ImGui::TextUnformatted("Model error");
     ImGui::PopStyleColor();
+    ImGui::SameLine();
+    if (ImGui::SmallButton("View") && viewError)
+      viewError();
   }
 
   ImGui::Separator();

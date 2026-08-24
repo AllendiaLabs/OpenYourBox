@@ -21,11 +21,16 @@ public:
    * @param inputChannels Host or upstream channels supplied to the artifact.
    * @param receptiveFieldSamples Causal context declared by the worker.
    * @param error Receives a user-facing validation failure.
-   * @return Immutable factory, or null when validation fails.
+   * @param acceptsConditioning True when the module expects (audio, cond).
+   *   When false, load still retries a conditioned forward if `forward(audio)`
+   *   fails because `cond` is required (training checkpoints).
+   * @param condDim Trained FiLM width, or 0 to detect during validation.
    */
   [[nodiscard]] static std::shared_ptr<const TorchScriptBlackBoxFactory>
   load(const std::string &artifactPath, int inputChannels,
-       std::uint64_t receptiveFieldSamples, std::string &error);
+       std::uint64_t receptiveFieldSamples, std::string &error,
+       bool requireSilencePreservation = true,
+       bool acceptsConditioning = false, int condDim = 0);
 
   /** @brief Returns the artifact's validated input channel count. */
   [[nodiscard]] int getInputChannels() const noexcept override;
@@ -58,10 +63,12 @@ private:
    * @param field Causal receptive field.
    * @param parameters Scalar parameter count.
    * @param silence Whether zero input remains exactly zero.
+   * @param conditioned True when the module accepts a control tensor.
+   * @param condDim Validated FiLM control width.
    */
   TorchScriptBlackBoxFactory(std::string path, int inputs, int outputs,
                              std::uint64_t field, std::uint64_t parameters,
-                             bool silence);
+                             bool silence, bool conditioned, int condDim);
 
   /** @brief Canonical local TorchScript file path. */
   std::string artifactPath;
@@ -75,5 +82,9 @@ private:
   std::uint64_t parameterCount = 0;
   /** @brief Exact-silence validation result. */
   bool silencePreserving = false;
+  /** @brief True when the scripted module accepts (audio, cond). */
+  bool conditioned = false;
+  /** @brief FiLM control width used at trace and runtime. */
+  int conditioningDim = 2;
 };
 } // namespace openyourbox::dsp

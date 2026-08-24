@@ -38,11 +38,13 @@ public:
    * @param buildError Latest asynchronous model error.
    * @param analysis Current analysis panel state; empty `nodeId` hides plots.
    * @param viewChanged Invoked when the user selects a different analysis view.
+   * @param viewError Opens the copyable error dialog for @p buildError.
    */
   void render(std::uint64_t receptiveFieldSamples, double sampleRate,
               std::uint64_t parameterCount, const juce::String &buildError,
               AnalysisPanelState &analysis,
-              const std::function<void(graph::AnalysisView)> &viewChanged) const;
+              const std::function<void(graph::AnalysisView)> &viewChanged,
+              const std::function<void()> &viewError = {}) const;
 
 private:
   /**

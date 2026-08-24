@@ -101,11 +101,9 @@ class FreezeWorkerTests(unittest.TestCase):
 
     def test_tcn_uses_cpp_base_dilation_schedule(self) -> None:
         """TCN layers must use baseDilation multiplied by powers of two."""
-        module = freeze_worker.ResidualTCN(2, 2, 3, 3, 3, 0)
+        module = freeze_worker.SteerableTCN(2, 2, 2, 3, 3, 3, 2, 0, False, 0)
         dilations = [
-            layer.convolution.dilation[0]
-            for layer in module.network
-            if isinstance(layer, freeze_worker.CausalConv1d)
+            block.convolution.convolution.dilation[0] for block in module.blocks
         ]
         self.assertEqual(dilations, [3, 6, 12])
 
@@ -197,6 +195,52 @@ class FreezeWorkerTests(unittest.TestCase):
         }
         with self.assertRaisesRegex(ValueError, "cyclic"):
             freeze_worker.build_module(fragment)
+
+    def test_frozen_tcn_keeps_live_control(self) -> None:
+        """A TCN freeze with cond_dim must stay steerable by Knob/XY."""
+        request = {
+            "request_id": "film-freeze-test",
+            "operation": "freeze_selection",
+            "selected_element_ids": [1],
+            "graph_fragment": {
+                "elements": [
+                    {
+                        "id": 1,
+                        "type": "tcn",
+                        "seed": 23,
+                        "properties": [
+                            {"key": "channels", "value": 4},
+                            {"key": "depth", "value": 1},
+                            {"key": "kernel_size", "value": 3},
+                            {"key": "dilation", "value": 1},
+                            {"key": "dilation_growth", "value": 2},
+                            {"key": "residual", "value": 0},
+                            {"key": "activation", "value": 0},
+                        ],
+                    }
+                ],
+                "connections": [],
+                "io_boundary": {"inputs": [], "outputs": []},
+            },
+            "compile_options": {
+                "mode": "manual_freeze",
+                "host_input_channels": 2,
+                "host_output_channels": 2,
+                "example_samples": 32,
+                "conditioning": True,
+                "cond_dim": 1,
+            },
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            response = freeze_worker.compile_request(request, Path(directory))
+            self.assertTrue(response["blackbox_metadata"]["conditioning"])
+            self.assertEqual(response["blackbox_metadata"]["cond_dim"], 1)
+            module = torch.jit.load(response["artifact_path"])
+            audio = torch.ones(1, 2, 32)
+            out_zero = module(audio, torch.zeros(1, 1, 32))
+            out_one = module(audio, torch.ones(1, 1, 32))
+        self.assertEqual(tuple(out_zero.shape), (1, 2, 32))
+        self.assertFalse(torch.allclose(out_zero, out_one, atol=1.0e-5))
 
 
 if __name__ == "__main__":

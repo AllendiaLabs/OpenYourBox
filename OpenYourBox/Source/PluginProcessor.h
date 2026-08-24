@@ -7,12 +7,16 @@
 #include "dsp/TorchScriptBlackBox.h"
 #include "dsp/WeightRandomizer.h"
 #include "graph/NodeGraph.h"
+#include "capture/CapturePairing.h"
+#include "capture/CaptureRecorder.h"
+#include "library/TrainingLibrary.h"
 
 #include <array>
 #include <atomic>
 #include <memory>
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 /**
  * @class OpenYourBoxAudioProcessor
@@ -22,7 +26,8 @@
 class OpenYourBoxAudioProcessor final
     : public juce::AudioProcessor,
       private juce::AudioProcessorValueTreeState::Listener,
-      private juce::AsyncUpdater {
+      private juce::AsyncUpdater,
+      private juce::Timer {
 public:
   /** @brief Constructs the plugin and registers all parameter listeners. */
   OpenYourBoxAudioProcessor();
@@ -56,7 +61,7 @@ public:
   bool producesMidi() const override;
   /** @brief Reports that this is an audio effect, not a MIDI effect. */
   bool isMidiEffect() const override;
-  /** @brief Returns zero tail because the TCN has finite causal history. */
+  /** @brief Returns the causal tail so the host keeps processing after stop. */
   double getTailLengthSeconds() const override;
 
   /** @brief Returns the mandatory single host program. */
@@ -181,6 +186,111 @@ public:
                         std::string &error);
 
   /**
+   * @brief Loads a trained artifact without requiring silence preservation.
+   * @param result Train worker success payload.
+   * @param error Receives a human-readable load or validation error.
+   * @return True only when the prepared artifact handle has been published.
+   */
+  bool prepareTrainedArtifact(const openyourbox::graph::TrainJobResult &result,
+                              std::string &error);
+
+  /**
+   * @brief Compiles armed nodes as a frozen preview of a training checkpoint.
+   * @param artifactPath Validated TorchScript checkpoint path.
+   * @param nodeIds Armed node identifiers captured at Run.
+   */
+  void setTrainingPreview(const std::string &artifactPath,
+                          const std::vector<std::int32_t> &nodeIds);
+
+  /** @brief Clears a hear-while-training preview and recompiles the live graph. */
+  void clearTrainingPreview();
+
+  /**
+   * @brief Sets the capture bypass flag read by the audio thread.
+   * @param enabled True to passthrough input while capturing.
+   */
+  void setCaptureBypass(bool enabled) noexcept;
+
+  /** @brief Returns the capture bypass flag. */
+  [[nodiscard]] bool isCaptureBypassEnabled() const noexcept;
+
+  /**
+   * @brief Starts capturing host input into a preallocated ring.
+   * @param destination WAV destination.
+   * @param sampleRate Host sample rate.
+   * @param channels Host input channels.
+   * @return False when the WAV writer could not be opened.
+   */
+  bool startInputCapture(const juce::File &destination, double sampleRate,
+                         int channels);
+
+  /** @brief Drains the capture ring on the message thread. */
+  void drainInputCapture();
+
+  /**
+   * @brief Stops capture and closes the WAV file.
+   * @return Destination file when samples were written.
+   */
+  juce::File stopInputCapture();
+
+  /** @brief Returns true while input capture is armed. */
+  [[nodiscard]] bool isInputCaptureActive() const noexcept;
+
+  /** @brief Returns the processor-owned pairing endpoint (editor-independent). */
+  [[nodiscard]] openyourbox::capture::CapturePairing &getCapturePairing() noexcept;
+
+  /** @brief Returns the processor-owned pairing endpoint. */
+  [[nodiscard]] const openyourbox::capture::CapturePairing &
+  getCapturePairing() const noexcept;
+
+  /** @brief Returns the master-owned training library. */
+  [[nodiscard]] openyourbox::library::TrainingLibrary &getTrainingLibrary() noexcept;
+
+  /** @brief Returns the master-owned training library. */
+  [[nodiscard]] const openyourbox::library::TrainingLibrary &
+  getTrainingLibrary() const noexcept;
+
+  /**
+   * @brief Sets whether Record should start host playback when stopped.
+   * @param enabled True to request transport play (default).
+   */
+  void setStartTransportOnRecord(bool enabled) noexcept;
+
+  /** @brief Returns whether Record starts host playback when stopped. */
+  [[nodiscard]] bool getStartTransportOnRecord() const noexcept;
+
+  /** @brief Starts a synchronized dual-instance capture take. */
+  void startPairedRecording();
+
+  /** @brief Stops capture and assembles the library pair when both clips exist. */
+  void stopPairedRecording();
+
+  /**
+   * @brief Consumes a pending capture status string for the editor.
+   * @return User-facing status, or empty when none is waiting.
+   */
+  juce::String takeCaptureStatusMessage();
+
+  /**
+   * @brief Consumes a request to focus the Library side tab.
+   * @return True when the editor should switch to Library.
+   */
+  bool takeLibraryFocusRequest() noexcept;
+
+  /**
+   * @brief Starts in-plugin preview of a library WAV on the audio output.
+   * @param file Audio file to play.
+   * @return False when the file could not be decoded.
+   */
+  bool startPreviewFile(const juce::File &file);
+
+  /** @brief Stops in-plugin preview playback. */
+  void stopPreview();
+
+  /** @brief Returns true while preview audio is being mixed. */
+  [[nodiscard]] bool isPreviewPlaying() const noexcept;
+
+  /**
    * @brief Releases the matching published frozen artifact on unfreeze.
    * @param artifactPath Artifact owned by the frozen group being restored.
    */
@@ -279,6 +389,37 @@ private:
   resolveFrozenBlackBox(const openyourbox::graph::GraphNode &node) const;
   void requestCurrentArchitecture(bool randomizeWeights);
   void resetRandomizeParameter();
+  /**
+   * @brief Mixes in-plugin preview audio into the host output buffer.
+   * @param buffer Host output buffer.
+   * @param channels Number of output channels.
+   * @param samples Block size.
+   */
+  void mixPreview(juce::AudioBuffer<float> &buffer, int channels,
+                  int samples) noexcept;
+  /** @brief Drains the capture ring while a take is active. */
+  void timerCallback() override;
+  /**
+   * @brief Handles pairing control JSON on the message thread.
+   * @param message Parsed control object.
+   */
+  void handlePairingMessage(const juce::var &message);
+  /**
+   * @brief Opens a local WAV capture destination for the current take.
+   * @param pairId Shared take identifier.
+   * @param suffix Filename suffix such as `_local` or `_slave`.
+   * @return False when the WAV writer could not be opened.
+   */
+  bool startLocalCapture(const juce::String &pairId, const juce::String &suffix);
+  /** @brief Requests host playback on the next audio block when stopped. */
+  void requestTransportStartIfNeeded() noexcept;
+  /** @brief Assembles the library pair once both clips are present. */
+  void tryAssembleCapturedPair();
+  /**
+   * @brief Stores a user-facing capture status for the editor.
+   * @param message Status text.
+   */
+  void setCaptureStatusMessage(const juce::String &message);
 
   juce::AudioProcessorValueTreeState parameters;
   openyourbox::dsp::WeightRandomizer modelBuilder;
@@ -352,6 +493,49 @@ private:
   std::atomic<int> liveCaptureIndex{0};
   /** @brief True when the host play-head reports playback. */
   std::atomic<bool> transportPlaying{false};
+  /** @brief Capture bypass flag defaulting on during a capture session. */
+  std::atomic<bool> captureBypass{false};
+  /** @brief True when Record should start host playback if it is stopped. */
+  std::atomic<bool> startTransportOnRecord{true};
+  /** @brief Audio-thread request to call AudioPlayHead::transportPlay. */
+  std::atomic<bool> pendingTransportPlay{false};
+  /** @brief Real-time-safe input recorder drained on the message thread. */
+  openyourbox::capture::CaptureRecorder inputCapture;
+  /** @brief Localhost pairing endpoint; advertises only while searching. */
+  openyourbox::capture::CapturePairing capturePairing;
+  /** @brief Durable training-library store owned by this instance. */
+  openyourbox::library::TrainingLibrary trainingLibrary;
+  /** @brief Identifier of the in-flight capture take. */
+  juce::String activeCapturePairId;
+  /** @brief Local clip written by this instance. */
+  juce::File localCaptureClip;
+  /** @brief Peer clip path received over IPC. */
+  juce::File pendingPeerClip;
+  /** @brief True after local stop while waiting for the peer WAV. */
+  bool waitingForPeerClip = false;
+  /** @brief True when the editor should switch to the Library tab. */
+  bool libraryFocusRequested = false;
+  /** @brief Latest capture status consumed by the editor. */
+  juce::String captureStatusMessage;
+  /** @brief Protects capture assembly paths and status. */
+  juce::CriticalSection captureStateLock;
+  /** @brief Preview playback buffer mixed on the audio thread. */
+  struct PreviewState {
+    /** @brief Decoded preview samples. */
+    juce::AudioBuffer<float> samples;
+    /** @brief Next sample index to mix. */
+    std::atomic<int> position{0};
+    /** @brief True while preview is audible. */
+    std::atomic<bool> active{false};
+  };
+  /** @brief Atomically published preview playback state. */
+  std::shared_ptr<PreviewState> previewPlayback;
+  /** @brief Protects hear-while-training preview identifiers. */
+  juce::CriticalSection trainingPreviewLock;
+  /** @brief Checkpoint path compiled over armed nodes while training. */
+  std::string trainingPreviewPath;
+  /** @brief Armed node identifiers included in the training preview. */
+  std::vector<std::int32_t> trainingPreviewNodeIds;
 
   JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(OpenYourBoxAudioProcessor)
 };

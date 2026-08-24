@@ -17,10 +17,12 @@ Master/slave is independent of Clean/Processed.
 
 ## Discovery
 
-1. Master opens Capture Samples → advertises session on localhost discovery registry.
-2. Master lists discoverable peer instances (same machine / compatible plugin version).
-3. User selects peer → bidirectional control channel established → `syncState = paired`.
-4. If no peer: UI explains second instance required; Record disabled.
+Idle loaded instances are **not** discoverable. Each instance listens on loopback always, but writes a registry advertisement only while the user is searching (`Search for instances`). Closing the editor does not stop a search already in progress (pairing lives on the processor).
+
+1. User clicks **Search for instances** on both instances → each advertises on the localhost discovery registry (`searching: true`).
+2. While searching, the panel lists other searching peers by a short instance id (not the full UUID) with a **Connect** button.
+3. User clicks **Connect** → that instance becomes master, the peer becomes slave → `syncState = paired`. Both retract advertisements.
+4. **Stop searching** retracts the advertisement without pairing. If nobody else is searching, the UI explains that both sides must search.
 
 ## Control Messages (logical)
 
@@ -60,3 +62,11 @@ Slave MUST NOT show: full capture-set management, copyright Train gate workflow,
 - Capture ring writes use preallocated buffers; no audio-thread allocations.
 - Bypass/flag changes prepared on message thread; audio reads atomic/flag.
 - Monitoring with default bypass leaves DAW-heard signal unaffected by graph processing.
+
+## Implementation Anchors
+
+- Pairing types: `OpenYourBox/Source/capture/CapturePairing.h`
+- Discovery + `juce::InterprocessConnectionServer` / `juce::InterprocessConnection`: `OpenYourBox/Source/capture/CapturePairing.cpp`
+- Preallocated input-ring recorder: `OpenYourBox/Source/capture/CaptureRecorder.cpp`
+- Capture bypass flag: `OpenYourBox/Source/PluginProcessor.cpp` (`processBlock` passthrough)
+- Master/slave Capture UI: `OpenYourBox/Source/ui/CaptureSamplesPanel.cpp`

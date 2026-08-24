@@ -1,5 +1,6 @@
 #include "PluginProcessor.h"
 #include "PluginEditor.h"
+#include "capture/HostTransport.h"
 #include "params/ParamIDs.h"
 #include "params/ParamLayout.h"
 
@@ -8,6 +9,8 @@
 #include <cmath>
 #include <cstring>
 #include <sstream>
+#include <unordered_set>
+#include <utility>
 
 namespace {
 constexpr std::array<const char *, 9> listenedParameterIDs{
@@ -52,9 +55,14 @@ OpenYourBoxAudioProcessor::OpenYourBoxAudioProcessor()
     publishRuntime(modelBuilder.getPublishedModel());
     resetRandomizeParameter();
   });
+  capturePairing.setMessageHandler([this](const juce::var &message) {
+    handlePairingMessage(message);
+  });
+  startTimerHz(20);
 }
 
 OpenYourBoxAudioProcessor::~OpenYourBoxAudioProcessor() {
+  stopTimer();
   cancelPendingUpdate();
   modelBuilder.setPublishCallback({});
   for (const auto *identifier : listenedParameterIDs)
@@ -89,7 +97,13 @@ bool OpenYourBoxAudioProcessor::isMidiEffect() const {
 #endif
 }
 
-double OpenYourBoxAudioProcessor::getTailLengthSeconds() const { return 0.0; }
+double OpenYourBoxAudioProcessor::getTailLengthSeconds() const {
+  const auto rate = currentSampleRate.load(std::memory_order_acquire);
+  const auto field = getReceptiveFieldSamples();
+  if (rate <= 0.0 || field <= 1)
+    return 0.0;
+  return static_cast<double>(field - 1) / rate;
+}
 
 int OpenYourBoxAudioProcessor::getNumPrograms() { return 1; }
 
@@ -188,7 +202,17 @@ bool OpenYourBoxAudioProcessor::isBusesLayoutSupported(
 void OpenYourBoxAudioProcessor::processBlock(juce::AudioBuffer<float> &buffer,
                                             juce::MidiBuffer &midiMessages) {
   juce::ScopedNoDenormals noDenormals;
-  transportPlaying.store(true, std::memory_order_release);
+  bool playing = false;
+  if (auto *head = getPlayHead()) {
+    if (const auto position = head->getPosition())
+      playing = position->getIsPlaying();
+    if (pendingTransportPlay.exchange(false, std::memory_order_acq_rel) &&
+        !playing) {
+      head->transportPlay(true);
+      playing = true;
+    }
+  }
+  transportPlaying.store(playing, std::memory_order_release);
   const auto inputChannels = getTotalNumInputChannels();
   const auto outputChannels = getTotalNumOutputChannels();
   const auto numSamples = buffer.getNumSamples();
@@ -210,27 +234,25 @@ void OpenYourBoxAudioProcessor::processBlock(juce::AudioBuffer<float> &buffer,
 
   syncDryWetSmoother();
 
-  float graphInputPeak = 0.0f;
-  for (int channel = 0; channel < inputChannels; ++channel)
-    graphInputPeak =
-        std::max(graphInputPeak, buffer.getMagnitude(channel, 0, numSamples));
-  if (graphInputPeak < 1.0e-6f) {
-    if (auto graphRuntime = graphPublisher.getPublishedRuntime()) {
-      graphRuntime->reset();
-      if (activeGraphRuntime != nullptr)
-        activeGraphRuntime->reset();
-      if (previousGraphRuntime != nullptr)
-        previousGraphRuntime->reset();
-      buffer.clear();
-      graphDcInput.fill(0.0f);
-      graphDcOutput.fill(0.0f);
-      dryWetSmoother.skip(numSamples);
-      return;
-    }
+  const auto captureInput = inputCapture.isActive();
+  if (captureInput) {
+    const float *channels[2] = {
+        inputChannels > 0 ? buffer.getReadPointer(0) : nullptr,
+        inputChannels > 1 ? buffer.getReadPointer(1) : nullptr};
+    inputCapture.pushInput(channels, inputChannels, numSamples);
   }
 
-  if (processLiveGraph(buffer, inputChannels, numSamples))
+  if (captureBypass.load(std::memory_order_acquire)) {
+    for (int channel = inputChannels; channel < outputChannels; ++channel)
+      buffer.clear(channel, 0, numSamples);
+    mixPreview(buffer, outputChannels, numSamples);
     return;
+  }
+
+  if (processLiveGraph(buffer, inputChannels, numSamples)) {
+    mixPreview(buffer, outputChannels, numSamples);
+    return;
+  }
 
   graphDcInput.fill(0.0f);
   graphDcOutput.fill(0.0f);
@@ -241,6 +263,7 @@ void OpenYourBoxAudioProcessor::processBlock(juce::AudioBuffer<float> &buffer,
       buffer.setSample(channel, sample,
                        buffer.getSample(channel, sample) * dryGain);
   }
+  mixPreview(buffer, outputChannels, numSamples);
 }
 
 bool OpenYourBoxAudioProcessor::hasEditor() const { return true; }
@@ -512,7 +535,8 @@ bool OpenYourBoxAudioProcessor::prepareFrozenArtifact(
 
   const auto factory = openyourbox::dsp::TorchScriptBlackBoxFactory::load(
       result.artifactPath, result.inputChannels, result.receptiveFieldSamples,
-      error);
+      error, !result.acceptsConditioning, result.acceptsConditioning,
+      result.condDim);
   if (factory == nullptr ||
       factory->getOutputChannels() != result.outputChannels)
     return false;
@@ -772,7 +796,7 @@ void OpenYourBoxAudioProcessor::syncDryWetSmoother() noexcept {
 void OpenYourBoxAudioProcessor::requestGraphCompile() {
   if (!prepared.load(std::memory_order_acquire))
     return;
-  const auto graphState = getGraphState();
+  auto graphState = getGraphState();
   if (!graphState.isValid() || graphState.getNumChildren() == 0)
     return;
 
@@ -783,6 +807,25 @@ void OpenYourBoxAudioProcessor::requestGraphCompile() {
   options.maximumHistorySamples = maximumRealtimeHistory;
   options.sampleRate =
       std::max(1.0, currentSampleRate.load(std::memory_order_acquire));
+  {
+    const juce::ScopedLock lock(trainingPreviewLock);
+    if (!trainingPreviewPath.empty()) {
+      const std::unordered_set<std::int32_t> preview(
+          trainingPreviewNodeIds.begin(), trainingPreviewNodeIds.end());
+      for (int index = 0; index < graphState.getNumChildren(); ++index) {
+        auto child = graphState.getChild(index);
+        if (!child.hasType("Node"))
+          continue;
+        const auto nodeId = static_cast<std::int32_t>(child["id"]);
+        if (preview.count(nodeId) == 0)
+          continue;
+        child.setProperty("state", "frozen_gold", nullptr);
+        child.setProperty("artifactPath", juce::String(trainingPreviewPath),
+                          nullptr);
+        child.setProperty("blackBoxOrigin", "train_autoload", nullptr);
+      }
+    }
+  }
   graphPublisher.requestCompile(
       graphState, options, [this](const openyourbox::graph::GraphNode &node) {
         return resolveFrozenBlackBox(node);
@@ -832,6 +875,365 @@ void OpenYourBoxAudioProcessor::resetRandomizeParameter() {
     parameter->endChangeGesture();
   }
   lastRandomizeValue.store(false, std::memory_order_release);
+}
+
+bool OpenYourBoxAudioProcessor::prepareTrainedArtifact(
+    const openyourbox::graph::TrainJobResult &result, std::string &error) {
+  const auto channels = result.inputChannels > 0 ? result.inputChannels
+                                                 : getTotalNumInputChannels();
+  const auto field =
+      result.receptiveFieldSamples > 0 ? result.receptiveFieldSamples : 1;
+  auto loadChannels = channels;
+  const auto hostChannels = std::max(1, getTotalNumInputChannels());
+  const auto factory = openyourbox::dsp::TorchScriptBlackBoxFactory::load(
+      result.artifactPath, loadChannels, field, error, false,
+      result.acceptsConditioning, result.condDim);
+  if (factory == nullptr && loadChannels != hostChannels) {
+    error.clear();
+    loadChannels = hostChannels;
+    const auto retry = openyourbox::dsp::TorchScriptBlackBoxFactory::load(
+        result.artifactPath, loadChannels, field, error, false,
+        result.acceptsConditioning, result.condDim);
+    if (retry == nullptr)
+      return false;
+    const auto current = std::atomic_load_explicit(&publishedFrozenArtifacts,
+                                                   std::memory_order_acquire);
+    auto replacement = current != nullptr
+                           ? std::make_shared<FrozenArtifactRegistry>(*current)
+                           : std::make_shared<FrozenArtifactRegistry>();
+    replacement->artifacts[result.artifactPath] = retry;
+    std::atomic_store_explicit(
+        &publishedFrozenArtifacts,
+        std::shared_ptr<const FrozenArtifactRegistry>(std::move(replacement)),
+        std::memory_order_release);
+    return true;
+  }
+  if (factory == nullptr)
+    return false;
+  const auto current = std::atomic_load_explicit(&publishedFrozenArtifacts,
+                                                 std::memory_order_acquire);
+  auto replacement = current != nullptr
+                         ? std::make_shared<FrozenArtifactRegistry>(*current)
+                         : std::make_shared<FrozenArtifactRegistry>();
+  replacement->artifacts[result.artifactPath] = factory;
+  std::atomic_store_explicit(
+      &publishedFrozenArtifacts,
+      std::shared_ptr<const FrozenArtifactRegistry>(std::move(replacement)),
+      std::memory_order_release);
+  return true;
+}
+
+void OpenYourBoxAudioProcessor::setTrainingPreview(
+    const std::string &artifactPath, const std::vector<std::int32_t> &nodeIds) {
+  {
+    const juce::ScopedLock lock(trainingPreviewLock);
+    trainingPreviewPath = artifactPath;
+    trainingPreviewNodeIds = nodeIds;
+  }
+  requestGraphCompile();
+}
+
+void OpenYourBoxAudioProcessor::clearTrainingPreview() {
+  bool hadPreview = false;
+  {
+    const juce::ScopedLock lock(trainingPreviewLock);
+    hadPreview = !trainingPreviewPath.empty();
+    trainingPreviewPath.clear();
+    trainingPreviewNodeIds.clear();
+  }
+  if (hadPreview)
+    requestGraphCompile();
+}
+
+void OpenYourBoxAudioProcessor::setCaptureBypass(bool enabled) noexcept {
+  captureBypass.store(enabled, std::memory_order_release);
+}
+
+bool OpenYourBoxAudioProcessor::isCaptureBypassEnabled() const noexcept {
+  return captureBypass.load(std::memory_order_acquire);
+}
+
+bool OpenYourBoxAudioProcessor::startInputCapture(const juce::File &destination,
+                                                  double sampleRate,
+                                                  int channels) {
+  return inputCapture.start(destination, sampleRate, channels);
+}
+
+void OpenYourBoxAudioProcessor::drainInputCapture() { inputCapture.drain(); }
+
+juce::File OpenYourBoxAudioProcessor::stopInputCapture() {
+  return inputCapture.stop();
+}
+
+bool OpenYourBoxAudioProcessor::isInputCaptureActive() const noexcept {
+  return inputCapture.isActive();
+}
+
+openyourbox::capture::CapturePairing &
+OpenYourBoxAudioProcessor::getCapturePairing() noexcept {
+  return capturePairing;
+}
+
+const openyourbox::capture::CapturePairing &
+OpenYourBoxAudioProcessor::getCapturePairing() const noexcept {
+  return capturePairing;
+}
+
+openyourbox::library::TrainingLibrary &
+OpenYourBoxAudioProcessor::getTrainingLibrary() noexcept {
+  return trainingLibrary;
+}
+
+const openyourbox::library::TrainingLibrary &
+OpenYourBoxAudioProcessor::getTrainingLibrary() const noexcept {
+  return trainingLibrary;
+}
+
+void OpenYourBoxAudioProcessor::setStartTransportOnRecord(bool enabled) noexcept {
+  startTransportOnRecord.store(enabled, std::memory_order_release);
+}
+
+bool OpenYourBoxAudioProcessor::getStartTransportOnRecord() const noexcept {
+  return startTransportOnRecord.load(std::memory_order_acquire);
+}
+
+void OpenYourBoxAudioProcessor::timerCallback() { inputCapture.drain(); }
+
+void OpenYourBoxAudioProcessor::requestTransportStartIfNeeded() noexcept {
+  if (!startTransportOnRecord.load(std::memory_order_acquire) ||
+      isTransportPlaying())
+    return;
+  pendingTransportPlay.store(true, std::memory_order_release);
+  juce::MessageManager::callAsync(
+      [] { openyourbox::capture::requestHostTransportStart(); });
+}
+
+void OpenYourBoxAudioProcessor::setCaptureStatusMessage(
+    const juce::String &message) {
+  const juce::ScopedLock lock(captureStateLock);
+  captureStatusMessage = message;
+}
+
+juce::String OpenYourBoxAudioProcessor::takeCaptureStatusMessage() {
+  const juce::ScopedLock lock(captureStateLock);
+  return std::exchange(captureStatusMessage, {});
+}
+
+bool OpenYourBoxAudioProcessor::takeLibraryFocusRequest() noexcept {
+  const juce::ScopedLock lock(captureStateLock);
+  const auto requested = libraryFocusRequested;
+  libraryFocusRequested = false;
+  return requested;
+}
+
+bool OpenYourBoxAudioProcessor::startLocalCapture(const juce::String &pairId,
+                                                  const juce::String &suffix) {
+  const auto directory =
+      juce::File::getSpecialLocation(juce::File::tempDirectory)
+          .getChildFile("OpenYourBox")
+          .getChildFile("Capture");
+  directory.createDirectory();
+  const auto localFile = directory.getChildFile(pairId + suffix + ".wav");
+  setCaptureBypass(capturePairing.isCaptureBypassEnabled());
+  return startInputCapture(localFile, getCurrentSampleRate(),
+                           getTotalNumInputChannels());
+}
+
+void OpenYourBoxAudioProcessor::startPairedRecording() {
+  if (!capturePairing.canRecord()) {
+    setCaptureStatusMessage("Assign complementary Clean/Processed roles.");
+    return;
+  }
+  const auto pairId = juce::Uuid().toDashedString();
+  {
+    const juce::ScopedLock lock(captureStateLock);
+    activeCapturePairId = pairId;
+    localCaptureClip = juce::File();
+    pendingPeerClip = juce::File();
+    waitingForPeerClip = false;
+  }
+  if (!startLocalCapture(pairId, "_local")) {
+    setCaptureStatusMessage("Could not start capture");
+    return;
+  }
+  capturePairing.startRecording(pairId, getCurrentSampleRate());
+  requestTransportStartIfNeeded();
+}
+
+void OpenYourBoxAudioProcessor::stopPairedRecording() {
+  capturePairing.stopRecording();
+  const auto clip = stopInputCapture();
+  setCaptureBypass(false);
+  {
+    const juce::ScopedLock lock(captureStateLock);
+    localCaptureClip = clip;
+    waitingForPeerClip = true;
+  }
+  if (!clip.existsAsFile()) {
+    {
+      const juce::ScopedLock lock(captureStateLock);
+      waitingForPeerClip = false;
+    }
+    setCaptureStatusMessage("Capture discarded: no local audio was recorded");
+    return;
+  }
+  tryAssembleCapturedPair();
+}
+
+void OpenYourBoxAudioProcessor::tryAssembleCapturedPair() {
+  juce::File xFile;
+  juce::File yFile;
+  {
+    const juce::ScopedLock lock(captureStateLock);
+    if (!localCaptureClip.existsAsFile() || !pendingPeerClip.existsAsFile()) {
+      if (waitingForPeerClip)
+        captureStatusMessage = "Waiting for peer clip...";
+      return;
+    }
+    const auto localRole = capturePairing.getCaptureRole();
+    if (localRole == openyourbox::capture::CaptureRole::clean) {
+      xFile = localCaptureClip;
+      yFile = pendingPeerClip;
+    } else {
+      yFile = localCaptureClip;
+      xFile = pendingPeerClip;
+    }
+    waitingForPeerClip = false;
+  }
+  juce::String error;
+  juce::AudioFormatManager formats;
+  formats.registerBasicFormats();
+  std::unique_ptr<juce::AudioFormatReader> reader(formats.createReaderFor(xFile));
+  const auto duration =
+      reader != nullptr && reader->sampleRate > 0.0
+          ? static_cast<double>(reader->lengthInSamples) / reader->sampleRate
+          : 0.0;
+  const auto name = juce::String("Capture ") +
+                    juce::Time::getCurrentTime().formatted("%Y-%m-%d %H:%M");
+  if (!trainingLibrary.addCapturedPair(
+          name, xFile, yFile,
+          reader != nullptr ? reader->sampleRate : getCurrentSampleRate(),
+          reader != nullptr ? static_cast<int>(reader->numChannels)
+                            : std::max(1, getTotalNumInputChannels()),
+          duration, error)) {
+    setCaptureStatusMessage(error);
+    return;
+  }
+  {
+    const juce::ScopedLock lock(captureStateLock);
+    libraryFocusRequested = true;
+    captureStatusMessage = "Capture added to Training Library";
+    localCaptureClip = juce::File();
+    pendingPeerClip = juce::File();
+  }
+}
+
+void OpenYourBoxAudioProcessor::handlePairingMessage(const juce::var &message) {
+  const auto type = message.getProperty("type", {}).toString();
+  if (type == "clip_ready") {
+    {
+      const juce::ScopedLock lock(captureStateLock);
+      pendingPeerClip = juce::File(message.getProperty("path", {}).toString());
+    }
+    tryAssembleCapturedPair();
+    return;
+  }
+  if (type == "record_start" &&
+      capturePairing.getPairingRole() ==
+          openyourbox::capture::PairingRole::slave) {
+    const auto pairId = message.getProperty("pairId", {}).toString();
+    {
+      const juce::ScopedLock lock(captureStateLock);
+      activeCapturePairId = pairId;
+    }
+    const auto rate = static_cast<double>(
+        message.getProperty("sampleRate", getCurrentSampleRate()));
+    (void)rate;
+    if (!startLocalCapture(pairId, "_slave"))
+      setCaptureStatusMessage("Could not start slave capture");
+    else
+      requestTransportStartIfNeeded();
+    return;
+  }
+  if (type == "record_stop" &&
+      capturePairing.getPairingRole() ==
+          openyourbox::capture::PairingRole::slave) {
+    const auto clip = stopInputCapture();
+    juce::String pairId;
+    {
+      const juce::ScopedLock lock(captureStateLock);
+      pairId = activeCapturePairId;
+    }
+    if (clip.existsAsFile())
+      capturePairing.sendClipReady(pairId, clip);
+    setCaptureBypass(false);
+    return;
+  }
+  if (type == "set_bypass")
+    setCaptureBypass(capturePairing.isCaptureBypassEnabled());
+  else if (type == "peer_lost") {
+    if (isInputCaptureActive())
+      stopInputCapture();
+    setCaptureBypass(false);
+    waitingForPeerClip = false;
+    setCaptureStatusMessage("Peer disconnected");
+  }
+}
+
+bool OpenYourBoxAudioProcessor::startPreviewFile(const juce::File &file) {
+  juce::AudioFormatManager formats;
+  formats.registerBasicFormats();
+  std::unique_ptr<juce::AudioFormatReader> reader(formats.createReaderFor(file));
+  if (reader == nullptr)
+    return false;
+  auto preview = std::make_shared<PreviewState>();
+  const auto length = static_cast<int>(
+      std::min<juce::int64>(reader->lengthInSamples, 1 << 24));
+  preview->samples.setSize(static_cast<int>(reader->numChannels), length);
+  reader->read(&preview->samples, 0, length, 0, true, true);
+  preview->position.store(0, std::memory_order_release);
+  preview->active.store(true, std::memory_order_release);
+  std::atomic_store_explicit(&previewPlayback, preview,
+                             std::memory_order_release);
+  return true;
+}
+
+void OpenYourBoxAudioProcessor::stopPreview() {
+  if (auto preview = std::atomic_load_explicit(&previewPlayback,
+                                               std::memory_order_acquire))
+    preview->active.store(false, std::memory_order_release);
+}
+
+bool OpenYourBoxAudioProcessor::isPreviewPlaying() const noexcept {
+  if (auto preview = std::atomic_load_explicit(&previewPlayback,
+                                               std::memory_order_acquire))
+    return preview->active.load(std::memory_order_acquire);
+  return false;
+}
+
+void OpenYourBoxAudioProcessor::mixPreview(juce::AudioBuffer<float> &buffer,
+                                           int channels, int samples) noexcept {
+  auto preview = std::atomic_load_explicit(&previewPlayback,
+                                           std::memory_order_acquire);
+  if (preview == nullptr || !preview->active.load(std::memory_order_acquire))
+    return;
+  auto position = preview->position.load(std::memory_order_relaxed);
+  const auto total = preview->samples.getNumSamples();
+  const auto srcChannels = preview->samples.getNumChannels();
+  if (position >= total) {
+    preview->active.store(false, std::memory_order_release);
+    return;
+  }
+  for (int sample = 0; sample < samples && position < total; ++sample, ++position) {
+    for (int channel = 0; channel < channels; ++channel) {
+      const auto sourceChannel = std::min(channel, srcChannels - 1);
+      buffer.addSample(channel, sample,
+                       preview->samples.getSample(sourceChannel, position));
+    }
+  }
+  preview->position.store(position, std::memory_order_release);
+  if (position >= total)
+    preview->active.store(false, std::memory_order_release);
 }
 
 juce::AudioProcessor *JUCE_CALLTYPE createPluginFilter() {

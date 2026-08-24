@@ -149,9 +149,14 @@ public:
                   const FreezeSelectionResult &result);
 
   /**
-   * @brief Restores frozen Gold elements in the same compiled group to Live Blue.
-   * @param nodeId Any frozen node in the group.
+   * @brief Restores frozen Gold elements to Live Blue, keeping cables.
+   * @param nodeId Any frozen node in the group, or a train-origin BlackBox.
    * @return True when restoration succeeded.
+   *
+   * Train-origin BlackBoxes restore their source subgraph **and** the
+   * boundary cables that were connected when training finished. Restored
+   * weighted nodes keep the trained artifact path so audio still uses the
+   * trained weights.
    */
   bool unfreeze(std::int32_t nodeId);
 
@@ -162,6 +167,49 @@ public:
    */
   [[nodiscard]] std::optional<FreezeSelectionRequest>
   createFreezeRequest(const std::vector<std::int32_t> &selectedNodeIds) const;
+
+  /**
+   * @brief Builds a train-worker JSON snapshot of armed trainable nodes.
+   * @return Request DTO, or no value when fewer than one armed trainable node.
+   */
+  [[nodiscard]] std::optional<TrainJobRequest> createTrainRequest() const;
+
+  /**
+   * @brief Returns identifiers of currently armed trainable processing nodes.
+   */
+  [[nodiscard]] std::vector<std::int32_t> getArmedTrainableNodeIds() const;
+
+  /**
+   * @brief Sets the training-arm flag on a trainable node.
+   * @param nodeId Target node identifier.
+   * @param armed Whether the node is included in the next train snapshot.
+   * @return True when the node accepts arm state.
+   */
+  bool setArmedForTraining(std::int32_t nodeId, bool armed);
+
+  /**
+   * @brief Stores file-backed Weights provenance on a weight-bearing node.
+   * @param nodeId Target node identifier.
+   * @param path Absolute or app-relative weight file path.
+   * @return True when the node owns weights.
+   */
+  bool setWeightsPath(std::int32_t nodeId, const std::string &path);
+
+  /**
+   * @brief Restores seed provenance after randomization.
+   * @param nodeId Target node identifier.
+   * @param seed New randomization seed.
+   * @return True when the node owns weights.
+   */
+  bool clearWeightsToSeed(std::int32_t nodeId, std::int32_t seed);
+
+  /**
+   * @brief Replaces the armed trainable chain with a train-origin Gold BlackBox.
+   * @param result Successful train artifact metadata.
+   * @return Identifier of the new BlackBox, or no value on failure.
+   */
+  std::optional<std::int32_t>
+  absorbArmedChain(const TrainJobResult &result);
 
   /**
    * @brief Splits a freeze selection into independent source-to-sink chains.

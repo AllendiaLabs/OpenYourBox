@@ -72,3 +72,17 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+This product includes auraloss (used by the optional train worker):
+
+Copyright (c) Christian J. Steinmetz and contributors
+Licensed under the Apache License, Version 2.0.
+See https://github.com/csteinmetz1/auraloss
+
+This product optionally uses MLflow Tracking Server REST APIs for Train run
+tracking (Apache License 2.0, Copyright Databricks, Inc.). The train worker
+talks to a user-provided tracking server over HTTP and does not embed the
+MLflow Python package.
+See https://github.com/mlflow/mlflow
+and https://mlflow.org/docs/latest/api_reference/rest-api.html
+

@@ -80,3 +80,11 @@ During job: UI remains usable; audio uses prior model.
 - Embedding ml_forge / Dear PyGui application
 - Cloud training / marketplace (Phase 4)
 - User-editable train hyperparameters in v1
+
+## Implementation Anchors
+
+- Graph fields (FiLM pin, residual, PReLU, `dilationGrowth`, arm, Weights): `OpenYourBox/Source/graph/GraphTypes.h`, `OpenYourBox/Source/graph/NodeGraph.cpp`
+- Arm / Weights / growth UI: `OpenYourBox/Source/graph/NodeRenderer.cpp`
+- Live FiLM / residual / PReLU / Gⁿ: `OpenYourBox/Source/dsp/TCNModel.cpp`, `OpenYourBox/Source/dsp/LiveGraphEngine.cpp`
+- Train panel + copyright modal: `OpenYourBox/Source/ui/TrainPanel.cpp`, `OpenYourBox/Source/ui/CopyrightModal.cpp`
+- Weight browse/load: `OpenYourBox/Source/dsp/WeightLoader.cpp`

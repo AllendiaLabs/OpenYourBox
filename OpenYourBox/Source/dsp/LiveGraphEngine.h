@@ -15,7 +15,7 @@
 #include <vector>
 
 namespace openyourbox::dsp {
-/** @brief Linear ramp length for Gain, Knob, XY, and Dry/Wet. */
+/** @brief One-pole chase length for Gain, Knob, XY, and Dry/Wet (seconds). */
 inline constexpr double controlRampSecondsDefault = 0.15;
 
 /**
@@ -36,11 +36,11 @@ struct LiveGraphCompileOptions {
   /** @brief Host sample rate used to size control-value ramps. */
   double sampleRate = 44100.0;
   /**
-   * @brief Linear ramp duration for Gain, Knob Input, and XY Trackpad.
+   * @brief One-pole chase duration for Gain, Knob Input, and XY Trackpad.
    *
-   * Longer than the 50 ms `juce::dsp` default so large Knob/XY/Gain jumps
-   * (including multiply-as-gain) settle without zipper noise. Linear
-   * (not multiplicative) smoothing is required because Knob/XY may be 0.
+   * Linear ramps restart their slope on every UI update (~60 Hz) and buzz.
+   * Exponential smoothing stays continuous while the target moves. Knob/XY
+   * may be 0, so the chase is additive rather than multiplicative.
    */
   double controlRampSeconds = controlRampSecondsDefault;
 };
@@ -63,6 +63,18 @@ public:
    * @return Tensor shaped [1, outputChannels, samples].
    */
   virtual torch::Tensor forward(const torch::Tensor &input) = 0;
+
+  /**
+   * @brief Processes audio with an optional live conditioning tensor.
+   * @param input Contiguous CPU float tensor for the current audio block.
+   * @param conditioning Conditioning tensor, or undefined to use zeros.
+   * @return Tensor shaped [1, outputChannels, samples].
+   */
+  virtual torch::Tensor forwardWithConditioning(const torch::Tensor &input,
+                                                const torch::Tensor &conditioning) {
+    (void)conditioning;
+    return forward(input);
+  }
 };
 
 /**
@@ -484,7 +496,7 @@ public:
   [[nodiscard]] double
   getFrozenInferenceTimeMilliseconds(std::int32_t nodeId) const noexcept;
 
-  /** @brief Clears causal history without changing architecture or weights. */
+  /** @brief Clears causal audio and FiLM control history without changing architecture. */
   void reset() noexcept;
 
 private:

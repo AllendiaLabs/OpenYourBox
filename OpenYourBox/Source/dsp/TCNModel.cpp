@@ -26,12 +26,18 @@ void hashCombine(std::uint64_t &hash, std::uint64_t value) noexcept {
 
 namespace openyourbox::dsp {
 bool TCNConfiguration::isValid() const noexcept {
-  // Conv1d dilation is signed and 2^(depth-1) must remain representable.
-  return depth >= 1 && depth <= 30 && kernelSize >= 2 && channels >= 1 &&
-         dilation >= 1 &&
-         dilation <= (std::numeric_limits<int>::max() >> (depth - 1)) &&
-         inputChannels >= 1 && inputChannels <= 2 &&
-         outputChannels == inputChannels;
+  if (depth < 1 || depth > 30 || kernelSize < 2 || channels < 1 ||
+      dilation < 1 || dilationGrowth < 1 || dilationGrowth > 16 ||
+      inputChannels < 1 || inputChannels > 2 ||
+      outputChannels != inputChannels)
+    return false;
+  long long value = dilation;
+  for (int layer = 0; layer < depth; ++layer) {
+    if (value > std::numeric_limits<int>::max())
+      return false;
+    value *= dilationGrowth;
+  }
+  return true;
 }
 
 TCNModel::TCNModel(TCNConfiguration configuration) : config(configuration) {
@@ -45,15 +51,30 @@ TCNModel::TCNModel(TCNConfiguration configuration) : config(configuration) {
               .bias(false)));
 
   convolutions = register_module("convolutions", torch::nn::ModuleList());
+  residualProjections =
+      register_module("residual_projections", torch::nn::ModuleList());
+  preluActivations = register_module("prelu_activations", torch::nn::ModuleList());
   receptiveField = 1;
 
+  long long growthPower = 1;
   for (int layer = 0; layer < config.depth; ++layer) {
-    const auto dilation = config.dilation << layer;
+    const auto dilation = static_cast<int>(
+        std::min<long long>(config.dilation * growthPower,
+                            std::numeric_limits<int>::max()));
     convolutions->push_back(torch::nn::Conv1d(
         torch::nn::Conv1dOptions(config.channels, config.channels,
                                  config.kernelSize)
             .dilation(dilation)
             .bias(false)));
+    if (config.residual) {
+      residualProjections->push_back(torch::nn::Conv1d(
+          torch::nn::Conv1dOptions(config.channels, config.channels, 1)
+              .bias(false)));
+    }
+    if (config.activation == ActivationType::prelu) {
+      preluActivations->push_back(
+          torch::nn::PReLU(torch::nn::PReLUOptions().num_parameters(config.channels)));
+    }
 
     const auto contribution =
         static_cast<std::uint64_t>(config.kernelSize - 1) *
@@ -62,6 +83,10 @@ TCNModel::TCNModel(TCNConfiguration configuration) : config(configuration) {
                                         receptiveField
                          ? std::numeric_limits<std::uint64_t>::max()
                          : receptiveField + contribution;
+    if (growthPower > std::numeric_limits<long long>::max() / std::max(1, config.dilationGrowth))
+      growthPower = std::numeric_limits<long long>::max();
+    else
+      growthPower *= std::max(1, config.dilationGrowth);
   }
 
   outputProjection = register_module(
@@ -77,15 +102,27 @@ torch::Tensor TCNModel::forward(const torch::Tensor &input) {
   auto value = inputProjection->forward(input);
 
   for (std::size_t layer = 0; layer < convolutions->size(); ++layer) {
-    const auto dilation = static_cast<std::int64_t>(config.dilation) << layer;
+    long long growthPower = 1;
+    for (std::size_t index = 0; index < layer; ++index)
+      growthPower *= std::max(1, config.dilationGrowth);
+    const auto dilation = static_cast<std::int64_t>(
+        std::min<long long>(config.dilation * growthPower,
+                            std::numeric_limits<int>::max()));
     const auto leftPadding =
         static_cast<std::int64_t>(config.kernelSize - 1) * dilation;
+    auto residual = value;
     value = torch::nn::functional::pad(
         value, torch::nn::functional::PadFuncOptions({leftPadding, 0})
                    .mode(torch::kConstant)
                    .value(0.0));
     value = convolutions[layer]->as<torch::nn::Conv1d>()->forward(value);
-    value = applyActivation(std::move(value));
+    value = applyActivation(std::move(value), static_cast<int>(layer));
+    if (config.residual && layer < residualProjections->size()) {
+      auto projected =
+          residualProjections[layer]->as<torch::nn::Conv1d>()->forward(residual);
+      value = value + projected.narrow(2, projected.size(2) - value.size(2),
+                                       value.size(2));
+    }
   }
 
   return outputProjection->forward(value);
@@ -146,12 +183,14 @@ std::uint64_t TCNModel::getArchitectureHash() const noexcept {
   hashCombine(hash, static_cast<std::uint64_t>(config.inputChannels));
   hashCombine(hash, static_cast<std::uint64_t>(config.outputChannels));
   hashCombine(hash, static_cast<std::uint64_t>(config.activation));
+  hashCombine(hash, static_cast<std::uint64_t>(config.dilationGrowth));
+  hashCombine(hash, static_cast<std::uint64_t>(config.residual ? 1 : 0));
   hashCombine(hash, static_cast<std::uint64_t>(
                         static_cast<int>(config.gain * 1000.0f)));
   return hash;
 }
 
-torch::Tensor TCNModel::applyActivation(torch::Tensor value) const {
+torch::Tensor TCNModel::applyActivation(torch::Tensor value, int layer) {
   if (std::abs(config.gain - 1.0f) > 1.0e-6f)
     value = value * config.gain;
   switch (config.activation) {
@@ -163,6 +202,12 @@ torch::Tensor TCNModel::applyActivation(torch::Tensor value) const {
     return torch::tanh(value);
   case ActivationType::leakyRelu:
     return torch::leaky_relu(value, 0.01);
+  case ActivationType::prelu:
+    if (layer >= 0 && static_cast<std::size_t>(layer) < preluActivations->size())
+      return preluActivations[static_cast<std::size_t>(layer)]
+          ->as<torch::nn::PReLU>()
+          ->forward(value);
+    return torch::prelu(value, torch::tensor({0.25f}));
   }
 
   return value;

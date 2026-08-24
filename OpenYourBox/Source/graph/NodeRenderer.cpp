@@ -11,6 +11,7 @@
 #include <cstdio>
 #include <cstring>
 #include <limits>
+#include <string>
 
 namespace ed = ax::NodeEditor;
 
@@ -398,6 +399,23 @@ void NodeRenderer::renderNode(NodeGraph &graph, GraphNode &node,
     bool changed = false;
     int dragSteps = 0;
     beginPropertyRow(property.label.c_str());
+    if (property.key == "residual") {
+      bool residual = property.value != 0;
+      if (ImGui::Checkbox("##residual", &residual)) {
+        const auto previous = property.value;
+        property.setValue(residual ? 1 : 0);
+        if (!graph.setProperty(node.id, property.key, property.value))
+          property.setValue(previous);
+        else {
+          mutatedThisFrame = true;
+          recompileThisFrame = true;
+          if (callbacks.propertyChanged)
+            callbacks.propertyChanged(node.id, property.key, property.value);
+        }
+      }
+      ImGui::PopID();
+      continue;
+    }
     if (property.kind == PropertyKind::choice && !property.choices.empty()) {
       const auto choiceIndex =
           std::clamp(value, 0, static_cast<int>(property.choices.size()) - 1);
@@ -525,8 +543,6 @@ void NodeRenderer::renderNode(NodeGraph &graph, GraphNode &node,
     if (!node.useExplicitSeed)
       std::snprintf(seedBuffer.data(), seedBuffer.size(), "%d", node.seed);
 
-    if (!node.useExplicitSeed)
-      ImGui::BeginDisabled();
     const auto rowStart = ImGui::GetCursorPosX();
     ImGui::TextUnformatted("Seed");
     ImGui::SameLine();
@@ -542,6 +558,8 @@ void NodeRenderer::renderNode(NodeGraph &graph, GraphNode &node,
     }
     ImGui::SameLine();
     ImGui::SetNextItemWidth(seedControlWidth - ImGui::GetFrameHeight() - 8.0f);
+    if (!node.useExplicitSeed)
+      ImGui::BeginDisabled();
     if (ImGui::InputText("##seed", seedBuffer.data(), seedBuffer.size(),
                          ImGuiInputTextFlags_EnterReturnsTrue)) {
       std::int32_t parsed = 0;
@@ -589,6 +607,28 @@ void NodeRenderer::renderNode(NodeGraph &graph, GraphNode &node,
       mutatedThisFrame = true;
       callbacks.randomizeNode(node.id, appliedSeed);
     }
+  }
+
+  if (node.hasWeights && node.state == NodeState::liveBlue &&
+      !isControlSourceType(node.type)) {
+    bool armed = node.armedForTraining;
+    if (ImGui::Checkbox("Arm for training", &armed)) {
+      graph.setArmedForTraining(node.id, armed);
+      mutatedThisFrame = true;
+      if (callbacks.armChanged)
+        callbacks.armChanged(node.id, armed);
+    }
+  }
+
+  if (node.hasWeights || node.type == NodeType::blackBox) {
+    if (node.weightsProvenance == WeightsProvenance::file &&
+        !node.weightsPath.empty())
+      ImGui::TextWrapped("Weights: %s",
+                         juce::File(node.weightsPath).getFileName().toRawUTF8());
+    else
+      ImGui::Text("Weights: seed %d", node.seed);
+    if (ImGui::SmallButton("Browse weights") && callbacks.browseWeights)
+      callbacks.browseWeights(node.id);
   }
 
   if (node.metrics.has_value()) {
@@ -919,7 +959,7 @@ void NodeRenderer::handlePropertyCombo(NodeGraph &graph,
     const auto rowHeight = ImGui::GetTextLineHeightWithSpacing();
     const auto listHeight = std::min(
         rowHeight * static_cast<float>(property->choices.size()) + 8.0f,
-        120.0f);
+        220.0f);
     ImGui::BeginChild("PropertyComboList", ImVec2(76.0f, listHeight), false);
     for (int index = 0; index < static_cast<int>(property->choices.size());
          ++index) {

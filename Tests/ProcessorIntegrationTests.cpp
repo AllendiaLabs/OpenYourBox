@@ -320,6 +320,16 @@ int main() {
                        muted.getMagnitude(0, 0, muted.getNumSamples()) == 0.0f,
                    "audio output with no input must produce silence");
 
+  {
+    OpenYourBoxAudioProcessor activationProcessor;
+    auto configuration = activationProcessor.getRequestedConfiguration();
+    configuration.activation = openyourbox::dsp::ActivationType::prelu;
+    activationProcessor.applyGraphConfiguration(configuration);
+    passed &= expect(activationProcessor.getRequestedConfiguration().activation ==
+                         openyourbox::dsp::ActivationType::prelu,
+                     "PReLU must persist through the host activation parameter");
+  }
+
   if (passed)
     std::cout << "OpenYourBox processor integration tests passed\n";
   return passed ? 0 : 1;

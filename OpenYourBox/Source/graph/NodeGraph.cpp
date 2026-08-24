@@ -43,17 +43,91 @@ void normalizeGainProperty(openyourbox::graph::GraphNode &node) {
 }
 
 /**
+ * @brief Ensures Phase 3 TCN/Activation fields exist on loaded nodes.
+ * @param node Loaded or newly created processing node.
+ */
+void normalizePhase3Node(openyourbox::graph::GraphNode &node) {
+  using openyourbox::graph::NodeProperty;
+  using openyourbox::graph::NodeType;
+  using openyourbox::graph::PropertyKind;
+  using openyourbox::graph::SignalKind;
+  using openyourbox::graph::defaultDilationGrowth;
+  using openyourbox::graph::isTrainableType;
+  using openyourbox::graph::maximumDilationGrowth;
+  using openyourbox::graph::minimumDilationGrowth;
+
+  auto ensureActivationChoices = [](NodeProperty &property) {
+    if (property.key != "activation")
+      return;
+    property.kind = PropertyKind::choice;
+    property.choices = {"ReLU", "Sigmoid", "Tanh", "LeakyReLU", "PReLU"};
+    property.minimum = 0;
+    property.maximum = 4;
+    property.setValue(property.value);
+  };
+
+  if (node.type == NodeType::activation) {
+    for (auto &property : node.properties)
+      ensureActivationChoices(property);
+    if (node.hasWeights)
+      node.armedForTraining = node.armedForTraining || true;
+  }
+
+  if (node.type != NodeType::tcn)
+    return;
+
+  auto ensureInt = [&node](const char *key, const char *label, int value,
+                           int minimum, int maximum) {
+    for (auto &property : node.properties) {
+      if (property.key == key) {
+        property.minimum = minimum;
+        property.maximum = maximum;
+        property.setValue(property.value);
+        return;
+      }
+    }
+    NodeProperty property;
+    property.key = key;
+    property.label = label;
+    property.value = value;
+    property.minimum = minimum;
+    property.maximum = maximum;
+    node.properties.push_back(property);
+  };
+  ensureInt("dilation_growth", "Dilation growth", defaultDilationGrowth,
+            minimumDilationGrowth, maximumDilationGrowth);
+  ensureInt("residual", "Residual", 0, 0, 1);
+  for (auto &property : node.properties)
+    ensureActivationChoices(property);
+  if (node.hasWeights)
+    node.armedForTraining = true;
+}
+
+/**
  * @brief Restores conditioning pin metadata on Knob/XY source nodes.
  * @param node Loaded source node.
  */
 void normalizeConditioningPins(openyourbox::graph::GraphNode &node) {
   using openyourbox::graph::SignalKind;
-  if (!openyourbox::graph::isConditioningSourceType(node.type))
+  using openyourbox::graph::controlPinLabel;
+  using openyourbox::graph::isControlInputPin;
+  if (openyourbox::graph::isConditioningSourceType(node.type)) {
+    for (auto &pin : node.outputs) {
+      pin.signalKind = SignalKind::conditioning;
+      if (pin.shape.channels <= 0)
+        pin.shape.channels = 1;
+    }
     return;
-  for (auto &pin : node.outputs) {
+  }
+  if (node.type != openyourbox::graph::NodeType::tcn &&
+      node.type != openyourbox::graph::NodeType::blackBox)
+    return;
+  for (auto &pin : node.inputs) {
+    if (!isControlInputPin(pin))
+      continue;
+    pin.label = controlPinLabel;
     pin.signalKind = SignalKind::conditioning;
-    if (pin.shape.channels <= 0)
-      pin.shape.channels = 1;
+    pin.shape.channels = 0;
   }
 }
 
@@ -386,6 +460,22 @@ juce::ValueTree nodeToTree(const openyourbox::graph::GraphNode &node) {
   tree.setProperty("conditioningValue", node.conditioningValue, nullptr);
   tree.setProperty("conditioningX", node.conditioningX, nullptr);
   tree.setProperty("conditioningY", node.conditioningY, nullptr);
+  tree.setProperty("armedForTraining", node.armedForTraining, nullptr);
+  tree.setProperty("residual", node.residual, nullptr);
+  tree.setProperty("dilationGrowth", node.dilationGrowth, nullptr);
+  tree.setProperty("weightsProvenance",
+                   node.weightsProvenance ==
+                           openyourbox::graph::WeightsProvenance::file
+                       ? "file"
+                       : "random",
+                   nullptr);
+  tree.setProperty("weightsPath", juce::String(node.weightsPath), nullptr);
+  tree.setProperty("blackBoxOrigin",
+                   node.blackBoxOrigin ==
+                           openyourbox::graph::BlackBoxOrigin::trainAutoload
+                       ? "train_autoload"
+                       : "manual_freeze",
+                   nullptr);
 
   if (node.metrics.has_value()) {
     tree.setProperty("compileMs", node.metrics->compileTimeMilliseconds,
@@ -467,6 +557,22 @@ openyourbox::graph::GraphNode nodeFromTree(const juce::ValueTree &tree) {
       static_cast<float>(tree.getProperty("conditioningX", 0.0)));
   node.conditioningY = openyourbox::graph::clampConditioning(
       static_cast<float>(tree.getProperty("conditioningY", 0.0)));
+  node.armedForTraining =
+      static_cast<bool>(tree.getProperty("armedForTraining", true));
+  node.residual = static_cast<bool>(tree.getProperty("residual", false));
+  node.dilationGrowth = std::clamp(
+      static_cast<int>(tree.getProperty("dilationGrowth", defaultDilationGrowth)),
+      minimumDilationGrowth, maximumDilationGrowth);
+  node.weightsProvenance =
+      tree.getProperty("weightsProvenance", "random").toString() == "file"
+          ? WeightsProvenance::file
+          : WeightsProvenance::random;
+  node.weightsPath = tree["weightsPath"].toString().toStdString();
+  node.blackBoxOrigin =
+      tree.getProperty("blackBoxOrigin", "manual_freeze").toString() ==
+              "train_autoload"
+          ? BlackBoxOrigin::trainAutoload
+          : BlackBoxOrigin::manualFreeze;
 
   if (tree.hasProperty("inferenceMs")) {
     node.metrics =
@@ -516,6 +622,7 @@ openyourbox::graph::GraphNode nodeFromTree(const juce::ValueTree &tree) {
   normalizeMergeNodeProperties(node);
   normalizeGainProperty(node);
   normalizeConditioningPins(node);
+  normalizePhase3Node(node);
   return node;
 }
 
@@ -784,10 +891,25 @@ ConnectionResult NodeGraph::connect(std::int32_t firstPinId,
        source->signalKind == SignalKind::conditioning) ||
       (sourceNodePtr != nullptr &&
        isConditioningSourceType(sourceNodePtr->type));
+  const bool destinationIsControl =
+      destination != nullptr && isControlInputPin(*destination);
+
+  if (sourceIsConditioning && !destinationIsControl &&
+      destination->signalKind != SignalKind::conditioning &&
+      !(destinationNodePtr != nullptr &&
+        destinationNodePtr->type == NodeType::merge))
+    return {false, "Audio inputs cannot accept a conditioning cable"};
+
+  if (!destinationIsControl &&
+      destination->signalKind == SignalKind::conditioning &&
+      !sourceIsConditioning)
+    return {false,
+            "Control input requires a Knob, XY, Merge, or audio signal"};
 
   if (destinationNodePtr != nullptr &&
       destinationNodePtr->type == NodeType::merge &&
       destination->kind == PinKind::input && !sourceIsConditioning &&
+      !destinationIsControl &&
       !mergeInputConnectionIsValid(*this, *destinationNodePtr, source->id))
     return {false,
             "Merge add/multiply inputs must share the same channel count"};
@@ -795,7 +917,7 @@ ConnectionResult NodeGraph::connect(std::int32_t firstPinId,
   if (sourceNodePtr != nullptr && sourceNodePtr->type == NodeType::merge)
     updateMergeOutputShape(*this, *const_cast<GraphNode *>(sourceNodePtr));
 
-  if (!sourceIsConditioning &&
+  if (!destinationIsControl && !sourceIsConditioning &&
       !source->shape.isCompatibleWith(destination->shape)) {
     if (sourceNodePtr != nullptr && sourceNodePtr->type == NodeType::merge) {
       std::unordered_set<std::int32_t> visiting;
@@ -882,6 +1004,15 @@ bool NodeGraph::setProperty(std::int32_t nodeId, const std::string &key,
              property->kind == PropertyKind::choice && property->value >= 0 &&
              property->value < static_cast<int>(property->choices.size())) {
     node->detail = property->choices[static_cast<std::size_t>(property->value)];
+    node->hasWeights = property->value == 4;
+    if (node->hasWeights)
+      node->armedForTraining = true;
+  } else if (key == "residual" && node->type == NodeType::tcn) {
+    node->residual = property->value != 0;
+  } else if (key == "dilation_growth" && node->type == NodeType::tcn) {
+    node->dilationGrowth =
+        std::clamp(property->value, minimumDilationGrowth, maximumDilationGrowth);
+    property->value = node->dilationGrowth;
   }
   return true;
 }
@@ -1000,6 +1131,13 @@ bool NodeGraph::unfreeze(std::int32_t nodeId) {
     const auto fragment = juce::ValueTree::fromXml(*fragmentXml);
     if (!fragment.hasType("GraphFragment"))
       return false;
+    const auto trainedPath =
+        node->weightsPath.empty() ? node->artifactPath : node->weightsPath;
+    const auto keepTrainedWeights =
+        node->blackBoxOrigin == BlackBoxOrigin::trainAutoload ||
+        node->weightsProvenance == WeightsProvenance::file;
+    const auto trainOrigin =
+        node->blackBoxOrigin == BlackBoxOrigin::trainAutoload;
 
     removeNode(nodeId);
     for (const auto child : fragment) {
@@ -1011,6 +1149,13 @@ bool NodeGraph::unfreeze(std::int32_t nodeId) {
         nextPinId = std::max(nextPinId, pin.id + 1);
       for (const auto &pin : restored.outputs)
         nextPinId = std::max(nextPinId, pin.id + 1);
+      if (keepTrainedWeights && restored.hasWeights) {
+        restored.weightsProvenance = WeightsProvenance::file;
+        restored.weightsPath = trainedPath;
+        restored.artifactPath = trainedPath;
+        if (trainOrigin)
+          restored.blackBoxOrigin = BlackBoxOrigin::trainAutoload;
+      }
       nodes.push_back(std::move(restored));
     }
     for (const auto child : fragment) {
@@ -1035,6 +1180,10 @@ bool NodeGraph::unfreeze(std::int32_t nodeId) {
                              : candidate.artifactPath == artifactPath;
     if (!sameGroup)
       continue;
+    if (!artifactPath.empty()) {
+      candidate.weightsProvenance = WeightsProvenance::file;
+      candidate.weightsPath = artifactPath;
+    }
     candidate.state = NodeState::liveBlue;
     candidate.colour = colourForType(candidate.type, candidate.state);
     candidate.artifactPath.clear();
@@ -1159,6 +1308,20 @@ std::optional<FreezeSelectionRequest> NodeGraph::createFreezeRequest(
   options->setProperty("host_input_channels", inputChannels);
   options->setProperty("host_output_channels", outputChannels);
   options->setProperty("example_samples", 256);
+  int condDim = 0;
+  for (const auto &link : links) {
+    const auto destination = findNodeForPin(link.destinationPinId);
+    if (!destination.has_value() || selected.count(*destination) == 0)
+      continue;
+    const auto *destinationPin = findPin(link.destinationPinId);
+    if (destinationPin == nullptr || !isControlInputPin(*destinationPin))
+      continue;
+    const auto *sourcePin = findPin(link.sourcePinId);
+    if (sourcePin != nullptr && sourcePin->shape.channels > 0)
+      condDim = sourcePin->shape.channels;
+  }
+  options->setProperty("cond_dim", condDim);
+  options->setProperty("conditioning", condDim > 0);
   root->setProperty("compile_options", juce::var(options.release()));
   request.graphFragment =
       juce::JSON::toString(juce::var(root.release()), true).toStdString();
@@ -1296,6 +1459,21 @@ bool NodeGraph::restoreFromValueTree(const juce::ValueTree &tree) {
               links.end());
   ensureFixedStereoIo();
   refreshAllMergeOutputShapes(*this);
+  for (auto &node : nodes) {
+    if (node.type != NodeType::tcn && node.type != NodeType::blackBox)
+      continue;
+    bool hasControl = false;
+    for (auto &pin : node.inputs) {
+      if (isControlInputPin(pin)) {
+        pin.label = controlPinLabel;
+        pin.signalKind = SignalKind::conditioning;
+        hasControl = true;
+      }
+    }
+    if (!hasControl)
+      node.inputs.push_back({nextPinId++, controlPinLabel, PinKind::input,
+                             {0, "audio"}, SignalKind::conditioning});
+  }
   return true;
 }
 
@@ -1405,6 +1583,7 @@ GraphNode NodeGraph::makeNode(NodeType type, juce::Point<float> position) {
     node.label = "Linear";
     node.detail = "Weighted projection";
     node.hasWeights = true;
+    node.armedForTraining = true;
     addInput();
     addOutput();
     node.properties.push_back(property("features", "Features", 2, 1, 512));
@@ -1413,6 +1592,7 @@ GraphNode NodeGraph::makeNode(NodeType type, juce::Point<float> position) {
     node.label = "Conv1D";
     node.detail = "Temporal convolution";
     node.hasWeights = true;
+    node.armedForTraining = true;
     addInput();
     addOutput();
     node.properties.push_back(property("channels", "Channels", 2, 1, 512));
@@ -1425,23 +1605,31 @@ GraphNode NodeGraph::makeNode(NodeType type, juce::Point<float> position) {
     addInput();
     addOutput();
     node.properties.push_back(
-        property("activation", "Function", 0, 0, 3, PropertyKind::choice,
-                 {"ReLU", "Sigmoid", "Tanh", "LeakyReLU"}));
+        property("activation", "Function", 0, 0, 4, PropertyKind::choice,
+                 {"ReLU", "Sigmoid", "Tanh", "LeakyReLU", "PReLU"}));
     node.properties.push_back(gainProperty());
     break;
   case NodeType::tcn:
     node.label = "TCN";
     node.detail = "Live modular network";
     node.hasWeights = true;
+    node.armedForTraining = true;
+    node.dilationGrowth = defaultDilationGrowth;
     addInput();
+    addInput(controlPinLabel, 0, SignalKind::conditioning);
     addOutput();
     node.properties.push_back(property("depth", "Depth", 4, 1, 30));
     node.properties.push_back(property("kernel_size", "Kernel Size", 3, 2, 65));
     node.properties.push_back(property("channels", "Channels", 16, 1, 512));
     node.properties.push_back(property("dilation", "Dilation", 1, 1, 64));
+    node.properties.push_back(property("dilation_growth", "Dilation growth",
+                                       defaultDilationGrowth,
+                                       minimumDilationGrowth,
+                                       maximumDilationGrowth));
+    node.properties.push_back(property("residual", "Residual", 0, 0, 1));
     node.properties.push_back(
-        property("activation", "Activation", 0, 0, 3, PropertyKind::choice,
-                 {"ReLU", "Sigmoid", "Tanh", "LeakyReLU"}));
+        property("activation", "Activation", 0, 0, 4, PropertyKind::choice,
+                 {"ReLU", "Sigmoid", "Tanh", "LeakyReLU", "PReLU"}));
     node.properties.push_back(gainProperty());
     break;
   case NodeType::merge:
@@ -1461,14 +1649,16 @@ GraphNode NodeGraph::makeNode(NodeType type, juce::Point<float> position) {
     break;
   case NodeType::xyTrackpad:
     node.label = "XY Trackpad";
-    node.detail = "2D conditioning";
+    node.detail = "Independent X and Y outputs";
     addOutput("x", 1, SignalKind::conditioning);
     addOutput("y", 1, SignalKind::conditioning);
     break;
   case NodeType::blackBox:
     node.label = "Frozen Selection";
     node.detail = "Locked";
+    node.hasWeights = true;
     addInput();
+    addInput(controlPinLabel, 0, SignalKind::conditioning);
     addOutput();
     break;
   }
@@ -1626,5 +1816,221 @@ std::vector<std::vector<std::int32_t>> NodeGraph::partitionFreezeChains(
     chains.push_back(std::move(component));
   }
   return chains;
+}
+
+std::vector<std::int32_t> NodeGraph::getArmedTrainableNodeIds() const {
+  std::vector<std::int32_t> armed;
+  for (const auto &node : nodes) {
+    if (node.state != NodeState::liveBlue)
+      continue;
+    if (isControlSourceType(node.type) || !node.hasWeights)
+      continue;
+    if (node.armedForTraining)
+      armed.push_back(node.id);
+  }
+  return armed;
+}
+
+bool NodeGraph::setArmedForTraining(std::int32_t nodeId, bool armed) {
+  auto *node = findNode(nodeId);
+  if (node == nullptr || !node->hasWeights || isControlSourceType(node->type) ||
+      node->state == NodeState::frozenGold)
+    return false;
+  node->armedForTraining = armed;
+  return true;
+}
+
+bool NodeGraph::setWeightsPath(std::int32_t nodeId, const std::string &path) {
+  auto *node = findNode(nodeId);
+  if (node == nullptr || (!node->hasWeights && node->type != NodeType::blackBox))
+    return false;
+  node->weightsProvenance = WeightsProvenance::file;
+  node->weightsPath = path;
+  if (node->type == NodeType::blackBox)
+    node->artifactPath = path;
+  return true;
+}
+
+bool NodeGraph::clearWeightsToSeed(std::int32_t nodeId, std::int32_t seed) {
+  auto *node = findNode(nodeId);
+  if (node == nullptr || !node->hasWeights ||
+      node->state == NodeState::frozenGold)
+    return false;
+  node->seed = clampSeed(seed);
+  node->weightsProvenance = WeightsProvenance::random;
+  node->weightsPath.clear();
+  node->artifactPath.clear();
+  node->blackBoxOrigin = BlackBoxOrigin::manualFreeze;
+  return true;
+}
+
+std::optional<TrainJobRequest> NodeGraph::createTrainRequest() const {
+  const auto armed = getArmedTrainableNodeIds();
+  if (armed.empty())
+    return std::nullopt;
+
+  TrainJobRequest request;
+  request.requestId = juce::Uuid().toString().toStdString();
+  request.armedNodeIds = armed;
+
+  auto root = std::make_unique<juce::DynamicObject>();
+  root->setProperty("request_id", juce::String(request.requestId));
+  root->setProperty("operation", "train_steerable");
+  root->setProperty("command", "start");
+
+  juce::Array<juce::var> armedIds;
+  juce::Array<juce::var> elements;
+  const std::unordered_set<std::int32_t> selected(armed.begin(), armed.end());
+  for (const auto nodeId : armed) {
+    const auto *node = findNode(nodeId);
+    if (node == nullptr)
+      return std::nullopt;
+    armedIds.add(nodeId);
+    auto element = std::make_unique<juce::DynamicObject>();
+    element->setProperty("id", node->id);
+    element->setProperty("type", nodeTypeName(node->type));
+    element->setProperty("label", juce::String(node->label));
+    element->setProperty("seed", node->seed);
+    juce::Array<juce::var> properties;
+    for (const auto &property : node->properties) {
+      auto serialized = std::make_unique<juce::DynamicObject>();
+      serialized->setProperty("key", juce::String(property.key));
+      serialized->setProperty("value", property.value);
+      if (property.kind == PropertyKind::real)
+        serialized->setProperty("float_value", property.floatValue);
+      properties.add(juce::var(serialized.release()));
+    }
+    element->setProperty("properties", properties);
+    elements.add(juce::var(element.release()));
+  }
+  root->setProperty("armed_element_ids", armedIds);
+
+  auto fragment = std::make_unique<juce::DynamicObject>();
+  fragment->setProperty("elements", elements);
+  juce::Array<juce::var> connections;
+  juce::Array<juce::var> audioInputs;
+  juce::Array<juce::var> audioOutputs;
+  juce::Array<juce::var> conditioningInputs;
+  for (const auto &link : links) {
+    const auto sourceNode = findNodeForPin(link.sourcePinId);
+    const auto destinationNode = findNodeForPin(link.destinationPinId);
+    if (!sourceNode.has_value() || !destinationNode.has_value())
+      continue;
+    const auto sourceArmed = selected.count(*sourceNode) != 0;
+    const auto destinationArmed = selected.count(*destinationNode) != 0;
+    if (sourceArmed && destinationArmed) {
+      auto connection = std::make_unique<juce::DynamicObject>();
+      connection->setProperty("source_element_id", *sourceNode);
+      connection->setProperty("destination_element_id", *destinationNode);
+      connections.add(juce::var(connection.release()));
+    } else if (!sourceArmed && destinationArmed)
+      audioInputs.add(*destinationNode);
+    else if (sourceArmed && !destinationArmed)
+      audioOutputs.add(*sourceNode);
+  }
+  fragment->setProperty("connections", connections);
+  auto io = std::make_unique<juce::DynamicObject>();
+  io->setProperty("audio_inputs", audioInputs);
+  io->setProperty("audio_outputs", audioOutputs);
+  io->setProperty("conditioning_inputs", conditioningInputs);
+  fragment->setProperty("io_boundary", juce::var(io.release()));
+  root->setProperty("graph_fragment", juce::var(fragment.release()));
+  request.graphFragment =
+      juce::JSON::toString(juce::var(root.release()), true).toStdString();
+  return request;
+}
+
+std::optional<std::int32_t>
+NodeGraph::absorbArmedChain(const TrainJobResult &result) {
+  if (result.artifactPath.empty())
+    return std::nullopt;
+  const auto armed = getArmedTrainableNodeIds();
+  if (armed.empty())
+    return std::nullopt;
+
+  juce::ValueTree fragment{"GraphFragment"};
+  const std::unordered_set<std::int32_t> selected(armed.begin(), armed.end());
+  juce::Point<float> centroid;
+  for (const auto nodeId : armed) {
+    const auto *node = findNode(nodeId);
+    if (node == nullptr)
+      return std::nullopt;
+    fragment.appendChild(nodeToTree(*node), nullptr);
+    centroid += node->position;
+  }
+  centroid /= static_cast<float>(armed.size());
+  for (const auto &link : links) {
+    const auto source = findNodeForPin(link.sourcePinId);
+    const auto destination = findNodeForPin(link.destinationPinId);
+    if (!source.has_value() || !destination.has_value())
+      continue;
+    if (selected.count(*source) != 0 || selected.count(*destination) != 0)
+      fragment.appendChild(linkToTree(link), nullptr);
+  }
+
+  struct Boundary {
+    std::int32_t sourcePin = 0;
+    std::int32_t destinationPin = 0;
+    bool control = false;
+  };
+  std::vector<Boundary> incoming;
+  std::vector<Boundary> outgoing;
+  for (const auto &link : links) {
+    const auto source = findNodeForPin(link.sourcePinId);
+    const auto destination = findNodeForPin(link.destinationPinId);
+    if (!source.has_value() || !destination.has_value())
+      continue;
+    const auto *destinationPin = findPin(link.destinationPinId);
+    const bool destControl =
+        destinationPin != nullptr && isControlInputPin(*destinationPin);
+    if (selected.count(*source) == 0 && selected.count(*destination) != 0)
+      incoming.push_back({link.sourcePinId, 0, destControl});
+    else if (selected.count(*source) != 0 && selected.count(*destination) == 0)
+      outgoing.push_back({0, link.destinationPinId, false});
+  }
+
+  auto box = makeNode(NodeType::blackBox, centroid);
+  box.label = "Trained Steerable";
+  box.detail = "Locked";
+  box.state = NodeState::frozenGold;
+  box.colour = colourForType(box.type, box.state);
+  box.artifactPath = result.artifactPath;
+  box.weightsPath = result.artifactPath;
+  box.weightsProvenance = WeightsProvenance::file;
+  box.blackBoxOrigin = BlackBoxOrigin::trainAutoload;
+  box.hasWeights = true;
+  box.sourceSubgraph = fragment.toXmlString().toStdString();
+  const auto boxId = box.id;
+  const auto audioIn = box.inputs.front().id;
+  std::int32_t controlIn = 0;
+  for (const auto &pin : box.inputs) {
+    if (isControlInputPin(pin))
+      controlIn = pin.id;
+  }
+  const auto audioOut = box.outputs.front().id;
+  nodes.push_back(std::move(box));
+
+  bool wiredAudioIn = false;
+  bool wiredControl = false;
+  for (const auto &edge : incoming) {
+    if (edge.control && controlIn != 0 && !wiredControl) {
+      links.push_back({nextLinkId++, edge.sourcePin, controlIn});
+      wiredControl = true;
+    } else if (!edge.control && !wiredAudioIn) {
+      links.push_back({nextLinkId++, edge.sourcePin, audioIn});
+      wiredAudioIn = true;
+    }
+  }
+  bool wiredAudioOut = false;
+  for (const auto &edge : outgoing) {
+    if (!wiredAudioOut) {
+      links.push_back({nextLinkId++, audioOut, edge.destinationPin});
+      wiredAudioOut = true;
+    }
+  }
+
+  for (auto nodeId : armed)
+    removeNode(nodeId);
+  return boxId;
 }
 } // namespace openyourbox::graph

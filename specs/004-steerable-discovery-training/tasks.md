@@ -34,12 +34,12 @@ description: "Task list for Steerable Discovery & Training (Phase 3)"
 
 **Purpose**: Confirm design artifacts and scaffolding before code changes.
 
-- [ ] T001 Verify Phase 3 design artifact cross-links and path conventions in `specs/004-steerable-discovery-training/plan.md`
-- [ ] T002 [P] Add implementation anchor notes for pairing/capture in `specs/004-steerable-discovery-training/contracts/instance-pairing-capture-contract.md`
-- [ ] T003 [P] Add implementation anchor notes for train IPC in `specs/004-steerable-discovery-training/contracts/train-worker-ipc.md`
-- [ ] T004 [P] Add implementation anchor notes for library UI in `specs/004-steerable-discovery-training/contracts/training-library-ui-contract.md`
-- [ ] T005 [P] Add implementation anchor notes for steerable graph/Train UI in `specs/004-steerable-discovery-training/contracts/steerable-graph-ui-contract.md`
-- [ ] T006 Create `OpenYourBox/Source/capture/`, `OpenYourBox/Source/train/`, and `OpenYourBox/Source/library/` directories and wire them into `CMakeLists.txt`
+- [X] T001 Verify Phase 3 design artifact cross-links and path conventions in `specs/004-steerable-discovery-training/plan.md`
+- [X] T002 [P] Add implementation anchor notes for pairing/capture in `specs/004-steerable-discovery-training/contracts/instance-pairing-capture-contract.md`
+- [X] T003 [P] Add implementation anchor notes for train IPC in `specs/004-steerable-discovery-training/contracts/train-worker-ipc.md`
+- [X] T004 [P] Add implementation anchor notes for library UI in `specs/004-steerable-discovery-training/contracts/training-library-ui-contract.md`
+- [X] T005 [P] Add implementation anchor notes for steerable graph/Train UI in `specs/004-steerable-discovery-training/contracts/steerable-graph-ui-contract.md`
+- [X] T006 Create `OpenYourBox/Source/capture/`, `OpenYourBox/Source/train/`, and `OpenYourBox/Source/library/` directories and wire them into `CMakeLists.txt`
 
 ---
 
@@ -49,18 +49,18 @@ description: "Task list for Steerable Discovery & Training (Phase 3)"
 
 **⚠️ CRITICAL**: No user story work can begin until this phase is complete.
 
-- [ ] T007 Extend `GraphTypes.h` with FiLM pin metadata, `dilationGrowth`, `residual`, `prelu` activation, `armedForTraining`, and Weights provenance fields in `OpenYourBox/Source/graph/GraphTypes.h`
-- [ ] T008 [P] Extend TCN/Activation factory defaults (growth default 2, arm default true for trainable nodes) in `OpenYourBox/Source/graph/NodeGraph.cpp`
-- [ ] T009 Persist new Phase 3 node fields in graph `ValueTree` serialization in `OpenYourBox/Source/graph/NodeGraph.cpp`
-- [ ] T010 [P] Add FiLM conditioning input pin creation for TCN in `OpenYourBox/Source/graph/NodeGraph.cpp`
-- [ ] T011 Extend connection validation for TCN FiLM pin (`signalKind` conditioning) in `OpenYourBox/Source/graph/NodeGraph.cpp`
-- [ ] T012 [P] Scaffold `TrainingLibrary` store API (paths, index load/save) in `OpenYourBox/Source/library/TrainingLibrary.h`
-- [ ] T013 [P] Scaffold `TrainCoordinator` ChildProcess shell mirroring freeze in `OpenYourBox/Source/train/TrainCoordinator.h`
-- [ ] T014 [P] Scaffold pairing session types (master/slave, roles, sync state) in `OpenYourBox/Source/capture/CapturePairing.h`
-- [ ] T015 Add copyright-acknowledgment local persistence helper in `OpenYourBox/Source/library/CopyrightAcknowledgment.h`
-- [ ] T016 Wire new modules into editor/processor includes in `OpenYourBox/Source/PluginEditor.h` and `OpenYourBox/Source/PluginProcessor.h`
-- [ ] T017 Add empty `Backend/train_worker.py` entrypoint with JSON stdin/stdout handshake stub in `Backend/train_worker.py`
-- [ ] T018 Embed/package `train_worker.py` the same way as freeze worker in `CMakeLists.txt` (or existing BinaryData pipeline)
+- [X] T007 Extend `GraphTypes.h` with FiLM pin metadata, `dilationGrowth`, `residual`, `prelu` activation, `armedForTraining`, and Weights provenance fields in `OpenYourBox/Source/graph/GraphTypes.h`
+- [X] T008 [P] Extend TCN/Activation factory defaults (growth default 2, arm default true for trainable nodes) in `OpenYourBox/Source/graph/NodeGraph.cpp`
+- [X] T009 Persist new Phase 3 node fields in graph `ValueTree` serialization in `OpenYourBox/Source/graph/NodeGraph.cpp`
+- [X] T010 [P] Add FiLM conditioning input pin creation for TCN in `OpenYourBox/Source/graph/NodeGraph.cpp`
+- [X] T011 Extend connection validation for TCN FiLM pin (`signalKind` conditioning) in `OpenYourBox/Source/graph/NodeGraph.cpp`
+- [X] T012 [P] Scaffold `TrainingLibrary` store API (paths, index load/save) in `OpenYourBox/Source/library/TrainingLibrary.h`
+- [X] T013 [P] Scaffold `TrainCoordinator` ChildProcess shell mirroring freeze in `OpenYourBox/Source/train/TrainCoordinator.h`
+- [X] T014 [P] Scaffold pairing session types (master/slave, roles, sync state) in `OpenYourBox/Source/capture/CapturePairing.h`
+- [X] T015 Add copyright-acknowledgment local persistence helper in `OpenYourBox/Source/library/CopyrightAcknowledgment.h`
+- [X] T016 Wire new modules into editor/processor includes in `OpenYourBox/Source/PluginEditor.h` and `OpenYourBox/Source/PluginProcessor.h`
+- [X] T017 Add empty `Backend/train_worker.py` entrypoint with JSON stdin/stdout handshake stub in `Backend/train_worker.py`
+- [X] T018 Embed/package `train_worker.py` the same way as freeze worker in `CMakeLists.txt` (or existing BinaryData pipeline)
 
 **Checkpoint**: Types, persistence, and module skeletons ready — story work can begin.
 
@@ -74,20 +74,20 @@ description: "Task list for Steerable Discovery & Training (Phase 3)"
 
 ### Implementation for User Story 1
 
-- [ ] T019 [P] [US1] Implement Training Library index persistence (entries, tags schema, selected IDs) in `OpenYourBox/Source/library/TrainingLibrary.cpp`
-- [ ] T020 [P] [US1] Implement pair file storage under plugin user-data and delete-with-confirm cleanup in `OpenYourBox/Source/library/TrainingLibrary.cpp`
-- [ ] T021 [US1] Implement file-pair import (align/crop length mismatch) in `OpenYourBox/Source/library/TrainingLibrary.cpp`
-- [ ] T022 [P] [US1] Implement localhost discovery registry + InterprocessConnection pairing in `OpenYourBox/Source/capture/CapturePairing.cpp`
-- [ ] T023 [US1] Implement master/slave role assignment and complementary Clean/Processed enforcement in `OpenYourBox/Source/capture/CapturePairing.cpp`
-- [ ] T024 [US1] Implement preallocated input-ring capture and record start/stop sync messages in `OpenYourBox/Source/capture/CaptureRecorder.cpp`
-- [ ] T025 [US1] Implement capture bypass flag (default on) with restore-on-exit in `OpenYourBox/Source/PluginProcessor.cpp`
-- [ ] T026 [US1] On successful stop, assemble x/y pair and append to Training Library in `OpenYourBox/Source/capture/CaptureRecorder.cpp`
-- [ ] T027 [P] [US1] Build Library panel list+detail UI (browse, multi-select, rename, delete) in `OpenYourBox/Source/ui/TrainingLibraryPanel.cpp`
-- [ ] T028 [US1] Add x/y in-plugin preview playback controls in `OpenYourBox/Source/ui/TrainingLibraryPanel.cpp`
-- [ ] T029 [US1] Build Capture Samples master menu and reduced slave menu in `OpenYourBox/Source/ui/CaptureSamplesPanel.cpp`
-- [ ] T030 [US1] Implement copyright acknowledgment modal + local log gate helper usage in `OpenYourBox/Source/ui/CopyrightModal.cpp`
-- [ ] T031 [US1] Orchestrate Library/Capture panels from editor in `OpenYourBox/Source/PluginEditor.cpp`
-- [ ] T032 [US1] Block Train enablement until ack + ≥1 selected pair (stub Train button) in `OpenYourBox/Source/ui/TrainPanel.cpp`
+- [X] T019 [P] [US1] Implement Training Library index persistence (entries, tags schema, selected IDs) in `OpenYourBox/Source/library/TrainingLibrary.cpp`
+- [X] T020 [P] [US1] Implement pair file storage under plugin user-data and delete-with-confirm cleanup in `OpenYourBox/Source/library/TrainingLibrary.cpp`
+- [X] T021 [US1] Implement file-pair import (align/crop length mismatch) in `OpenYourBox/Source/library/TrainingLibrary.cpp`
+- [X] T022 [P] [US1] Implement localhost discovery registry + InterprocessConnection pairing in `OpenYourBox/Source/capture/CapturePairing.cpp`
+- [X] T023 [US1] Implement master/slave role assignment and complementary Clean/Processed enforcement in `OpenYourBox/Source/capture/CapturePairing.cpp`
+- [X] T024 [US1] Implement preallocated input-ring capture and record start/stop sync messages in `OpenYourBox/Source/capture/CaptureRecorder.cpp`
+- [X] T025 [US1] Implement capture bypass flag (default on) with restore-on-exit in `OpenYourBox/Source/PluginProcessor.cpp`
+- [X] T026 [US1] On successful stop, assemble x/y pair and append to Training Library in `OpenYourBox/Source/capture/CaptureRecorder.cpp`
+- [X] T027 [P] [US1] Build Library panel list+detail UI (browse, multi-select, rename, delete) in `OpenYourBox/Source/ui/TrainingLibraryPanel.cpp`
+- [X] T028 [US1] Add x/y in-plugin preview playback controls in `OpenYourBox/Source/ui/TrainingLibraryPanel.cpp`
+- [X] T029 [US1] Build Capture Samples master menu and reduced slave menu in `OpenYourBox/Source/ui/CaptureSamplesPanel.cpp`
+- [X] T030 [US1] Implement copyright acknowledgment modal + local log gate helper usage in `OpenYourBox/Source/ui/CopyrightModal.cpp`
+- [X] T031 [US1] Orchestrate Library/Capture panels from editor in `OpenYourBox/Source/PluginEditor.cpp`
+- [X] T032 [US1] Block Train enablement until ack + ≥1 selected pair (stub Train button) in `OpenYourBox/Source/ui/TrainPanel.cpp`
 
 **Checkpoint**: Library + Capture ingest work; file-only and DAW capture paths validated (quickstart scenarios 2–3).
 
@@ -101,20 +101,20 @@ description: "Task list for Steerable Discovery & Training (Phase 3)"
 
 ### Implementation for User Story 2
 
-- [ ] T033 [P] [US2] Implement armed-subgraph JSON snapshot builder for train requests in `OpenYourBox/Source/graph/NodeGraph.cpp`
-- [ ] T034 [P] [US2] Implement `TrainCoordinator::start/pause/resume/stop` and progress event parsing in `OpenYourBox/Source/train/TrainCoordinator.cpp`
-- [ ] T035 [US2] Stream progress (step, loss, lr, status) to UI without audio-thread work in `OpenYourBox/Source/train/TrainCoordinator.cpp`
-- [ ] T036 [US2] Implement `Backend/train_worker.py` model build from graph fragment (FiLM-TCN capable) in `Backend/train_worker.py`
-- [ ] T037 [US2] Implement Adam + MultiStep LR schedule (80%/95%) and ca=0 conditioning in `Backend/train_worker.py`
-- [ ] T038 [US2] Implement MR-STFT loss with fft/win `{32,128,512,2048}` and hops `{16,64,256,1024}` in `Backend/train_worker.py`
-- [ ] T039 [US2] Implement RF-aware cropping and default segment length ~228308 (clamped) in `Backend/train_worker.py`
-- [ ] T040 [US2] Implement pause/resume/stop command handling and ~2500-step loop in `Backend/train_worker.py`
-- [ ] T041 [US2] On success, export TorchScript artifact path in response JSON in `Backend/train_worker.py`
-- [ ] T042 [US2] On stop/failure, ensure no auto-load signal to plugin in `OpenYourBox/Source/train/TrainCoordinator.cpp`
-- [ ] T043 [US2] Build Train panel Run/Pause/Stop, loss/step, RF/window info line in `OpenYourBox/Source/ui/TrainPanel.cpp`
-- [ ] T044 [US2] Enforce mixed sample-rate selection block before start in `OpenYourBox/Source/ui/TrainPanel.cpp`
-- [ ] T045 [US2] Keep audio path on previously loaded model during job in `OpenYourBox/Source/PluginProcessor.cpp`
-- [ ] T046 [P] [US2] Add Python unit/smoke tests for recipe constants and RF crop helper in `Tests/test_train_worker.py`
+- [X] T033 [P] [US2] Implement armed-subgraph JSON snapshot builder for train requests in `OpenYourBox/Source/graph/NodeGraph.cpp`
+- [X] T034 [P] [US2] Implement `TrainCoordinator::start/pause/resume/stop` and progress event parsing in `OpenYourBox/Source/train/TrainCoordinator.cpp`
+- [X] T035 [US2] Stream progress (step, loss, lr, status) to UI without audio-thread work in `OpenYourBox/Source/train/TrainCoordinator.cpp`
+- [X] T036 [US2] Implement `Backend/train_worker.py` model build from graph fragment (FiLM-TCN capable) in `Backend/train_worker.py`
+- [X] T037 [US2] Implement Adam + MultiStep LR schedule (80%/95%) and ca=0 conditioning in `Backend/train_worker.py`
+- [X] T038 [US2] Implement MR-STFT loss with fft/win `{32,128,512,2048}` and hops `{16,64,256,1024}` in `Backend/train_worker.py`
+- [X] T039 [US2] Implement RF-aware cropping and default segment length ~228308 (clamped) in `Backend/train_worker.py`
+- [X] T040 [US2] Implement pause/resume/stop command handling and ~2500-step loop in `Backend/train_worker.py`
+- [X] T041 [US2] On success, export TorchScript artifact path in response JSON in `Backend/train_worker.py`
+- [X] T042 [US2] On stop/failure, ensure no auto-load signal to plugin in `OpenYourBox/Source/train/TrainCoordinator.cpp`
+- [X] T043 [US2] Build Train panel Run/Pause/Stop, loss/step, RF/window info line in `OpenYourBox/Source/ui/TrainPanel.cpp`
+- [X] T044 [US2] Enforce mixed sample-rate selection block before start in `OpenYourBox/Source/ui/TrainPanel.cpp`
+- [X] T045 [US2] Keep audio path on previously loaded model during job in `OpenYourBox/Source/PluginProcessor.cpp`
+- [X] T046 [P] [US2] Add Python unit/smoke tests for recipe constants and RF crop helper in `Tests/test_train_worker.py`
 
 **Checkpoint**: Train runs non-blocking with correct recipe; Stop leaves model unchanged (quickstart scenario 4).
 
@@ -128,15 +128,15 @@ description: "Task list for Steerable Discovery & Training (Phase 3)"
 
 ### Implementation for User Story 3
 
-- [ ] T047 [P] [US3] Implement arm/disarm UI only on trainable-parameter nodes (default armed) in `OpenYourBox/Source/graph/NodeRenderer.cpp`
-- [ ] T048 [US3] Exclude control sources from arm and from train snapshot absorption in `OpenYourBox/Source/graph/NodeGraph.cpp`
-- [ ] T049 [US3] Off-thread prepare + atomic swap of trained TorchScript into Gold BlackBox for armed chain in `OpenYourBox/Source/PluginEditor.cpp`
-- [ ] T050 [US3] Preserve `sourceSubgraph` + weight provenance for train-origin BlackBoxes in `OpenYourBox/Source/graph/NodeGraph.cpp`
-- [ ] T051 [US3] Keep Knob/XY/Audio sources Blue and rewire conditioning into Gold ports on auto-load in `OpenYourBox/Source/graph/NodeGraph.cpp`
-- [ ] T052 [US3] Extend Unfreeze to restore Blue nodes **with trained weight tensors/paths** in `OpenYourBox/Source/graph/NodeGraph.cpp`
-- [ ] T053 [US3] Add retry-load path when artifact exists but swap fails in `OpenYourBox/Source/train/TrainCoordinator.cpp`
-- [ ] T054 [US3] Show Gold styling/lock affordance consistent with Phase 2 freeze in `OpenYourBox/Source/graph/NodeRenderer.cpp`
-- [ ] T055 [US3] Ensure free-c live control after auto-load via existing Knob/XY runtime path in `OpenYourBox/Source/dsp/LiveGraphEngine.cpp`
+- [X] T047 [P] [US3] Implement arm/disarm UI only on trainable-parameter nodes (default armed) in `OpenYourBox/Source/graph/NodeRenderer.cpp`
+- [X] T048 [US3] Exclude control sources from arm and from train snapshot absorption in `OpenYourBox/Source/graph/NodeGraph.cpp`
+- [X] T049 [US3] Off-thread prepare + atomic swap of trained TorchScript into Gold BlackBox for armed chain in `OpenYourBox/Source/PluginEditor.cpp`
+- [X] T050 [US3] Preserve `sourceSubgraph` + weight provenance for train-origin BlackBoxes in `OpenYourBox/Source/graph/NodeGraph.cpp`
+- [X] T051 [US3] Keep Knob/XY/Audio sources Blue and rewire conditioning into Gold ports on auto-load in `OpenYourBox/Source/graph/NodeGraph.cpp`
+- [X] T052 [US3] Extend Unfreeze to restore Blue nodes **with trained weight tensors/paths** in `OpenYourBox/Source/graph/NodeGraph.cpp`
+- [X] T053 [US3] Add retry-load path when artifact exists but swap fails in `OpenYourBox/Source/train/TrainCoordinator.cpp`
+- [X] T054 [US3] Show Gold styling/lock affordance consistent with Phase 2 freeze in `OpenYourBox/Source/graph/NodeRenderer.cpp`
+- [X] T055 [US3] Ensure free-c live control after auto-load via existing Knob/XY runtime path in `OpenYourBox/Source/dsp/LiveGraphEngine.cpp`
 
 **Checkpoint**: Train → Gold → steer c; Unfreeze keeps weights (quickstart scenarios 5–7).
 
@@ -150,14 +150,14 @@ description: "Task list for Steerable Discovery & Training (Phase 3)"
 
 ### Implementation for User Story 4
 
-- [ ] T056 [P] [US4] Implement per-block FiLM in live TCN forward in `OpenYourBox/Source/dsp/TCNModel.cpp`
-- [ ] T057 [P] [US4] Replace power-of-two-only dilation with growth^n schedule in `OpenYourBox/Source/dsp/TCNModel.cpp`
-- [ ] T058 [US4] Implement optional residual path in TCN blocks in `OpenYourBox/Source/dsp/TCNModel.cpp`
-- [ ] T059 [US4] Add PReLU activation path for Activation and TCN in `OpenYourBox/Source/dsp/TCNModel.cpp` and related activation modules
-- [ ] T060 [US4] Expose residual checkbox, PReLU choice, and Dilation growth control in `OpenYourBox/Source/graph/NodeRenderer.cpp`
-- [ ] T061 [US4] Show live dilations `1→G→G²→…` and RF (samples/ms) readout plus presets 2/8/10 in `OpenYourBox/Source/graph/NodeRenderer.cpp`
-- [ ] T062 [US4] Apply missing FiLM input as c=0 in live engine in `OpenYourBox/Source/dsp/LiveGraphEngine.cpp`
-- [ ] T063 [US4] Align train_worker TCN construction with live growth/residual/FiLM/PReLU semantics in `Backend/train_worker.py`
+- [X] T056 [P] [US4] Implement per-block FiLM in live TCN forward in `OpenYourBox/Source/dsp/TCNModel.cpp`
+- [X] T057 [P] [US4] Replace power-of-two-only dilation with growth^n schedule in `OpenYourBox/Source/dsp/TCNModel.cpp`
+- [X] T058 [US4] Implement optional residual path in TCN blocks in `OpenYourBox/Source/dsp/TCNModel.cpp`
+- [X] T059 [US4] Add PReLU activation path for Activation and TCN in `OpenYourBox/Source/dsp/TCNModel.cpp` and related activation modules
+- [X] T060 [US4] Expose residual checkbox, PReLU choice, and Dilation growth control in `OpenYourBox/Source/graph/NodeRenderer.cpp`
+- [X] T061 [US4] Show live dilations `1→G→G²→…` and RF (samples/ms) readout plus presets 2/8/10 in `OpenYourBox/Source/graph/NodeRenderer.cpp`
+- [X] T062 [US4] Apply missing FiLM input as c=0 in live engine in `OpenYourBox/Source/dsp/LiveGraphEngine.cpp`
+- [X] T063 [US4] Align train_worker TCN construction with live growth/residual/FiLM/PReLU semantics in `Backend/train_worker.py`
 
 **Checkpoint**: Users can build steerable-nafx-equivalent live graphs (quickstart scenario 1).
 
@@ -171,11 +171,11 @@ description: "Task list for Steerable Discovery & Training (Phase 3)"
 
 ### Implementation for User Story 5
 
-- [ ] T064 [P] [US5] Implement Weights property display (seed vs path) in `OpenYourBox/Source/graph/NodeRenderer.cpp`
-- [ ] T065 [US5] Implement browse file chooser and off-thread compatible weight load with atomic swap in `OpenYourBox/Source/dsp/WeightLoader.cpp`
-- [ ] T066 [US5] Reject incompatible files without changing active weights in `OpenYourBox/Source/dsp/WeightLoader.cpp`
-- [ ] T067 [US5] Update Weights path on train auto-load and preserve across Unfreeze in `OpenYourBox/Source/graph/NodeGraph.cpp`
-- [ ] T068 [US5] Clear to seed provenance on randomize in `OpenYourBox/Source/dsp/WeightRandomizer.cpp`
+- [X] T064 [P] [US5] Implement Weights property display (seed vs path) in `OpenYourBox/Source/graph/NodeRenderer.cpp`
+- [X] T065 [US5] Implement browse file chooser and off-thread compatible weight load with atomic swap in `OpenYourBox/Source/dsp/WeightLoader.cpp`
+- [X] T066 [US5] Reject incompatible files without changing active weights in `OpenYourBox/Source/dsp/WeightLoader.cpp`
+- [X] T067 [US5] Update Weights path on train auto-load and preserve across Unfreeze in `OpenYourBox/Source/graph/NodeGraph.cpp`
+- [X] T068 [US5] Clear to seed provenance on randomize in `OpenYourBox/Source/dsp/WeightRandomizer.cpp`
 
 **Checkpoint**: Weights provenance and browse load work (quickstart scenario 5–6 extras).
 
@@ -185,12 +185,12 @@ description: "Task list for Steerable Discovery & Training (Phase 3)"
 
 **Purpose**: Hardening, packaging, and full quickstart validation.
 
-- [ ] T069 [P] Document auraloss/MR-STFT dependency install for train worker in `Backend/requirements.txt` (or project packaging docs)
-- [ ] T070 [P] Add C++ regression coverage for dilation growth^n and FiLM pin validation in `Tests/LiveGraphEngineTests.cpp`
-- [ ] T071 Add library SR-mismatch and selection-gate coverage in `Tests/` (new or existing suite)
-- [ ] T072 Verify UI stays responsive under train CPU load and no audio-thread allocations in capture/train paths in `OpenYourBox/Source/PluginProcessor.cpp`
-- [ ] T073 Run full `specs/004-steerable-discovery-training/quickstart.md` scenarios 1–8 and record results in `specs/004-steerable-discovery-training/checklists/requirements.md` Notes
-- [ ] T074 [P] Update `NOTICE` if auraloss/third-party train deps require attribution in `NOTICE`
+- [X] T069 [P] Document auraloss/MR-STFT dependency install for train worker in `Backend/requirements.txt` (or project packaging docs)
+- [X] T070 [P] Add C++ regression coverage for dilation growth^n and FiLM pin validation in `Tests/LiveGraphEngineTests.cpp`
+- [X] T071 Add library SR-mismatch and selection-gate coverage in `Tests/` (new or existing suite)
+- [X] T072 Verify UI stays responsive under train CPU load and no audio-thread allocations in capture/train paths in `OpenYourBox/Source/PluginProcessor.cpp`
+- [X] T073 Run full `specs/004-steerable-discovery-training/quickstart.md` scenarios 1–8 and record results in `specs/004-steerable-discovery-training/checklists/requirements.md` Notes
+- [X] T074 [P] Update `NOTICE` if auraloss/third-party train deps require attribution in `NOTICE`
 
 ---
 

@@ -39,6 +39,10 @@ struct NodeRendererCallbacks {
   std::function<void(std::int32_t, float)> knobChanged;
   /** @brief Invoked when XY Trackpad conditioning changes. */
   std::function<void(std::int32_t, float, float)> xyChanged;
+  /** @brief Invoked when a trainable node is armed or disarmed for training. */
+  std::function<void(std::int32_t, bool)> armChanged;
+  /** @brief Invoked when the user browses a weight file for a node. */
+  std::function<void(std::int32_t)> browseWeights;
 };
 
 /**

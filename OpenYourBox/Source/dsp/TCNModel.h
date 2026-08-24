@@ -7,20 +7,27 @@
 
 namespace openyourbox::dsp {
 /** @brief Non-linearities available after each temporal convolution. */
-enum class ActivationType { relu = 0, sigmoid, tanh, leakyRelu };
+enum class ActivationType { relu = 0, sigmoid, tanh, leakyRelu, prelu };
+
+/** @brief Inclusive maximum activation enum index (PReLU). */
+inline constexpr int maximumActivationIndex = 4;
 
 /** @brief Immutable architecture settings used to construct a TCN. */
 struct TCNConfiguration {
   int depth = 4;
   int kernelSize = 3;
   int channels = 16;
-  /** @brief Base dilation multiplied by each layer's power-of-two schedule. */
+  /** @brief Base dilation multiplied by each layer's growth^n schedule. */
   int dilation = 1;
+  /** @brief Dilation growth G so layer n uses dilation `dilation * G^n`. */
+  int dilationGrowth = 2;
   int inputChannels = 2;
   int outputChannels = 2;
   ActivationType activation = ActivationType::relu;
   /** @brief Pre-nonlinearity Gain applied to each TCN activation stage. */
   float gain = 1.0f;
+  /** @brief Whether each temporal block adds a residual path. */
+  bool residual = false;
 
   /** @brief Returns true when all values can be represented by LibTorch Conv1d.
    */
@@ -72,11 +79,13 @@ public:
   [[nodiscard]] std::uint64_t getArchitectureHash() const noexcept;
 
 private:
-  torch::Tensor applyActivation(torch::Tensor value) const;
+  torch::Tensor applyActivation(torch::Tensor value, int layer);
 
   TCNConfiguration config;
   torch::nn::Conv1d inputProjection{nullptr};
   torch::nn::ModuleList convolutions;
+  torch::nn::ModuleList residualProjections;
+  torch::nn::ModuleList preluActivations;
   torch::nn::Conv1d outputProjection{nullptr};
   std::uint64_t receptiveField = 1;
 };
