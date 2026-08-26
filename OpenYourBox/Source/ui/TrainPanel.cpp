@@ -27,11 +27,30 @@ void TrainPanel::render(const train::TrainCoordinator &coordinator,
   const auto busy = status == train::TrainStatus::running ||
                     status == train::TrainStatus::paused;
   const bool mixed = gates.mixedSampleRates;
+  const bool unpairedMapping =
+      objective == graph::TrainObjective::mapping && gates.unpairedSelected;
+  const bool reconstructionBlocked =
+      objective == graph::TrainObjective::reconstruction &&
+      gates.reconstructionPathInvalid;
   const bool gated =
       !gates.copyrightAcknowledged || gates.selectedPairCount < 1 ||
-      gates.armedElementCount < 1 || mixed;
+      gates.armedElementCount < 1 || mixed || unpairedMapping ||
+      reconstructionBlocked;
 
-  ImGui::Text("%d pairs selected · ~%.1f min", gates.selectedPairCount,
+  const char *objectiveLabel =
+      objective == graph::TrainObjective::reconstruction ? "Reconstruction"
+                                                         : "Mapping";
+  if (ImGui::BeginCombo("Objective", objectiveLabel)) {
+    if (ImGui::Selectable("Mapping",
+                          objective == graph::TrainObjective::mapping))
+      objective = graph::TrainObjective::mapping;
+    if (ImGui::Selectable("Reconstruction",
+                          objective == graph::TrainObjective::reconstruction))
+      objective = graph::TrainObjective::reconstruction;
+    ImGui::EndCombo();
+  }
+
+  ImGui::Text("%d items selected · ~%.1f min", gates.selectedPairCount,
               gates.selectedDurationSeconds / 60.0);
   if (ImGui::SmallButton("Open Library") && callbacks.openLibrary)
     callbacks.openLibrary();
@@ -73,6 +92,12 @@ void TrainPanel::render(const train::TrainCoordinator &coordinator,
   if (mixed)
     ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.3f, 1.0f), "%s",
                        gates.blockReason.toRawUTF8());
+  else if (unpairedMapping)
+    ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.3f, 1.0f),
+                       "Mapping cannot train unpaired clips. Deselect them.");
+  else if (reconstructionBlocked)
+    ImGui::TextColored(ImVec4(1.0f, 0.4f, 0.3f, 1.0f), "%s",
+                       gates.reconstructionReason.toRawUTF8());
   else if (gates.selectedPairCount < 1)
     ImGui::TextDisabled("Select at least one library pair.");
   else if (gates.armedElementCount < 1)
@@ -145,6 +170,8 @@ void TrainPanel::render(const train::TrainCoordinator &coordinator,
     ImGui::Text("Status: %s", statusText.toRawUTF8());
   }
   ImGui::Text("Step %d / %d", progress.step, progress.totalSteps);
+  if (progress.stage.empty() == false)
+    ImGui::Text("Stage: %s", progress.stage.c_str());
   ImGui::Text("Loss %.4f   Best %.4f   LR %.2e", progress.loss,
               progress.bestLoss > 0.0 ? progress.bestLoss : progress.loss,
               progress.learningRate);

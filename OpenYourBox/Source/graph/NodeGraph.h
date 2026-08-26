@@ -33,9 +33,12 @@ public:
   std::int32_t addNode(NodeType type, juce::Point<float> position);
 
   /**
-   * @brief Ensures the graph has exactly one undeletable stereo input and output.
+   * @brief Ensures the graph has exactly one undeletable host input and output.
+   *
+   * Channel mode is Mono, Mirrored, or Stereo from each node's Mode property
+   * (default Stereo). Existing modes are preserved.
    */
-  void ensureFixedStereoIo();
+  void ensureFixedHostIo();
 
   /**
    * @brief Removes a node and every connection attached to it.
@@ -173,6 +176,20 @@ public:
    * @return Request DTO, or no value when fewer than one armed trainable node.
    */
   [[nodiscard]] std::optional<TrainJobRequest> createTrainRequest() const;
+
+  /**
+   * @brief Returns true when an armed path can run reconstruction Train.
+   *
+   * Requires a variational bottleneck on a live path that can decode back
+   * to audio (optional matching PQMF synthesis).
+   */
+  [[nodiscard]] bool hasReconstructionTrainPath() const;
+
+  /**
+   * @brief User-facing reason when reconstruction Train is blocked.
+   * @return Empty when `hasReconstructionTrainPath()` is true.
+   */
+  [[nodiscard]] std::string reconstructionGateMessage() const;
 
   /**
    * @brief Returns identifiers of currently armed trainable processing nodes.

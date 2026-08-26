@@ -168,11 +168,28 @@ public:
       acceptsTimeVaryingConditioning =
           probeTimeVaryingConditioning(module, probe, conditioningDim);
     }
+    encodeDecode = module.find_method("encode").has_value() &&
+                   module.find_method("decode").has_value();
+    try {
+      if (module.hasattr("latent_mean"))
+        latentMean = module.attr("latent_mean").toTensor().contiguous();
+      if (module.hasattr("latent_pca"))
+        latentPca = module.attr("latent_pca").toTensor().contiguous();
+      if (module.hasattr("cumulative_variance"))
+        cumulativeVariance =
+            module.attr("cumulative_variance").toTensor().contiguous();
+    } catch (const std::exception &) {
+    }
   }
 
   /** @brief Executes one frozen inference call. */
   torch::Tensor forward(const torch::Tensor &input) override {
     torch::InferenceMode inferenceGuard;
+    if (encodeDecode) {
+      auto latent = encode(input);
+      if (latent.defined())
+        return decode(latent);
+    }
     if (!acceptsConditioning)
       return module.forward({input}).toTensor();
     auto audio = matchChannelCount(input, inputChannels);
@@ -187,6 +204,8 @@ public:
   torch::Tensor forwardWithConditioning(
       const torch::Tensor &input, const torch::Tensor &conditioning) override {
     torch::InferenceMode inferenceGuard;
+    if (encodeDecode)
+      return forward(input);
     if (!acceptsConditioning)
       return forward(input);
     auto audio = matchChannelCount(input, inputChannels);
@@ -195,6 +214,36 @@ public:
                                       condTimeLength(audio.size(2)));
     return matchChannelCount(module.forward({audio, cond}).toTensor(),
                              static_cast<int>(input.size(1)));
+  }
+
+  torch::Tensor encode(const torch::Tensor &input) override {
+    torch::InferenceMode inferenceGuard;
+    if (!encodeDecode)
+      return {};
+    try {
+      return module.get_method("encode")({input}).toTensor();
+    } catch (const std::exception &) {
+      return {};
+    }
+  }
+
+  torch::Tensor decode(const torch::Tensor &latent) override {
+    torch::InferenceMode inferenceGuard;
+    if (!encodeDecode)
+      return {};
+    try {
+      return module.get_method("decode")({latent}).toTensor();
+    } catch (const std::exception &) {
+      return {};
+    }
+  }
+
+  bool hasEncodeDecode() const noexcept override { return encodeDecode; }
+
+  torch::Tensor compactnessMean() const override { return latentMean; }
+  torch::Tensor compactnessPca() const override { return latentPca; }
+  torch::Tensor compactnessCumulative() const override {
+    return cumulativeVariance;
   }
 
 private:
@@ -219,6 +268,14 @@ private:
   int inputChannels = 1;
   /** @brief Flattened control width the module was traced against. */
   int conditioningDim = 2;
+  /** @brief True when encode and decode methods exist. */
+  bool encodeDecode = false;
+  /** @brief Optional compactness mean loaded from the artifact. */
+  torch::Tensor latentMean;
+  /** @brief Optional compactness PCA loaded from the artifact. */
+  torch::Tensor latentPca;
+  /** @brief Optional cumulative variance loaded from the artifact. */
+  torch::Tensor cumulativeVariance;
 };
 } // namespace
 
@@ -293,11 +350,15 @@ TorchScriptBlackBoxFactory::load(const std::string &artifactPath,
       return {};
     }
 
+    const auto encodeDecode =
+        module.find_method("encode").has_value() &&
+        module.find_method("decode").has_value();
+
     return std::shared_ptr<const TorchScriptBlackBoxFactory>(
         new TorchScriptBlackBoxFactory(
             artifactPath, inputChannels, static_cast<int>(output.size(1)),
             receptiveFieldSamples, parameters, preserves, conditioned,
-            resolvedCondDim));
+            resolvedCondDim, encodeDecode));
   } catch (const std::exception &exception) {
     error = exception.what();
     return {};
@@ -336,6 +397,10 @@ TorchScriptBlackBoxFactory::createKernel() const {
   }
 }
 
+bool TorchScriptBlackBoxFactory::hasEncodeDecode() const noexcept {
+  return encodeDecode;
+}
+
 const std::string &
 TorchScriptBlackBoxFactory::getArtifactPath() const noexcept {
   return artifactPath;
@@ -347,9 +412,11 @@ TorchScriptBlackBoxFactory::TorchScriptBlackBoxFactory(std::string path,
                                                        std::uint64_t parameters,
                                                        bool silence,
                                                        bool conditionedModule,
-                                                       int condDim)
+                                                       int condDim,
+                                                       bool encodeDecodeMethods)
     : artifactPath(std::move(path)), validatedInputChannels(inputs),
       validatedOutputChannels(outputs), receptiveField(field),
       parameterCount(parameters), silencePreserving(silence),
-      conditioned(conditionedModule), conditioningDim(std::max(1, condDim)) {}
+      conditioned(conditionedModule), conditioningDim(std::max(1, condDim)),
+      encodeDecode(encodeDecodeMethods) {}
 } // namespace openyourbox::dsp

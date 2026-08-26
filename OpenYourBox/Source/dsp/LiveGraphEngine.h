@@ -75,6 +75,38 @@ public:
     (void)conditioning;
     return forward(input);
   }
+
+  /**
+   * @brief Encodes audio into a full-width latent trajectory when exported.
+   * @param input Contiguous CPU float tensor for the current audio block.
+   * @return Latent tensor, or an undefined tensor when the method is absent.
+   */
+  virtual torch::Tensor encode(const torch::Tensor &input) {
+    (void)input;
+    return {};
+  }
+
+  /**
+   * @brief Decodes a full-width latent trajectory when exported.
+   * @param latent Contiguous CPU float latent tensor.
+   * @return Audio tensor, or an undefined tensor when the method is absent.
+   */
+  virtual torch::Tensor decode(const torch::Tensor &latent) {
+    (void)latent;
+    return {};
+  }
+
+  /** @brief True when encode and decode methods were validated on the artifact. */
+  [[nodiscard]] virtual bool hasEncodeDecode() const noexcept { return false; }
+
+  /** @brief Compactness mean buffer, or undefined. */
+  [[nodiscard]] virtual torch::Tensor compactnessMean() const { return {}; }
+
+  /** @brief Compactness PCA basis, or undefined. */
+  [[nodiscard]] virtual torch::Tensor compactnessPca() const { return {}; }
+
+  /** @brief Cumulative explained-variance ratios, or undefined. */
+  [[nodiscard]] virtual torch::Tensor compactnessCumulative() const { return {}; }
 };
 
 /**
@@ -111,6 +143,12 @@ public:
    */
   [[nodiscard]] virtual std::unique_ptr<FrozenBlackBoxKernel>
   createKernel() const = 0;
+
+  /**
+   * @brief Reports whether the artifact exports encode/decode beside forward.
+   * @return True when those methods were present at load.
+   */
+  [[nodiscard]] virtual bool hasEncodeDecode() const noexcept { return false; }
 };
 
 /**
@@ -130,6 +168,8 @@ struct RuntimeControlState {
   std::unordered_map<std::int32_t, float> gainByNodeId;
   /** @brief Per-node Knob/XY values; XY stores X in [0] and Y in [1]. */
   std::unordered_map<std::int32_t, std::array<float, 2>> conditioningByNodeId;
+  /** @brief Per-node fidelity percent for bottleneck and Gold RAVE. */
+  std::unordered_map<std::int32_t, float> fidelityByNodeId;
 };
 
 /** @brief Signal source used to compute a static analysis snapshot. */
@@ -244,7 +284,8 @@ inline std::uint64_t nextGraphRevision(std::uint64_t current) noexcept {
  * @brief Builds a compact legend label for one analysis trace.
  * @param channelIndex Zero-based channel or feature index.
  * @param channelCount Total traces at the analysis point.
- * @return `L`/`R` for stereo, otherwise `chN`.
+ * @return `L`/`R` for stereo audio; otherwise `chN` for every channel
+ *   including each feature dimension plotted on the shared axes.
  */
 inline std::string analysisChannelLabel(int channelIndex,
                                         int channelCount) {

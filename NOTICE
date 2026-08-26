@@ -86,3 +86,18 @@ MLflow Python package.
 See https://github.com/mlflow/mlflow
 and https://mlflow.org/docs/latest/api_reference/rest-api.html
 
+This product includes PQMF filter-bank design and reconstruction-training
+recipe patterns adapted from RAVE (Realtime Audio Variational autoEncoder)
+by Antoine Caillon and Philippe Esling, and from the acids-rave reference
+implementation (IRCAM ACIDS):
+
+  Caillon, A. & Esling, P. (2021). RAVE: A variational autoencoder for
+  fast and high-quality neural audio synthesis. arXiv:2111.05011.
+  https://github.com/acids-ircam/RAVE
+
+The acids-rave reference is licensed under Creative Commons
+Attribution-NonCommercial 4.0 International. OpenYourBox reimplements the
+published causal PQMF, rate-change, variational, and two-stage training
+behaviour; it does not vendor the acids-rave Python package.
+See https://creativecommons.org/licenses/by-nc/4.0/
+

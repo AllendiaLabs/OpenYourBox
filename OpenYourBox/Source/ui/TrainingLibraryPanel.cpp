@@ -11,6 +11,9 @@ void TrainingLibraryPanel::render(library::TrainingLibrary &library,
   if (ImGui::Button("Import pair") && callbacks.importPair)
     callbacks.importPair();
   ImGui::SameLine();
+  if (ImGui::Button("Import clip") && callbacks.importClip)
+    callbacks.importClip();
+  ImGui::SameLine();
   if (ImGui::Button("Select all"))
     library.selectAll();
   ImGui::SameLine();
@@ -25,16 +28,25 @@ void TrainingLibraryPanel::render(library::TrainingLibrary &library,
     if (ImGui::Checkbox("##sel", &selected))
       library.setSelected(entry.id, selected);
     ImGui::SameLine();
+    const auto kindLabel =
+        entry.kind == library::LibraryEntryKind::clip ? "Clip" : "Pair";
     const auto label =
-        entry.displayName + "  [" +
+        entry.displayName + "  [" + kindLabel + " · " +
         (entry.source == library::PairSource::capture ? "Capture" : "Import") +
         "]";
+    const bool ineligible =
+        objective == graph::TrainObjective::mapping &&
+        entry.kind == library::LibraryEntryKind::clip;
+    if (ineligible)
+      ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.72f, 0.25f, 1.0f));
     if (ImGui::Selectable(label.toRawUTF8(), focusedId == entry.id)) {
       focusedId = entry.id;
       std::snprintf(nameBuffer.data(), nameBuffer.size(), "%s",
                     entry.displayName.toRawUTF8());
       confirmDelete = false;
     }
+    if (ineligible)
+      ImGui::PopStyleColor();
     ImGui::PopID();
   }
   ImGui::EndChild();

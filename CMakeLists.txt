@@ -131,13 +131,18 @@ target_sources(OpenYourBox PRIVATE
     OpenYourBox/Source/dsp/LiveGraphEngine.cpp
     OpenYourBox/Source/dsp/LiveGraphPublisher.cpp
     OpenYourBox/Source/dsp/LookbackBuffer.cpp
+    OpenYourBox/Source/dsp/NoiseSynthesizer.cpp
+    OpenYourBox/Source/dsp/PqmfBank.cpp
+    OpenYourBox/Source/dsp/RateConv.cpp
     OpenYourBox/Source/dsp/TCNModel.cpp
     OpenYourBox/Source/dsp/TorchScriptBlackBox.cpp
+    OpenYourBox/Source/dsp/VariationalBottleneck.cpp
     OpenYourBox/Source/dsp/WeightLoader.cpp
     OpenYourBox/Source/dsp/WeightRandomizer.cpp
     OpenYourBox/Source/freeze/FreezeCoordinator.cpp
     OpenYourBox/Source/graph/NodeGraph.cpp
     OpenYourBox/Source/graph/NodeRenderer.cpp
+    OpenYourBox/Source/graph/RaveLayouts.cpp
     OpenYourBox/Source/library/CopyrightAcknowledgment.cpp
     OpenYourBox/Source/library/TrainingLibrary.cpp
     OpenYourBox/Source/params/ParamLayout.cpp

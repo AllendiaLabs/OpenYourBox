@@ -321,6 +321,21 @@ def build_module(
     fragment: dict[str, Any], input_channels: int = 1, cond_dim: int = 2
 ) -> nn.Module:
     """Construct a trainable module for an armed graph fragment."""
+    rave_types = {
+        "pqmf_analysis",
+        "pqmf_synthesis",
+        "rate_conv",
+        "variational_bottleneck",
+        "noise_synthesizer",
+    }
+    types = {
+        str(element.get("type", ""))
+        for element in fragment.get("elements", [])
+        if isinstance(element, dict)
+    }
+    if types & rave_types:
+        return build_rave_graph_module(fragment, input_channels, cond_dim)
+
     modules: list[nn.Module] = []
     channels = input_channels
     cond_dim = max(1, int(cond_dim))
@@ -335,17 +350,16 @@ def build_module(
             output_channels = int(properties.get("features", channels))
             modules.append(nn.Conv1d(channels, output_channels, 1, bias=False))
             channels = output_channels
-        elif element_type == "conv1d":
+        elif element_type in {"conv1d", "rate_conv"}:
             output_channels = int(properties.get("channels", channels))
-            modules.append(
-                CausalConv1d(
-                    channels,
-                    output_channels,
-                    int(properties.get("kernel_size", 3)),
-                    int(properties.get("dilation", 1)),
-                )
-            )
+            modules.append(_make_strided_conv(channels, output_channels, properties))
             channels = output_channels
+        elif element_type == "conv_transpose1d":
+            output_channels = int(properties.get("channels", channels))
+            modules.append(_make_conv_transpose(channels, output_channels, properties))
+            channels = output_channels
+        elif element_type == "batch_norm":
+            modules.append(nn.BatchNorm1d(channels))
         elif element_type == "tcn":
             hidden = int(properties.get("channels", channels))
             depth = int(properties.get("depth", 4))
@@ -378,7 +392,713 @@ def _module_receptive_field(module: nn.Module) -> int:
     for layer in module.modules():
         if isinstance(layer, CausalConv1d):
             field += layer.left_padding
+        if isinstance(layer, RateConvLayer):
+            field += max(0, int(layer.kernel_size) - 1) * int(layer.dilation)
     return field
+
+
+class PqmfLayer(nn.Module):
+    """Causal cosine-modulated PQMF analysis or synthesis."""
+
+    def __init__(self, n_band: int, analysis: bool) -> None:
+        """Create a fixed Kaiser-modulated bank."""
+        super().__init__()
+        self.n_band = max(1, int(n_band))
+        self.analysis = bool(analysis)
+        taps = max(4 * self.n_band + 1, 15)
+        if taps % 2 == 0:
+            taps += 1
+        t = torch.arange(taps) - taps // 2
+        cutoff = math.pi / self.n_band
+        proto = torch.where(
+            t == 0,
+            torch.full_like(t, cutoff / math.pi, dtype=torch.float32),
+            torch.sin(cutoff * t.float()) / (math.pi * t.float()),
+        )
+        window = torch.hann_window(taps, periodic=False)
+        proto = proto * window
+        bank = []
+        for k in range(self.n_band):
+            phase = ((-1) ** k) * math.pi / 4
+            mod = torch.cos((2 * k + 1) * math.pi / (2 * self.n_band) * t.float() + phase)
+            bank.append(2 * proto * mod)
+        weight = torch.stack(bank, 0).unsqueeze(1)
+        self.register_buffer("weight", weight)
+        self.left_padding = taps - 1
+
+    def forward(self, samples: torch.Tensor) -> torch.Tensor:
+        """Analyse or synthesise depending on construction."""
+        if self.n_band == 1:
+            return samples
+        if self.analysis:
+            parts = []
+            for channel in range(samples.shape[1]):
+                mono = samples[:, channel : channel + 1]
+                padded = functional.pad(mono, (self.left_padding, 0))
+                parts.append(functional.conv1d(padded, self.weight, stride=self.n_band))
+            return torch.cat(parts, 1)
+        audio_channels = max(1, samples.shape[1] // self.n_band)
+        parts = []
+        for channel in range(audio_channels):
+            bands = samples[:, channel * self.n_band : (channel + 1) * self.n_band]
+            up = torch.zeros(
+                bands.shape[0],
+                self.n_band,
+                bands.shape[-1] * self.n_band,
+                device=bands.device,
+                dtype=bands.dtype,
+            )
+            up[:, :, :: self.n_band] = bands * self.n_band
+            padded = functional.pad(up, (self.left_padding, 0))
+            synth = self.weight.flip(-1).permute(1, 0, 2)
+            parts.append(functional.conv1d(padded, synth))
+        return torch.cat(parts, 1)
+
+
+class RateConvLayer(nn.Module):
+    """Causal strided convolution used as a RAVE rate-change element."""
+
+    def __init__(
+        self, in_channels: int, out_channels: int, kernel_size: int, stride: int, dilation: int, upsample: bool
+    ) -> None:
+        """Create downsample or upsample convolution."""
+        super().__init__()
+        self.kernel_size = max(1, int(kernel_size))
+        self.stride = max(1, int(stride))
+        self.dilation = max(1, int(dilation))
+        self.upsample = bool(upsample)
+        self.left_padding = (self.kernel_size - 1) * self.dilation
+        self.convolution = nn.Conv1d(
+            in_channels,
+            out_channels,
+            self.kernel_size,
+            stride=1 if self.upsample else self.stride,
+            dilation=self.dilation,
+            bias=False,
+        )
+
+    def forward(self, samples: torch.Tensor) -> torch.Tensor:
+        """Apply causal padding then convolution."""
+        if self.upsample:
+            up = torch.zeros(
+                samples.shape[0],
+                samples.shape[1],
+                samples.shape[-1] * self.stride,
+                device=samples.device,
+                dtype=samples.dtype,
+            )
+            up[:, :, :: self.stride] = samples
+            samples = up
+        padded = functional.pad(samples, (self.left_padding, 0))
+        return self.convolution(padded)
+
+
+def _make_strided_conv(
+    in_channels: int, out_channels: int, properties: dict[str, Any]
+) -> nn.Module:
+    """Build a same-rate causal Conv1D or a downsampling rate-change operator."""
+    stride = max(1, int(properties.get("stride", 1)))
+    kernel = int(properties.get("kernel_size", 3))
+    dilation = int(properties.get("dilation", 1))
+    if stride > 1:
+        return RateConvLayer(
+            in_channels, out_channels, kernel, stride, dilation, False
+        )
+    return CausalConv1d(in_channels, out_channels, kernel, dilation)
+
+
+class ConvTransposeLayer(nn.Module):
+    """Causal transposed convolution used as a RAVE upsampling element."""
+
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        kernel_size: int,
+        stride: int,
+        dilation: int,
+    ) -> None:
+        """Create an upsampling ConvTranspose1d with left causal padding."""
+        super().__init__()
+        self.kernel_size = max(1, int(kernel_size))
+        self.stride = max(1, int(stride))
+        self.dilation = max(1, int(dilation))
+        self.left_padding = (self.kernel_size - 1) * self.dilation
+        self.convolution = nn.ConvTranspose1d(
+            in_channels,
+            out_channels,
+            self.kernel_size,
+            stride=self.stride,
+            padding=self.stride // 2,
+            dilation=self.dilation,
+            bias=False,
+        )
+
+    def forward(self, samples: torch.Tensor) -> torch.Tensor:
+        """Apply causal padding then transposed convolution."""
+        padded = functional.pad(samples, (self.left_padding, 0))
+        return self.convolution(padded)
+
+
+def _make_conv_transpose(
+    in_channels: int, out_channels: int, properties: dict[str, Any]
+) -> nn.Module:
+    """Build a causal ConvTranspose1d upsampling operator."""
+    return ConvTransposeLayer(
+        in_channels,
+        out_channels,
+        int(properties.get("kernel_size", 3)),
+        max(1, int(properties.get("stride", 1))),
+        int(properties.get("dilation", 1)),
+    )
+
+
+class VariationalBottleneckLayer(nn.Module):
+    """Reparameterized latent head."""
+
+    def __init__(self, in_channels: int, latent_size: int) -> None:
+        """Create mean/log-variance 1x1 projections."""
+        super().__init__()
+        self.mean = nn.Conv1d(in_channels, latent_size, 1, bias=False)
+        self.logvar = nn.Conv1d(in_channels, latent_size, 1, bias=False)
+        self.latent_size = latent_size
+        self.last_mean: torch.Tensor | None = None
+        self.last_logvar: torch.Tensor | None = None
+
+    def forward(self, samples: torch.Tensor) -> torch.Tensor:
+        """Sample z = μ + σ ⊙ ε while training; use μ at eval."""
+        mean = self.mean(samples)
+        logvar = self.logvar(samples).clamp(-8.0, 8.0)
+        self.last_mean = mean
+        self.last_logvar = logvar
+        if self.training:
+            return mean + torch.exp(0.5 * logvar) * torch.randn_like(mean)
+        return mean
+
+    def kl(self) -> torch.Tensor:
+        """Return the closed-form unit-Gaussian KL of the last forward."""
+        if self.last_mean is None or self.last_logvar is None:
+            return torch.zeros(())
+        return -0.5 * (
+            1.0 + self.last_logvar - self.last_mean.square() - self.last_logvar.exp()
+        ).mean()
+
+
+class NoiseSynthLayer(nn.Module):
+    """Filtered-noise addend."""
+
+    def __init__(self, in_channels: int, noise_bands: int) -> None:
+        """Create a 1x1 amplitude projector."""
+        super().__init__()
+        self.projector = nn.Conv1d(in_channels, max(1, noise_bands), 1, bias=False)
+
+    def forward(self, samples: torch.Tensor) -> torch.Tensor:
+        """Return noise mixed back to the input width."""
+        bands = torch.sigmoid(self.projector(samples))
+        mixed = (bands * torch.randn_like(bands)).mean(1, keepdim=True)
+        return mixed.expand_as(samples)
+
+
+class RaveGraphModule(nn.Module):
+    """Executes a (possibly branched) RAVE element graph."""
+
+    def __init__(
+        self,
+        layers: dict[int, nn.Module],
+        order: list[int],
+        incoming: dict[int, list[int]],
+        bottleneck_id: int | None,
+        types: dict[int, str],
+        input_channels: int,
+    ) -> None:
+        """Store graph topology and per-node layers."""
+        super().__init__()
+        self.layers = nn.ModuleDict({str(key): value for key, value in layers.items()})
+        self.order = order
+        self.incoming = incoming
+        self.bottleneck_id = bottleneck_id
+        self.types = types
+        self.input_channels = input_channels
+        self.latent_mean: torch.Tensor | None = None
+        self.latent_pca: torch.Tensor | None = None
+        self.cumulative_variance: torch.Tensor | None = None
+        self.fidelity = 0.99
+
+    def _run(self, audio: torch.Tensor, stop_at: int | None = None, start_from: tuple[int, torch.Tensor] | None = None) -> torch.Tensor:
+        """Evaluate nodes in topological order."""
+        values: dict[int, torch.Tensor] = {}
+        if start_from is not None:
+            values[start_from[0]] = start_from[1]
+        output = audio
+        started = start_from is None
+        for node_id in self.order:
+            if start_from is not None and not started:
+                if node_id == start_from[0]:
+                    started = True
+                continue
+            sources = self.incoming.get(node_id, [])
+            if not sources:
+                current = audio if start_from is None else values.get(node_id, audio)
+            elif len(sources) == 1:
+                current = values[sources[0]]
+            else:
+                stacked = [values[source] for source in sources if source in values]
+                current = stacked[0]
+                for extra in stacked[1:]:
+                    length = min(current.shape[-1], extra.shape[-1])
+                    current = current[..., :length] + extra[..., :length]
+            key = str(node_id)
+            if key in self.layers:
+                current = self.layers[key](current)
+            values[node_id] = current
+            output = current
+            if stop_at is not None and node_id == stop_at:
+                break
+        return output
+
+    def encode(self, audio: torch.Tensor) -> torch.Tensor:
+        """Run the encoder through the variational bottleneck."""
+        if self.bottleneck_id is None:
+            return audio
+        return self._run(audio, stop_at=self.bottleneck_id)
+
+    def decode(self, latent: torch.Tensor) -> torch.Tensor:
+        """Run the decoder starting after the bottleneck."""
+        if self.bottleneck_id is None:
+            return latent
+        return self._run(latent, start_from=(self.bottleneck_id, latent))
+
+    def forward(self, audio: torch.Tensor, cond: torch.Tensor | None = None) -> torch.Tensor:
+        """Encode then decode, ignoring unused conditioning."""
+        del cond
+        return self._run(audio)
+
+
+def build_rave_graph_module(
+    fragment: dict[str, Any], input_channels: int, cond_dim: int
+) -> RaveGraphModule:
+    """Construct a RAVE graph module from a train/freeze fragment."""
+    del cond_dim
+    elements = _topological_elements(fragment)
+    by_id = {int(element["id"]): element for element in elements}
+    incoming: dict[int, list[int]] = {int(element["id"]): [] for element in elements}
+    for connection in fragment.get("connections", []):
+        source = int(connection["source_element_id"])
+        destination = int(connection["destination_element_id"])
+        if source in incoming and destination in incoming:
+            incoming[destination].append(source)
+    layers: dict[int, nn.Module] = {}
+    channels_by_id: dict[int, int] = {}
+    bottleneck_id = None
+    types: dict[int, str] = {}
+    for element in elements:
+        node_id = int(element["id"])
+        element_type = str(element["type"])
+        types[node_id] = element_type
+        properties = _properties(element)
+        in_ch = input_channels
+        if incoming[node_id]:
+            in_ch = channels_by_id.get(incoming[node_id][0], input_channels)
+        if element_type == "pqmf_analysis":
+            n_band = int(properties.get("n_band", 16))
+            layers[node_id] = PqmfLayer(n_band, True)
+            channels_by_id[node_id] = in_ch * n_band
+        elif element_type == "pqmf_synthesis":
+            n_band = int(properties.get("n_band", 16))
+            layers[node_id] = PqmfLayer(n_band, False)
+            channels_by_id[node_id] = max(1, in_ch // max(1, n_band))
+        elif element_type in {"rate_conv", "conv1d"}:
+            out_ch = int(properties.get("channels", in_ch))
+            layers[node_id] = _make_strided_conv(in_ch, out_ch, properties)
+            channels_by_id[node_id] = out_ch
+        elif element_type == "conv_transpose1d":
+            out_ch = int(properties.get("channels", in_ch))
+            layers[node_id] = _make_conv_transpose(in_ch, out_ch, properties)
+            channels_by_id[node_id] = out_ch
+        elif element_type == "batch_norm":
+            layers[node_id] = nn.BatchNorm1d(in_ch)
+            channels_by_id[node_id] = in_ch
+        elif element_type == "variational_bottleneck":
+            latent = int(properties.get("latent_size", 128))
+            layers[node_id] = VariationalBottleneckLayer(in_ch, latent)
+            channels_by_id[node_id] = latent
+            bottleneck_id = node_id
+        elif element_type == "noise_synthesizer":
+            layers[node_id] = NoiseSynthLayer(in_ch, int(properties.get("noise_bands", 5)))
+            channels_by_id[node_id] = in_ch
+        elif element_type == "tcn":
+            hidden = int(properties.get("channels", in_ch))
+            layers[node_id] = SteerableTCN(
+                in_ch,
+                hidden,
+                in_ch,
+                int(properties.get("depth", 2)),
+                int(properties.get("kernel_size", 3)),
+                int(properties.get("dilation_growth", 2)),
+                int(properties.get("activation", 0)),
+                bool(int(properties.get("residual", 0))),
+                0,
+            )
+            channels_by_id[node_id] = in_ch
+        elif element_type == "activation":
+            layers[node_id] = _activation(int(properties.get("activation", 0)), in_ch)
+            channels_by_id[node_id] = in_ch
+        elif element_type == "linear":
+            out_ch = int(properties.get("features", in_ch))
+            layers[node_id] = nn.Conv1d(in_ch, out_ch, 1, bias=False)
+            channels_by_id[node_id] = out_ch
+        else:
+            channels_by_id[node_id] = in_ch
+    return RaveGraphModule(
+        layers,
+        [int(element["id"]) for element in elements],
+        incoming,
+        bottleneck_id,
+        types,
+        input_channels,
+    )
+
+
+def flatten_reconstruction_clips(capture_set: dict[str, Any]) -> list[str]:
+    """Expand selected pairs to x+y paths plus unpaired clips."""
+    paths: list[str] = []
+    for pair in capture_set.get("pairs", []) or []:
+        if not isinstance(pair, dict):
+            continue
+        for key in ("x_path", "y_path"):
+            path = str(pair.get(key, "") or "")
+            if path:
+                paths.append(path)
+    for clip in capture_set.get("clips", []) or []:
+        if not isinstance(clip, dict):
+            continue
+        path = str(clip.get("path", "") or "")
+        if path:
+            paths.append(path)
+    return paths
+
+
+def mapping_rejects_unpaired(capture_set: dict[str, Any]) -> bool:
+    """Return True when mapping is illegal because unpaired clips are selected."""
+    clips = capture_set.get("clips", []) or []
+    return any(isinstance(clip, dict) for clip in clips)
+
+
+def spectral_distance(predicted: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+    """Multi-resolution log-magnitude distance used by reconstruction stage 1."""
+    loss = predicted.new_zeros(())
+    used = 0
+    time_length = int(predicted.shape[-1])
+    for window in (2048, 1024, 512, 256, 128):
+        if window > time_length:
+            continue
+        hop = max(1, window // 4)
+        spec_p = torch.stft(
+            predicted.reshape(-1, predicted.shape[-1]),
+            n_fft=window,
+            hop_length=hop,
+            win_length=window,
+            return_complex=True,
+        ).abs()
+        spec_t = torch.stft(
+            target.reshape(-1, target.shape[-1]),
+            n_fft=window,
+            hop_length=hop,
+            win_length=window,
+            return_complex=True,
+        ).abs()
+        loss = loss + (spec_p.add(1e-7).log() - spec_t.add(1e-7).log()).abs().mean()
+        used += 1
+    if used == 0:
+        return (predicted - target).abs().mean()
+    return loss
+
+
+class CombineDiscriminator(nn.Module):
+    """Lightweight train-only hinge discriminator."""
+
+    def __init__(self, channels: int) -> None:
+        """Create a small strided conv stack."""
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Conv1d(channels, 16, 15, stride=1, padding=7),
+            nn.LeakyReLU(0.2, inplace=True),
+            nn.Conv1d(16, 32, 15, stride=4, padding=7),
+            nn.LeakyReLU(0.2, inplace=True),
+            nn.Conv1d(32, 1, 5, stride=1, padding=2),
+        )
+
+    def forward(self, samples: torch.Tensor) -> torch.Tensor:
+        """Return per-sample logits."""
+        return self.net(samples)
+
+    def features(self, samples: torch.Tensor) -> tuple[torch.Tensor, list[torch.Tensor]]:
+        """Return logits plus intermediate activations for feature matching."""
+        collected: list[torch.Tensor] = []
+        value = samples
+        for layer in self.net:
+            value = layer(value)
+            if isinstance(layer, nn.LeakyReLU):
+                collected.append(value)
+        return value, collected
+
+
+def compute_compactness(latents: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """PCA compactness basis from `[N, latent]` rows."""
+    if latents.ndim != 2 or latents.shape[0] < 2:
+        width = int(latents.shape[-1]) if latents.numel() else 1
+        eye = torch.eye(width)
+        return torch.zeros(width), eye, torch.linspace(1.0 / width, 1.0, width)
+    mean = latents.mean(0)
+    centered = latents - mean
+    _, singular, right = torch.linalg.svd(centered, full_matrices=False)
+    variance = singular.square()
+    total = float(variance.sum().clamp_min(1e-8))
+    cumulative = torch.cumsum(variance, 0) / total
+    return mean.detach(), right.detach(), cumulative.detach()
+
+
+def _freeze_rave_encoder(module: RaveGraphModule) -> None:
+    """Stop gradients through the encoder inclusive of the bottleneck."""
+    for node_id in module.order:
+        key = str(node_id)
+        if key in module.layers:
+            for parameter in module.layers[key].parameters():
+                parameter.requires_grad_(False)
+        if node_id == module.bottleneck_id:
+            break
+
+
+def _bottleneck_kl(module: RaveGraphModule) -> torch.Tensor:
+    """Return KL from the variational head when present."""
+    if module.bottleneck_id is None:
+        return torch.zeros(())
+    key = str(module.bottleneck_id)
+    if key not in module.layers:
+        return torch.zeros(())
+    layer = module.layers[key]
+    if isinstance(layer, VariationalBottleneckLayer):
+        return layer.kl()
+    return torch.zeros(())
+
+
+def _export_rave_scripted(module: RaveGraphModule, input_channels: int, path: Path) -> None:
+    """Trace forward/encode/decode for a RAVE graph."""
+    module.eval()
+    example = torch.zeros(1, input_channels, 256)
+    latent_size = 1
+    if module.bottleneck_id is not None:
+        key = str(module.bottleneck_id)
+        if key in module.layers:
+            layer = module.layers[key]
+            if isinstance(layer, VariationalBottleneckLayer):
+                latent_size = max(1, int(layer.latent_size))
+    latent_example = torch.zeros(1, latent_size, max(1, 256 // 16))
+    mean = module.latent_mean if module.latent_mean is not None else torch.zeros(latent_size)
+    pca = module.latent_pca if module.latent_pca is not None else torch.eye(latent_size)
+    cumulative = (
+        module.cumulative_variance
+        if module.cumulative_variance is not None
+        else torch.linspace(1.0 / latent_size, 1.0, latent_size)
+    )
+
+    class Wrapper(nn.Module):
+        """TorchScript-friendly encode/decode/forward wrapper."""
+
+        def __init__(self, inner: RaveGraphModule) -> None:
+            super().__init__()
+            self.inner = inner
+            self.register_buffer("latent_mean", mean)
+            self.register_buffer("latent_pca", pca)
+            self.register_buffer("cumulative_variance", cumulative)
+
+        def encode(self, audio: torch.Tensor) -> torch.Tensor:
+            return self.inner.encode(audio)
+
+        def decode(self, latent: torch.Tensor) -> torch.Tensor:
+            return self.inner.decode(latent)
+
+        def forward(self, audio: torch.Tensor) -> torch.Tensor:
+            return self.inner.forward(audio)
+
+    wrapped = Wrapper(module).eval()
+    with torch.inference_mode():
+        scripted = torch.jit.trace_module(
+            wrapped,
+            {"forward": example, "encode": example, "decode": latent_example},
+            strict=False,
+        )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    torch.jit.save(scripted, str(temporary))
+    temporary.replace(path)
+
+
+def train_reconstruction(
+    request: dict[str, Any], artifact_dir: Path, command_file: Path | None
+) -> dict[str, Any]:
+    """Run the two-stage RAVE reconstruction recipe."""
+    request_id = str(request.get("request_id", ""))
+    options = request.get("train_options", {})
+    reconstruction = options.get("reconstruction", {}) if isinstance(options, dict) else {}
+    if not isinstance(reconstruction, dict):
+        reconstruction = {}
+    stage1_steps = max(1, int(reconstruction.get("stage1_steps", 1_000_000)))
+    stage2_steps = max(1, int(reconstruction.get("stage2_steps", 1_000_000)))
+    capture_set = request.get("capture_set", {})
+    if not isinstance(capture_set, dict):
+        capture_set = {}
+    paths = flatten_reconstruction_clips(capture_set)
+    if not paths:
+        raise ValueError("reconstruction train request contains no clips")
+    clips: list[torch.Tensor] = []
+    rate = None
+    for path in paths:
+        samples, sample_rate = read_wav(path)
+        if rate is None:
+            rate = sample_rate
+        elif sample_rate != rate:
+            raise ValueError("selected reconstruction clips mix sample rates")
+        clips.append(samples.unsqueeze(0))
+    channels = clips[0].shape[1]
+    for clip in clips[1:]:
+        if clip.shape[1] != channels:
+            raise ValueError("selected reconstruction clips must share a channel count")
+    corpus = torch.cat(clips, dim=-1)
+    input_channels = max(1, int(options.get("host_input_channels", channels)))
+    corpus = _match_channels(corpus, input_channels)
+    module = build_rave_graph_module(request["graph_fragment"], input_channels, 1)
+    if module.bottleneck_id is None:
+        raise ValueError("reconstruction requires a variational bottleneck")
+    optimizer = torch.optim.Adam(module.parameters(), 1e-3)
+    discriminator = CombineDiscriminator(input_channels)
+    disc_opt = torch.optim.Adam(discriminator.parameters(), 1e-4)
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    artifact_path = (artifact_dir / f"{request_id}.pt").resolve()
+    checkpoint_path = (artifact_dir / f"{request_id}.ckpt.pt").resolve()
+    export_checkpoints = bool(options.get("export_checkpoints", False))
+    checkpoint_interval = max(0, int(options.get("checkpoint_interval", 50)))
+    kl_warmup = max(1, int(reconstruction.get("kl_warmup_steps", 20000)))
+    total_steps = stage1_steps + stage2_steps
+    last_loss = 0.0
+    step = 0
+    paused = False
+    compactness_latents: list[torch.Tensor] = []
+    while step < total_steps:
+        command = _read_command(command_file)
+        if command == "stop":
+            _emit({"request_id": request_id, "status": "stopped", "step": step, "message": "Stopped by user"})
+            return {"request_id": request_id, "status": "stopped", "step": step, "message": "Stopped by user"}
+        if command == "pause":
+            paused = True
+        elif command == "resume":
+            paused = False
+        stage = "representation" if step < stage1_steps else "quality"
+        if paused:
+            _emit(
+                {
+                    "request_id": request_id,
+                    "status": "paused",
+                    "step": step,
+                    "total_steps": total_steps,
+                    "stage": stage,
+                    "objective": "reconstruction",
+                    "loss": last_loss,
+                }
+            )
+            time.sleep(0.05)
+            continue
+        length = min(corpus.shape[-1], max(64, int(options.get("segment_length", 8192))))
+        start = 0 if corpus.shape[-1] <= length else int(torch.randint(0, corpus.shape[-1] - length, (1,)).item())
+        audio = corpus[..., start : start + length]
+        reconstructed = module(audio)
+        if reconstructed.shape[-1] != audio.shape[-1]:
+            reconstructed = reconstructed[..., -audio.shape[-1] :]
+            audio = audio[..., -reconstructed.shape[-1] :]
+        spec = spectral_distance(reconstructed, audio)
+        if stage == "representation":
+            kl_beta = 1e-6 + (5e-2 - 1e-6) * min(1.0, step / float(kl_warmup))
+            optimizer.zero_grad()
+            (spec + kl_beta * _bottleneck_kl(module)).backward()
+            optimizer.step()
+            if step == stage1_steps - 1:
+                _freeze_rave_encoder(module)
+                with torch.no_grad():
+                    latent = module.encode(audio)
+                    compactness_latents.append(
+                        latent.mean(-1).reshape(-1, latent.shape[1]).cpu()
+                    )
+        else:
+            real_score, _real_feats = discriminator.features(audio)
+            fake_score, _ = discriminator.features(reconstructed.detach())
+            disc_loss = torch.relu(1.0 - real_score).mean() + torch.relu(1.0 + fake_score).mean()
+            disc_opt.zero_grad()
+            disc_loss.backward()
+            disc_opt.step()
+            gen_score, fake_feats = discriminator.features(reconstructed)
+            adv = torch.relu(1.0 - gen_score).mean()
+            match = reconstructed.new_zeros(())
+            _, real_feats_live = discriminator.features(audio.detach())
+            for fake_feat, real_feat in zip(fake_feats, real_feats_live):
+                match = match + (fake_feat - real_feat.detach()).abs().mean()
+            optimizer.zero_grad()
+            (spec + adv + match).backward()
+            optimizer.step()
+        last_loss = float(spec.item())
+        step += 1
+        event: dict[str, Any] = {
+            "request_id": request_id,
+            "status": "running",
+            "step": step,
+            "total_steps": total_steps,
+            "stage": stage,
+            "objective": "reconstruction",
+            "loss": last_loss,
+            "best_loss": last_loss,
+            "learning_rate": optimizer.param_groups[0]["lr"],
+        }
+        if export_checkpoints and checkpoint_interval and step % checkpoint_interval == 0:
+            _export_rave_scripted(module, input_channels, checkpoint_path)
+            module.train()
+            event["artifact_path"] = str(checkpoint_path)
+        _emit(event)
+    if compactness_latents:
+        stacked = torch.cat(compactness_latents, 0)
+    else:
+        with torch.no_grad():
+            fallback = module.encode(corpus[..., : min(corpus.shape[-1], 256)])
+            stacked = fallback.mean(-1).reshape(-1, fallback.shape[1]).cpu()
+    mean, pca, cumulative = compute_compactness(stacked)
+    module.latent_mean = mean
+    module.latent_pca = pca
+    module.cumulative_variance = cumulative
+    _export_rave_scripted(module, input_channels, artifact_path)
+    return {
+        "request_id": request_id,
+        "status": "success",
+        "step": step,
+        "total_steps": total_steps,
+        "loss": last_loss,
+        "best_loss": last_loss,
+        "artifact_path": str(artifact_path),
+        "objective": "reconstruction",
+        "has_encode_decode": True,
+        "blackbox_metadata": {
+            "origin": "train_autoload",
+            "display_name": "Trained RAVE",
+            "shape_signature": {
+                "input_channels": input_channels,
+                "output_channels": input_channels,
+            },
+            "receptive_field_samples": _module_receptive_field(module),
+            "conditioning": False,
+            "methods": ["forward", "encode", "decode"],
+            "compactness": {
+                "ready": bool(compactness_latents),
+            },
+        },
+    }
+
 
 
 def _parse_wav_fmt(fmt: bytes) -> tuple[int, int, int, int]:
@@ -958,6 +1678,17 @@ def train_request(request: dict[str, Any], artifact_dir: Path, command_file: Pat
         raise ValueError("invalid train request envelope")
 
     options = request.get("train_options", {})
+    if not isinstance(options, dict):
+        options = {}
+    objective = str(options.get("objective", "mapping") or "mapping").strip().lower()
+    if objective == "reconstruction":
+        return train_reconstruction(request, artifact_dir, command_file)
+    capture_set = request.get("capture_set", {})
+    if not isinstance(capture_set, dict):
+        capture_set = {}
+    if mapping_rejects_unpaired(capture_set):
+        raise ValueError("mapping cannot train unpaired clips")
+
     total_steps = max(1, int(options.get("total_steps", DEFAULT_STEPS)))
     segment_length = max(1, int(options.get("segment_length", DEFAULT_SEGMENT_LENGTH)))
     learning_rate = float(options.get("learning_rate", DEFAULT_LR))
@@ -1095,6 +1826,8 @@ def train_request(request: dict[str, Any], artifact_dir: Path, command_file: Pat
                 "status": "running",
                 "step": step,
                 "total_steps": total_steps,
+                "stage": "mapping",
+                "objective": "mapping",
                 "loss": last_loss,
                 "best_loss": best_loss if math.isfinite(best_loss) else last_loss,
                 "learning_rate": optimizer.param_groups[0]["lr"],
@@ -1144,6 +1877,8 @@ def train_request(request: dict[str, Any], artifact_dir: Path, command_file: Pat
         result: dict[str, Any] = {
             "request_id": request_id,
             "status": "success",
+            "objective": "mapping",
+            "has_encode_decode": False,
             "artifact_path": str(artifact_path),
             "blackbox_metadata": _blackbox_metadata(
                 input_channels,

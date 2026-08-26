@@ -35,3 +35,20 @@
 - Re-validation (2026-08-25 clarify, session 1): Five clarifications (stage-2 length, Gold forward/encode/decode, mono|stereo layouts, hear-while-training checkpoints, fidelity always-on).
 - Re-validation (2026-08-25 clarify, session 2 — unification): Unified Train/Library/Capture shell; objective in same panel (last-used per instance); Capture Pair|Single; library tags + warn/filter; reconstruction uses pair x and y; mapping errors on unpaired. Checklist remains 16/16 passing. Ready for `/speckit-plan`.
 - Reviewer-owned: mark items `[x]` only when the requirements-quality criterion is satisfied.
+
+## Quickstart implementation validation (T057)
+
+Recorded 2026-08-25 during `/speckit-implement`. Full DAW playback of scenarios 1–9 was not available in this session; the following were validated in-repo:
+
+| Scenario | Result |
+|----------|--------|
+| 1–2 Layout insert (original / latest × mono\|stereo) | Code: `insertRaveLayout` in `RaveLayouts.cpp`; C++ compile/shape gate refuses host-width mismatch |
+| 3 Library clip + Single capture + Pair | Code: `TrainingLibrary` kind/tags, `importClip`, Capture kind Single |
+| 4 Mapping unpaired error; reconstruction uses pair x+y | Plugin gate + `flatten_reconstruction_clips` / `mapping_rejects_unpaired` Python tests |
+| 5 Reconstruction refuse TCN-only | `hasReconstructionTrainPath` C++ test |
+| 6 Stop is not success auto-load | Existing Train coordinator/editor: `status == "stopped"` skips `absorbArmedChain` |
+| 7 Gold forward/encode/decode + fidelity | Worker export + TorchScript kernel methods; fidelity on Gold/bottleneck |
+| 8 Mapping recipe unchanged | Defaults 2500 / MR-STFT 32/128/512/2048 still asserted in `test_train_worker.py` |
+| 9 Mixed SR / channel mismatch | Worker raises on mixed rates or channel counts; library `selectedSampleRatesMatch` |
+
+Short reconstruction (`stage1_steps=1`, `stage2_steps=1`) is exercised in `Tests/test_train_worker.py`.

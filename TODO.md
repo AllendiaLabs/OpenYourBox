@@ -13,4 +13,7 @@
 - [ ] Implement element set for MRT2.
 - [ ] add positional encoding
 - [ ] add diffusion process? (IRCAM AFTER?)
+- [ ] add batchnorm
+- [ ] add dropout
+- [ ] check that bn reset resets to normal, not random, then remove seed
 

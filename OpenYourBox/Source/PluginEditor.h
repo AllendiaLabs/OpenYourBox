@@ -130,6 +130,8 @@ private:
   void focusLibraryTab();
   /** @brief Imports a file pair chosen via native file choosers. */
   void handleLibraryImport();
+  /** @brief Opens a file chooser for unpaired clip import. */
+  void handleLibraryImportClip();
   /** @brief Opens the clean-file chooser on the message thread. */
   void promptLibraryImportClean();
   /** @brief Opens the processed-file chooser on the message thread. */

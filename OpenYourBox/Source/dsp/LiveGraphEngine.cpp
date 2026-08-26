@@ -1,6 +1,10 @@
 #include "LiveGraphEngine.h"
 
+#include "NoiseSynthesizer.h"
+#include "PqmfBank.h"
+#include "RateConv.h"
 #include "TCNModel.h"
+#include "VariationalBottleneck.h"
 
 #include <torch/nn/functional.h>
 
@@ -72,8 +76,10 @@ struct CompiledElement {
    * @brief Per-input extraction: -1 keeps the full tensor, otherwise one channel.
    */
   std::vector<int> inputExtractChannels;
-  /** @brief True when the corresponding compiled input is conditioning. */
+  /** @brief True when the corresponding compiled input is the control/FiLM pin. */
   std::vector<char> inputIsConditioning;
+  /** @brief True when the corresponding compiled input is a latent encode/decode tap. */
+  std::vector<char> inputUseLatentTap;
   /** @brief TCN dilation growth G (layer n uses base * G^n). */
   int dilationGrowth = 2;
   /** @brief Whether TCN blocks add a residual path. */
@@ -90,7 +96,71 @@ struct CompiledElement {
   std::vector<torch::Tensor> filmWeights;
   /** @brief Per-layer FiLM Linear biases shaped `[2 * hidden]`. */
   std::vector<torch::Tensor> filmBiases;
+  /** @brief PQMF band count when this element is analysis or synthesis. */
+  int nBand = 0;
+  /** @brief Integer stride for rateConv. */
+  int stride = 1;
+  /** @brief 0 = downsample, 1 = upsample. */
+  int rateDirection = 0;
+  /** @brief Shared PQMF coefficient bank, prepared off the audio thread. */
+  std::shared_ptr<openyourbox::dsp::PqmfBank> pqmf;
+  /** @brief Bottleneck/Gold fidelity percent. */
+  float fidelityPercent = 99.0f;
+  /** @brief True when compactness PCA tensors are present. */
+  bool compactnessReady = false;
+  /** @brief Compactness mean `[latent]`. */
+  torch::Tensor latentMean;
+  /** @brief Compactness PCA `[latent, latent]`. */
+  torch::Tensor latentPca;
+  /** @brief Cumulative explained variance `[latent]`. */
+  torch::Tensor cumulativeVariance;
+  /** @brief Host Audio Input/Output channel mode when type is fixed I/O. */
+  openyourbox::graph::HostIoMode hostIoMode =
+      openyourbox::graph::HostIoMode::stereo;
 };
+
+/**
+ * @brief Folds or expands host audio into the declared graph I/O mode.
+ * @param host Host tensor shaped `[1, hostChannels, time]`.
+ * @param mode Declared Audio Input mode.
+ * @return Tensor with the graph pin width for @p mode.
+ */
+torch::Tensor adaptHostInputToMode(const torch::Tensor &host,
+                                   openyourbox::graph::HostIoMode mode) {
+  using openyourbox::graph::HostIoMode;
+  if (!host.defined() || host.dim() != 3)
+    return host;
+  if (mode == HostIoMode::stereo) {
+    if (host.size(1) == 2)
+      return host;
+    if (host.size(1) == 1)
+      return host.repeat({1, 2, 1});
+    return host.narrow(1, 0, 2);
+  }
+  auto mono = host.size(1) <= 1 ? host : host.mean(1, /*keepdim=*/true);
+  if (mode == HostIoMode::mono)
+    return mono;
+  return mono.repeat({1, 2, 1});
+}
+
+/**
+ * @brief Expands or folds graph audio to the host output bus width.
+ * @param graph Graph tensor shaped `[1, graphChannels, time]`.
+ * @param hostChannels Host output channel count (1 or 2).
+ * @return Tensor shaped `[1, hostChannels, time]`.
+ */
+torch::Tensor adaptGraphOutputToHost(const torch::Tensor &graph,
+                                     int hostChannels) {
+  if (!graph.defined() || graph.dim() != 3 || hostChannels < 1)
+    return graph;
+  if (graph.size(1) == hostChannels)
+    return graph;
+  if (hostChannels == 1)
+    return graph.size(1) <= 1 ? graph : graph.mean(1, /*keepdim=*/true);
+  if (graph.size(1) == 1)
+    return graph.repeat({1, hostChannels, 1});
+  return graph.narrow(1, 0, hostChannels);
+}
 
 /** @brief Pin ownership and direction used during graph validation. */
 struct PinOwner {
@@ -98,8 +168,6 @@ struct PinOwner {
   std::int32_t nodeId = 0;
   /** @brief Declared pin direction. */
   openyourbox::graph::PinKind kind = openyourbox::graph::PinKind::input;
-  /** @brief Declared temporal domain. */
-  std::string domain;
 };
 
 /** @brief Advances a deterministic SplitMix64 generator. */
@@ -265,6 +333,34 @@ void randomizeElementWeights(CompiledElement &element, std::int32_t seed) {
       }
     }
     break;
+  case openyourbox::graph::NodeType::rateConv:
+    element.weights.push_back(makeWeight(element.outputChannels,
+                                         element.inputChannels,
+                                         element.kernelSize, state));
+    break;
+  case openyourbox::graph::NodeType::convTranspose:
+    element.weights.push_back(makeWeight(element.outputChannels,
+                                         element.inputChannels,
+                                         element.kernelSize, state));
+    break;
+  case openyourbox::graph::NodeType::batchNorm: {
+    const auto channels = std::max(1, element.inputChannels);
+    element.weights.push_back(torch::ones({channels}));
+    element.weights.push_back(torch::zeros({channels}));
+    element.weights.push_back(torch::zeros({channels}));
+    element.weights.push_back(torch::ones({channels}));
+    break;
+  }
+  case openyourbox::graph::NodeType::variationalBottleneck:
+    element.weights.push_back(
+        makeWeight(element.outputChannels, element.inputChannels, 1, state));
+    element.weights.push_back(
+        makeWeight(element.outputChannels, element.inputChannels, 1, state));
+    break;
+  case openyourbox::graph::NodeType::noiseSynthesizer:
+    element.weights.push_back(makeWeight(
+        std::max(1, element.kernelSize), element.inputChannels, 1, state));
+    break;
   default:
     throw std::invalid_argument("Element does not own randomizable weights");
   }
@@ -375,9 +471,19 @@ bool hasValidPortLayout(const openyourbox::graph::GraphNode &node) noexcept {
     return node.inputs.empty() && node.outputs.size() == 2;
   if (openyourbox::graph::isMixerType(node.type))
     return node.inputs.size() >= 2 && node.outputs.size() == 1;
-  if (node.type == NodeType::tcn || node.type == NodeType::blackBox)
+  if (node.type == NodeType::tcn)
     return node.inputs.size() >= 1 && node.inputs.size() <= 2 &&
            node.outputs.size() == 1;
+  if (node.type == NodeType::blackBox)
+    return node.inputs.size() >= 1 && node.outputs.size() >= 1;
+  if (node.type == NodeType::pqmfAnalysis ||
+      node.type == NodeType::pqmfSynthesis ||
+      node.type == NodeType::rateConv ||
+      node.type == NodeType::convTranspose ||
+      node.type == NodeType::variationalBottleneck ||
+      node.type == NodeType::noiseSynthesizer ||
+      node.type == NodeType::batchNorm)
+    return node.inputs.size() == 1 && node.outputs.size() == 1;
   return node.inputs.size() == 1 && node.outputs.size() == 1;
 }
 
@@ -457,6 +563,39 @@ int compiledSlotChannels(const CompiledElement &source,
   if (extractChannel >= 0)
     return 1;
   return source.outputChannels;
+}
+
+/**
+ * @brief Extract index for the compiled audio/main input of one element.
+ * @param element Compiled node whose `inputIndex` is already set.
+ * @return Channel extract, or -1 to keep the full upstream tensor.
+ */
+int compiledExtractForInput(const CompiledElement &element) noexcept {
+  for (std::size_t index = 0; index < element.inputIndices.size(); ++index) {
+    if (element.inputIndices[index] != element.inputIndex)
+      continue;
+    return index < element.inputExtractChannels.size()
+               ? element.inputExtractChannels[index]
+               : -1;
+  }
+  return -1;
+}
+
+/**
+ * @brief Channel count of the compiled audio/main input after XY extraction.
+ * @param elements Compiled elements in topological order.
+ * @param element Node whose `inputIndex` and extract table are populated.
+ * @return Positive width, or the previously stored `inputChannels`.
+ */
+int compiledMainInputChannels(const std::vector<CompiledElement> &elements,
+                              const CompiledElement &element) noexcept {
+  if (element.inputIndices.empty())
+    return element.inputChannels;
+  const auto sourceIndex = static_cast<std::size_t>(element.inputIndex);
+  if (sourceIndex >= elements.size())
+    return element.inputChannels;
+  return compiledSlotChannels(elements[sourceIndex],
+                              compiledExtractForInput(element));
 }
 
 /**
@@ -664,6 +803,8 @@ struct LiveGraphRuntime::Impl {
   std::vector<torch::Tensor> conditioningHistories;
   /** @brief Per-element frozen kernels created outside the audio callback. */
   std::vector<std::unique_ptr<FrozenBlackBoxKernel>> blackBoxKernels;
+  /** @brief Optional Gold encode taps, parallel to `outputs`. */
+  std::vector<torch::Tensor> latentOutputs;
   /** @brief Reusable planar-to-tensor host input storage. */
   torch::Tensor hostInput;
   /** @brief Lock-free latest per-element inference durations in milliseconds.
@@ -802,14 +943,30 @@ float tensorPeak(const torch::Tensor &value) noexcept {
   return peak;
 }
 
+torch::Tensor matchTimeLength(const torch::Tensor &value, std::int64_t samples) {
+  if (!value.defined() || value.size(2) == samples)
+    return value;
+  if (value.size(2) > samples)
+    return value.narrow(2, value.size(2) - samples, samples);
+  return torch::nn::functional::pad(
+      value, torch::nn::functional::PadFuncOptions({samples - value.size(2), 0})
+                 .mode(torch::kConstant)
+                 .value(0.0));
+}
+
 torch::Tensor gatherUpstream(const std::vector<torch::Tensor> &outputs,
-                             const CompiledElement &element) {
+                             const CompiledElement &element,
+                             const std::vector<torch::Tensor> *latentOutputs =
+                                 nullptr) {
   if (element.inputIndices.empty())
     return {};
-  auto value = outputs[static_cast<std::size_t>(element.inputIndex)];
-  const auto extract =
-      element.inputExtractChannels.empty() ? -1 : element.inputExtractChannels.front();
-  return extractCompiledInput(value, extract);
+  const auto source = static_cast<std::size_t>(element.inputIndex);
+  auto value = outputs[source];
+  if (latentOutputs != nullptr && !element.inputUseLatentTap.empty() &&
+      element.inputUseLatentTap.front() != 0 &&
+      source < latentOutputs->size() && (*latentOutputs)[source].defined())
+    value = (*latentOutputs)[source];
+  return extractCompiledInput(value, compiledExtractForInput(element));
 }
 
 std::vector<torch::Tensor>
@@ -899,7 +1056,7 @@ void LiveGraphRuntime::executeElement(std::size_t index,
   const auto samples = blockInput.size(2);
 
   if (element.type == openyourbox::graph::NodeType::audioInput) {
-    output = blockInput;
+    output = adaptHostInputToMode(blockInput, element.hostIoMode);
     return;
   }
   if (element.type == openyourbox::graph::NodeType::knobInput) {
@@ -929,24 +1086,68 @@ void LiveGraphRuntime::executeElement(std::size_t index,
     return;
   }
 
-  const auto upstream = gatherUpstream(runtime.outputs, element);
+  const auto upstream =
+      gatherUpstream(runtime.outputs, element, &runtime.latentOutputs);
   if (runtime.inputPeaks)
     runtime.inputPeaks[index].store(tensorPeak(upstream),
                                     std::memory_order_relaxed);
 
   switch (element.type) {
-  case openyourbox::graph::NodeType::audioOutput:
-    output = upstream;
+  case openyourbox::graph::NodeType::audioOutput: {
+    torch::Tensor upstreamOut = upstream;
+    if (!upstreamOut.defined())
+      upstreamOut = torch::zeros(
+          {1, element.outputChannels, samples}, blockInput.options());
+    else if (upstreamOut.size(2) > samples)
+      upstreamOut =
+          upstreamOut.narrow(2, upstreamOut.size(2) - samples, samples);
+    else if (upstreamOut.size(2) < samples)
+      upstreamOut = torch::nn::functional::pad(
+          upstreamOut, torch::nn::functional::PadFuncOptions(
+                           {samples - upstreamOut.size(2), 0})
+                           .mode(torch::kConstant)
+                           .value(0.0));
+    output = adaptGraphOutputToHost(upstreamOut, element.outputChannels);
     break;
+  }
   case openyourbox::graph::NodeType::linear:
     output = project(upstream, element.weights.front());
     break;
-  case openyourbox::graph::NodeType::convolution: {
-    const auto historyLength =
-        static_cast<std::int64_t>(element.receptiveField - 1);
-    auto extended =
-        extendCausalInput(upstream, runtime.histories[index], historyLength);
-    output = convolve(extended, element.weights.front(), element.dilation);
+  case openyourbox::graph::NodeType::convolution:
+  case openyourbox::graph::NodeType::rateConv: {
+    if (element.stride > 1) {
+      RateConv conv(std::max(1, element.stride), element.kernelSize,
+                    element.dilation, RateConvMode::downsample);
+      output = conv.processStreaming(upstream, element.weights.front(),
+                                     runtime.histories[index]);
+    } else {
+      const auto historyLength =
+          static_cast<std::int64_t>(element.receptiveField - 1);
+      auto extended =
+          extendCausalInput(upstream, runtime.histories[index], historyLength);
+      output = convolve(extended, element.weights.front(), element.dilation);
+    }
+    break;
+  }
+  case openyourbox::graph::NodeType::convTranspose: {
+    ConvTranspose1d conv(std::max(1, element.stride), element.kernelSize,
+                         element.dilation);
+    output = conv.processStreaming(upstream, element.weights.front(),
+                                   runtime.histories[index]);
+    break;
+  }
+  case openyourbox::graph::NodeType::batchNorm: {
+    if (element.weights.size() >= 4) {
+      const auto gamma = element.weights[0].view({1, -1, 1});
+      const auto beta = element.weights[1].view({1, -1, 1});
+      const auto runningMean = element.weights[2].view({1, -1, 1});
+      const auto runningVar = element.weights[3].view({1, -1, 1});
+      auto normalized =
+          (upstream - runningMean) / torch::sqrt(runningVar + 1.0e-5f);
+      output = normalized * gamma + beta;
+    } else {
+      output = upstream;
+    }
     break;
   }
   case openyourbox::graph::NodeType::activation: {
@@ -1017,28 +1218,80 @@ void LiveGraphRuntime::executeElement(std::size_t index,
     const auto started = std::chrono::steady_clock::now();
     const auto historyLength =
         static_cast<std::int64_t>(element.receptiveField - 1);
-    auto extended =
-        extendCausalInput(upstream, runtime.histories[index], historyLength);
-    torch::Tensor cond = resolveFilmConditioning(runtime.outputs, element);
-    if (cond.defined())
-      cond = extendCausalControl(cond, runtime.conditioningHistories[index],
-                                 historyLength);
-    output = runtime.blackBoxKernels[index]->forwardWithConditioning(extended,
-                                                                     cond);
+    auto *kernel = runtime.blackBoxKernels[index].get();
+    const bool decodeFromLatent =
+        !element.inputUseLatentTap.empty() && element.inputUseLatentTap.front() != 0;
+    if (kernel != nullptr && kernel->hasEncodeDecode() && decodeFromLatent) {
+      output = kernel->decode(upstream);
+    } else if (kernel != nullptr && kernel->hasEncodeDecode()) {
+      auto extended =
+          extendCausalInput(upstream, runtime.histories[index], historyLength);
+      auto latent = kernel->encode(extended);
+      float fidelity = element.fidelityPercent;
+      if (controls != nullptr) {
+        const auto found = controls->fidelityByNodeId.find(element.nodeId);
+        if (found != controls->fidelityByNodeId.end())
+          fidelity = found->second;
+      }
+      if (latent.defined())
+        latent = VariationalBottleneck::applyFidelity(
+            latent, fidelity, kernel->compactnessMean(), kernel->compactnessPca(),
+            kernel->compactnessCumulative());
+      runtime.latentOutputs[index] = latent;
+      if (latent.defined())
+        output = kernel->decode(latent);
+      else
+        output = kernel->forward(extended);
+    } else {
+      auto extended =
+          extendCausalInput(upstream, runtime.histories[index], historyLength);
+      torch::Tensor cond = resolveFilmConditioning(runtime.outputs, element);
+      if (cond.defined())
+        cond = extendCausalControl(cond, runtime.conditioningHistories[index],
+                                   historyLength);
+      output = kernel->forwardWithConditioning(extended, cond);
+    }
     if (!output.defined() || output.device().type() != torch::kCPU ||
         output.scalar_type() != torch::kFloat32 || output.dim() != 3 ||
-        output.size(0) != 1 || output.size(1) != element.outputChannels ||
-        output.size(2) != extended.size(2))
+        output.size(0) != 1 || output.size(1) < 1)
       throw std::runtime_error(
           "Frozen BlackBox returned an invalid tensor shape or type");
-    output = output.narrow(2, output.size(2) - upstream.size(2),
-                           upstream.size(2));
+    output = matchTimeLength(output, upstream.size(2));
     const auto elapsed = std::chrono::duration<double, std::milli>(
         std::chrono::steady_clock::now() - started);
     runtime.inferenceMilliseconds[index].store(elapsed.count(),
                                                std::memory_order_relaxed);
     break;
   }
+  case openyourbox::graph::NodeType::pqmfAnalysis:
+    if (element.pqmf)
+      output = element.pqmf->analyseStreaming(upstream, runtime.histories[index]);
+    else
+      output = upstream;
+    break;
+  case openyourbox::graph::NodeType::pqmfSynthesis:
+    if (element.pqmf)
+      output = element.pqmf->synthesiseStreaming(
+          upstream, runtime.histories[index], element.outputChannels);
+    else
+      output = upstream;
+    break;
+  case openyourbox::graph::NodeType::variationalBottleneck: {
+    float fidelity = element.fidelityPercent;
+    if (controls != nullptr) {
+      const auto found = controls->fidelityByNodeId.find(element.nodeId);
+      if (found != controls->fidelityByNodeId.end())
+        fidelity = found->second;
+    }
+    output = VariationalBottleneck::encode(
+        upstream, element.weights[0], element.weights[1], fidelity,
+        element.compactnessReady, element.latentMean, element.latentPca,
+        element.cumulativeVariance);
+    break;
+  }
+  case openyourbox::graph::NodeType::noiseSynthesizer:
+    output = NoiseSynthesizer::process(upstream, element.weights.front());
+    break;
   case openyourbox::graph::NodeType::audioInput:
   case openyourbox::graph::NodeType::knobInput:
   case openyourbox::graph::NodeType::xyTrackpad:
@@ -1245,19 +1498,18 @@ LiveGraphEngine::compile(const graph::NodeGraph &graphDocument,
     }
 
     const auto addPin = [&](const graph::Pin &pin, graph::PinKind kind) {
-      return pin.id != 0 && pin.kind == kind && pin.shape.domain == "audio" &&
-             pins.emplace(pin.id, PinOwner{node.id, kind, pin.shape.domain})
-                 .second;
+      return pin.id != 0 && pin.kind == kind &&
+             pins.emplace(pin.id, PinOwner{node.id, kind}).second;
     };
     for (const auto &pin : node.inputs) {
       if (!addPin(pin, graph::PinKind::input))
         return failure(LiveGraphErrorCode::invalidGraph, node.id,
-                       "Input pin is duplicated, malformed, or non-audio");
+                       "Input pin is duplicated or malformed");
     }
     for (const auto &pin : node.outputs) {
       if (!addPin(pin, graph::PinKind::output))
         return failure(LiveGraphErrorCode::invalidGraph, node.id,
-                       "Output pin is duplicated, malformed, or non-audio");
+                       "Output pin is duplicated or malformed");
     }
   }
 
@@ -1459,12 +1711,10 @@ LiveGraphEngine::compile(const graph::NodeGraph &graphDocument,
             element.inputChannels = options.hostOutputChannels;
         } else {
           element.inputIndex = element.inputIndices.front();
-          element.inputChannels =
-              compiled->elements[static_cast<std::size_t>(element.inputIndex)]
-                  .outputChannels;
           const auto *inputNodeForPins = inputNode;
           element.inputExtractChannels.assign(element.inputIndices.size(), -1);
           element.inputIsConditioning.assign(element.inputIndices.size(), 0);
+          element.inputUseLatentTap.assign(element.inputIndices.size(), 0);
           std::size_t compiledInput = 0;
           for (const auto &pin : inputNodeForPins->inputs) {
             const auto source = sourceNodeByDestinationPin.find(pin.id);
@@ -1479,33 +1729,83 @@ LiveGraphEngine::compile(const graph::NodeGraph &graphDocument,
                 sourcePin != sourcePinIdByDestinationPin.end())
               element.inputExtractChannels[compiledInput] =
                   outputPinIndex(*sourceNode, sourcePin->second);
-            const auto &compiledSourceElement =
-                compiled->elements[compiledSource->second];
+            if (sourcePin != sourcePinIdByDestinationPin.end()) {
+              for (const auto &outPin : sourceNode->outputs) {
+                if (outPin.id == sourcePin->second &&
+                    graph::isLatentPin(outPin))
+                  element.inputUseLatentTap[compiledInput] = 1;
+              }
+            }
+            if (graph::isLatentPin(pin))
+              element.inputUseLatentTap[compiledInput] = 1;
             element.inputIsConditioning[compiledInput] =
-                graph::isControlInputPin(pin) ||
-                        graph::isConditioningSourceType(sourceNode->type) ||
-                        compiledSourceElement.outputIsConditioning
-                    ? 1
-                    : 0;
+                graph::isControlInputPin(pin) ? 1 : 0;
             ++compiledInput;
           }
+          element.inputChannels =
+              compiledMainInputChannels(compiled->elements, element);
         }
       }
       if (compileFrozenSink)
         element.type = NodeType::blackBox;
 
       switch (compileFrozenSink ? NodeType::blackBox : node.type) {
-      case NodeType::audioInput:
-        element.outputChannels = options.hostInputChannels;
+      case NodeType::audioInput: {
+        element.hostIoMode = graph::HostIoMode::stereo;
+        int choice = static_cast<int>(graph::HostIoMode::stereo);
+        if (readProperty(node, "channels", choice)) {
+          const auto *property = [&node]() -> const graph::NodeProperty * {
+            for (const auto &candidate : node.properties) {
+              if (candidate.key == "channels")
+                return &candidate;
+            }
+            return nullptr;
+          }();
+          const auto legacyPair =
+              property != nullptr &&
+              (property->maximum <= 1 || property->choices.size() == 2);
+          element.hostIoMode =
+              graph::hostIoModeFromChoice(choice, legacyPair);
+        } else if (!node.outputs.empty() &&
+                   node.outputs.front().shape.channels > 0) {
+          element.hostIoMode = graph::hostIoModeFromChannels(
+              node.outputs.front().shape.channels);
+        }
+        element.outputChannels =
+            graph::hostIoChannelsFromMode(element.hostIoMode);
         break;
-      case NodeType::audioOutput:
+      }
+      case NodeType::audioOutput: {
+        element.hostIoMode = graph::HostIoMode::stereo;
+        int choice = static_cast<int>(graph::HostIoMode::stereo);
+        if (readProperty(node, "channels", choice)) {
+          const auto *property = [&node]() -> const graph::NodeProperty * {
+            for (const auto &candidate : node.properties) {
+              if (candidate.key == "channels")
+                return &candidate;
+            }
+            return nullptr;
+          }();
+          const auto legacyPair =
+              property != nullptr &&
+              (property->maximum <= 1 || property->choices.size() == 2);
+          element.hostIoMode =
+              graph::hostIoModeFromChoice(choice, legacyPair);
+        } else if (!node.inputs.empty() &&
+                   node.inputs.front().shape.channels > 0) {
+          element.hostIoMode = graph::hostIoModeFromChannels(
+              node.inputs.front().shape.channels);
+        }
         element.outputChannels = options.hostOutputChannels;
+        const auto graphWidth =
+            graph::hostIoChannelsFromMode(element.hostIoMode);
         if (!element.inputIndices.empty() &&
-            element.inputChannels != options.hostOutputChannels)
+            element.inputChannels != graphWidth)
           return failure(
               LiveGraphErrorCode::invalidShape, node.id,
-              "Graph output channels do not match the mono/stereo host output");
+              "Graph output channels do not match the Audio Output mode");
         break;
+      }
       case NodeType::linear: {
         int features = 0;
         if (!readProperty(node, "features", features) || features < 1 ||
@@ -1520,21 +1820,31 @@ LiveGraphEngine::compile(const graph::NodeGraph &graphDocument,
         randomizeElementWeights(element, node.seed);
         break;
       }
-      case NodeType::convolution: {
+      case NodeType::convolution:
+      case NodeType::rateConv: {
         int channels = 0;
         if (!readProperty(node, "channels", channels) || channels < 1 ||
             channels > 512 ||
             !readProperty(node, "kernel_size", element.kernelSize) ||
-            element.kernelSize < 2 || element.kernelSize > 65 ||
+            element.kernelSize < 1 || element.kernelSize > 65 ||
             !readProperty(node, "dilation", element.dilation) ||
             element.dilation < 1 || element.dilation > 64)
           return failure(LiveGraphErrorCode::invalidProperty, node.id,
-                         "Conv1D requires Channels 1..512, Kernel Size 2..65, "
+                         "Conv1D requires Channels 1..512, Kernel Size 1..65, "
                          "and Dilation 1..64");
+        element.stride = 1;
+        readProperty(node, "stride", element.stride);
+        if (element.stride < 1)
+          element.stride = 1;
+        element.rateDirection = 0;
         element.outputChannels = channels;
         element.receptiveField =
             1 + static_cast<std::uint64_t>(element.kernelSize - 1) *
                     static_cast<std::uint64_t>(element.dilation);
+        if (element.stride > 1)
+          element.receptiveField = std::max(
+              element.receptiveField,
+              1 + static_cast<std::uint64_t>(element.stride));
         if (element.receptiveField - 1 > options.maximumHistorySamples)
           return failure(LiveGraphErrorCode::invalidProperty, node.id,
                          "Conv1D receptive field exceeds the history limit");
@@ -1544,6 +1854,50 @@ LiveGraphEngine::compile(const graph::NodeGraph &graphDocument,
                 static_cast<std::uint64_t>(channels),
                 static_cast<std::uint64_t>(element.inputChannels)),
             static_cast<std::uint64_t>(element.kernelSize));
+        randomizeElementWeights(element, node.seed);
+        break;
+      }
+      case NodeType::convTranspose: {
+        int channels = 0;
+        if (!readProperty(node, "channels", channels) || channels < 1 ||
+            channels > 512 ||
+            !readProperty(node, "kernel_size", element.kernelSize) ||
+            element.kernelSize < 1 || element.kernelSize > 65 ||
+            !readProperty(node, "dilation", element.dilation) ||
+            element.dilation < 1 || element.dilation > 64)
+          return failure(LiveGraphErrorCode::invalidProperty, node.id,
+                         "ConvTranspose1d requires Channels 1..512, Kernel "
+                         "Size 1..65, and Dilation 1..64");
+        element.stride = 1;
+        readProperty(node, "stride", element.stride);
+        if (element.stride < 1)
+          element.stride = 1;
+        element.outputChannels = channels;
+        element.receptiveField =
+            1 + static_cast<std::uint64_t>(element.kernelSize - 1) *
+                    static_cast<std::uint64_t>(element.dilation);
+        if (element.receptiveField - 1 > options.maximumHistorySamples)
+          return failure(LiveGraphErrorCode::invalidProperty, node.id,
+                         "ConvTranspose1d receptive field exceeds the history "
+                         "limit");
+        element.randomizable = true;
+        element.parameterCount = saturatedMultiply(
+            saturatedMultiply(
+                static_cast<std::uint64_t>(channels),
+                static_cast<std::uint64_t>(element.inputChannels)),
+            static_cast<std::uint64_t>(element.kernelSize));
+        randomizeElementWeights(element, node.seed);
+        break;
+      }
+      case NodeType::batchNorm: {
+        element.outputChannels = element.inputChannels;
+        if (element.inputChannels < 1 || element.inputChannels > 512)
+          return failure(LiveGraphErrorCode::invalidProperty, node.id,
+                         "BatchNorm1d requires 1..512 input channels");
+        element.receptiveField = 1;
+        element.randomizable = true;
+        element.parameterCount =
+            static_cast<std::uint64_t>(element.inputChannels) * 2;
         randomizeElementWeights(element, node.seed);
         break;
       }
@@ -1611,9 +1965,11 @@ LiveGraphEngine::compile(const graph::NodeGraph &graphDocument,
           } else if (element.inputIsConditioning[index] == 0 &&
                      index < element.inputIndices.size()) {
             element.inputIndex = element.inputIndices[index];
-            element.inputChannels =
-                compiled->elements[static_cast<std::size_t>(element.inputIndex)]
-                    .outputChannels;
+            element.inputChannels = compiledSlotChannels(
+                compiled->elements[static_cast<std::size_t>(element.inputIndex)],
+                index < element.inputExtractChannels.size()
+                    ? element.inputExtractChannels[index]
+                    : -1);
           }
         }
         element.outputChannels = element.inputChannels;
@@ -1734,9 +2090,11 @@ LiveGraphEngine::compile(const graph::NodeGraph &graphDocument,
           } else if (element.inputIsConditioning[index] == 0 &&
                      index < element.inputIndices.size()) {
             element.inputIndex = element.inputIndices[index];
-            element.inputChannels =
-                compiled->elements[static_cast<std::size_t>(element.inputIndex)]
-                    .outputChannels;
+            element.inputChannels = compiledSlotChannels(
+                compiled->elements[static_cast<std::size_t>(element.inputIndex)],
+                index < element.inputExtractChannels.size()
+                    ? element.inputExtractChannels[index]
+                    : -1);
           }
         }
         if (!element.blackBoxFactory ||
@@ -1749,6 +2107,7 @@ LiveGraphEngine::compile(const graph::NodeGraph &graphDocument,
         // as well.
         if (node.blackBoxOrigin != graph::BlackBoxOrigin::trainAutoload &&
             element.filmInputIndex < 0 &&
+            !element.blackBoxFactory->hasEncodeDecode() &&
             !element.blackBoxFactory->preservesSilence())
           return failure(LiveGraphErrorCode::invalidBlackBox, node.id,
                          "Frozen hook metadata is absent, shape-incompatible, "
@@ -1763,7 +2122,57 @@ LiveGraphEngine::compile(const graph::NodeGraph &graphDocument,
           return failure(LiveGraphErrorCode::invalidBlackBox, node.id,
                          "Frozen receptive field exceeds the history limit");
         element.parameterCount = element.blackBoxFactory->getParameterCount();
+        readFloatProperty(node, "fidelity", element.fidelityPercent);
+        element.fidelityPercent = graph::clampFidelity(element.fidelityPercent);
         break;
+      case NodeType::pqmfAnalysis: {
+        int nBand = graph::defaultPqmfBands;
+        readProperty(node, "n_band", nBand);
+        nBand = std::clamp(nBand, graph::minimumPqmfBands, graph::maximumPqmfBands);
+        element.nBand = nBand;
+        element.pqmf = std::make_shared<PqmfBank>(nBand);
+        element.outputChannels = std::max(1, element.inputChannels) * nBand;
+        element.receptiveField = element.pqmf->getCausalDelaySamples() + 1;
+        break;
+      }
+      case NodeType::pqmfSynthesis: {
+        int nBand = graph::defaultPqmfBands;
+        readProperty(node, "n_band", nBand);
+        nBand = std::clamp(nBand, graph::minimumPqmfBands, graph::maximumPqmfBands);
+        element.nBand = nBand;
+        element.pqmf = std::make_shared<PqmfBank>(nBand);
+        element.outputChannels = std::max(1, element.inputChannels / std::max(1, nBand));
+        element.receptiveField = element.pqmf->getCausalDelaySamples() + 1;
+        break;
+      }
+      case NodeType::variationalBottleneck: {
+        int latent = graph::defaultLatentSize;
+        readProperty(node, "latent_size", latent);
+        element.outputChannels = std::max(1, latent);
+        element.randomizable = true;
+        readFloatProperty(node, "fidelity", element.fidelityPercent);
+        element.fidelityPercent = graph::clampFidelity(
+            node.fidelityPercent > 0.0f ? node.fidelityPercent
+                                        : element.fidelityPercent);
+        element.parameterCount = saturatedMultiply(
+            2ull, saturatedMultiply(
+                      static_cast<std::uint64_t>(element.outputChannels),
+                      static_cast<std::uint64_t>(element.inputChannels)));
+        randomizeElementWeights(element, node.seed);
+        break;
+      }
+      case NodeType::noiseSynthesizer: {
+        int noiseBands = graph::defaultNoiseBands;
+        readProperty(node, "noise_bands", noiseBands);
+        element.kernelSize = std::max(1, noiseBands);
+        element.outputChannels = std::max(1, element.inputChannels);
+        element.randomizable = true;
+        element.parameterCount = saturatedMultiply(
+            static_cast<std::uint64_t>(element.kernelSize),
+            static_cast<std::uint64_t>(element.inputChannels));
+        randomizeElementWeights(element, node.seed);
+        break;
+      }
       }
 
       std::uint64_t upstreamReceptiveField = 1;
@@ -1820,6 +2229,7 @@ LiveGraphEngine::prepare(std::shared_ptr<const LiveGraphSnapshot> snapshot,
     runtime->snapshot = snapshot;
     const auto &compiled = *snapshot->implementation;
     runtime->outputs.resize(compiled.elements.size());
+    runtime->latentOutputs.resize(compiled.elements.size());
     runtime->histories.resize(compiled.elements.size());
     runtime->conditioningHistories.resize(compiled.elements.size());
     runtime->blackBoxKernels.resize(compiled.elements.size());
@@ -1857,8 +2267,12 @@ LiveGraphEngine::prepare(std::shared_ptr<const LiveGraphSnapshot> snapshot,
     for (std::size_t index = 0; index < compiled.elements.size(); ++index) {
       const auto &element = compiled.elements[index];
       if ((element.type == graph::NodeType::convolution ||
+           element.type == graph::NodeType::convTranspose ||
            element.type == graph::NodeType::tcn ||
-           element.type == graph::NodeType::blackBox) &&
+           element.type == graph::NodeType::blackBox ||
+           element.type == graph::NodeType::rateConv ||
+           element.type == graph::NodeType::pqmfAnalysis ||
+           element.type == graph::NodeType::pqmfSynthesis) &&
           element.receptiveField > 1) {
         runtime->histories[index] = torch::zeros(
             {1, element.inputChannels,
@@ -1910,6 +2324,10 @@ collectRuntimeControlState(const graph::NodeGraph &graphDocument) {
       controls.conditioningByNodeId[node.id] = {
           graph::clampConditioning(node.conditioningX),
           graph::clampConditioning(node.conditioningY)};
+    if (node.type == graph::NodeType::variationalBottleneck ||
+        node.type == graph::NodeType::blackBox)
+      controls.fidelityByNodeId[node.id] =
+          graph::clampFidelity(node.fidelityPercent);
   }
   return controls;
 }

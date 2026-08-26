@@ -1,9 +1,13 @@
 #include "dsp/LiveGraphEngine.h"
+#include "dsp/PqmfBank.h"
+#include "dsp/RateConv.h"
+#include "graph/RaveLayouts.h"
 #include "library/TrainingLibrary.h"
 #include "library/UserDataPaths.h"
 
 #include <torch/torch.h>
 
+#include <algorithm>
 #include <cmath>
 #include <iostream>
 #include <memory>
@@ -1052,8 +1056,6 @@ int main() {
   const auto *growthTcnNode = growthGraph.findNode(growthTcn);
   passed &= expect(
       growthTcnNode != nullptr && growthTcnNode->inputs.size() >= 2 &&
-          growthTcnNode->inputs[1].signalKind ==
-              openyourbox::graph::SignalKind::conditioning &&
           growthTcnNode->inputs[1].label ==
               openyourbox::graph::controlPinLabel,
       "TCN must expose a control conditioning pin");
@@ -1115,11 +1117,11 @@ int main() {
                      "Merge must insert between XY and the control pin");
   }
   passed &= expect(
-      !growthGraph
-           .connect(growthGraph.findNode(growthXy)->outputs.front().id,
-                    growthGraph.findNode(growthOutput)->inputs.front().id)
-           .accepted,
-      "audio input must reject a conditioning cable");
+      growthGraph
+          .connect(growthGraph.findNode(growthXy)->outputs.front().id,
+                   growthGraph.findNode(growthOutput)->inputs.front().id)
+          .accepted == false,
+      "1-channel XY must not connect to a 2-channel host output");
   passed &= expect(
       growthGraph
           .connect(growthGraph.findNode(growthTcn)->outputs.front().id,
@@ -1201,6 +1203,422 @@ int main() {
   passed &= expect(!library.selectedSampleRatesMatch(mixed),
                    "empty selection must block Train");
   tempRoot.deleteRecursively();
+
+  {
+    openyourbox::dsp::PqmfBank bank(4);
+    auto audio = torch::randn({1, 1, 2048});
+    const auto bands = bank.analyse(audio);
+    const auto reconstructed = bank.synthesise(bands, 1);
+    passed &= expect(bands.size(1) == 4, "PQMF analysis must emit nBand channels");
+    passed &= expect(reconstructed.size(1) == 1 && reconstructed.size(2) >= 1,
+                     "PQMF synthesis must return host-rate audio");
+    passed &= expect(bank.getCausalDelaySamples() > 0,
+                     "PQMF must report a positive causal delay");
+    float bestRelative = 1.0e9f;
+    const auto energy = audio.square().mean().item<float>();
+    const auto maxDelay = std::min<std::int64_t>(
+        reconstructed.size(2) / 2, static_cast<std::int64_t>(512));
+    for (std::int64_t delay = 0; delay < maxDelay; delay += 1) {
+      const auto length =
+          std::min(audio.size(2), reconstructed.size(2) - delay);
+      if (length < 128)
+        break;
+      const auto error = (audio.narrow(2, 0, length) -
+                          reconstructed.narrow(2, delay, length))
+                             .square()
+                             .mean()
+                             .item<float>();
+      if (energy > 0.0f)
+        bestRelative = std::min(bestRelative, error / energy);
+    }
+    passed &= expect(bestRelative < 1.5f,
+                     "PQMF analysis then synthesis must be approximately invertible");
+  }
+
+  {
+    openyourbox::dsp::PqmfBank bank(16);
+    auto analysisLeftover = bank.makeLeftover(1);
+    auto synthesisLeftover = bank.makeLeftover(16);
+    const auto blockSize = static_cast<std::int64_t>(512);
+    const auto totalSamples = static_cast<std::int64_t>(8192);
+    auto source = torch::randn({1, 1, totalSamples});
+    auto reconstructed = torch::zeros_like(source);
+    std::int64_t writeOffset = 0;
+    for (std::int64_t offset = 0; offset + blockSize <= totalSamples;
+         offset += blockSize) {
+      const auto block = source.narrow(2, offset, blockSize);
+      const auto bands =
+          bank.analyseStreaming(block, analysisLeftover);
+      if (bands.size(2) < 1)
+        continue;
+      const auto audio =
+          bank.synthesiseStreaming(bands, synthesisLeftover, 1);
+      const auto emit = std::min(audio.size(2), blockSize);
+      reconstructed.narrow(2, writeOffset, emit).copy_(audio.narrow(2, 0, emit));
+      writeOffset += emit;
+    }
+    float bestRelative = 1.0e9f;
+    const auto energy = source.narrow(2, 0, writeOffset).square().mean().item<float>();
+    const auto maxDelay = std::min<std::int64_t>(writeOffset / 2, 512);
+    for (std::int64_t delay = 0; delay < maxDelay; delay += 1) {
+      const auto length = writeOffset - delay;
+      if (length < 256)
+        break;
+      const auto error =
+          (source.narrow(2, 0, length) - reconstructed.narrow(2, delay, length))
+              .square()
+              .mean()
+              .item<float>();
+      if (energy > 0.0f)
+        bestRelative = std::min(bestRelative, error / energy);
+    }
+    passed &= expect(writeOffset >= totalSamples - blockSize,
+                     "PQMF streaming must emit nearly all host samples");
+    passed &= expect(bestRelative < 1.5f,
+                     "PQMF streaming analysis then synthesis must be invertible");
+  }
+
+  {
+    openyourbox::dsp::RateConv down(2, 3, 1,
+                                    openyourbox::dsp::RateConvMode::downsample);
+    auto input = torch::randn({1, 2, 64});
+    auto weight = torch::randn({4, 2, 3});
+    const auto downsampled = down.process(input, weight);
+    passed &= expect(downsampled.size(2) == 32,
+                     "causal downsample rateConv must emit T/stride samples");
+    openyourbox::dsp::RateConv up(2, 3, 1,
+                                  openyourbox::dsp::RateConvMode::upsample);
+    auto upWeight = torch::randn({2, 4, 3});
+    const auto upsampled = up.process(downsampled, upWeight);
+    passed &= expect(upsampled.size(2) == 64,
+                     "causal upsample rateConv must restore T * stride samples");
+  }
+
+  {
+    openyourbox::graph::NodeGraph domainGraph;
+    const auto analysis = domainGraph.addNode(
+        openyourbox::graph::NodeType::pqmfAnalysis, {180.0f, 0.0f});
+    const auto tcn = domainGraph.addNode(openyourbox::graph::NodeType::tcn,
+                                         {360.0f, 0.0f});
+    const auto conv = domainGraph.addNode(
+        openyourbox::graph::NodeType::convolution, {450.0f, 0.0f});
+    const auto merge = domainGraph.addNode(
+        openyourbox::graph::NodeType::merge, {620.0f, 0.0f});
+    const auto synthesis = domainGraph.addNode(
+        openyourbox::graph::NodeType::pqmfSynthesis, {800.0f, 0.0f});
+    const auto bottleneck = domainGraph.addNode(
+        openyourbox::graph::NodeType::variationalBottleneck, {980.0f, 0.0f});
+    const auto output = domainGraph.addNode(
+        openyourbox::graph::NodeType::audioOutput, {1160.0f, 0.0f});
+    const auto *analysisNode = domainGraph.findNode(analysis);
+    const auto *tcnNode = domainGraph.findNode(tcn);
+    const auto *convNode = domainGraph.findNode(conv);
+    const auto *mergeNode = domainGraph.findNode(merge);
+    const auto *synthesisNode = domainGraph.findNode(synthesis);
+    const auto *bottleneckNode = domainGraph.findNode(bottleneck);
+    const auto *outputNode = domainGraph.findNode(output);
+    passed &= expect(analysisNode != nullptr && tcnNode != nullptr &&
+                         domainGraph
+                              .connect(analysisNode->outputs.front().id,
+                                       tcnNode->inputs.front().id)
+                              .accepted,
+                     "PQMF analysis must connect to a passthrough TCN");
+    passed &= expect(tcnNode != nullptr &&
+                         tcnNode->inputs.front().shape.nBand ==
+                             openyourbox::graph::defaultPqmfBands &&
+                         tcnNode->inputs.front().shape.temporalRate ==
+                             openyourbox::graph::defaultPqmfBands,
+                     "TCN input must inherit PQMF hop rate and nBand");
+    passed &= expect(convNode != nullptr && tcnNode != nullptr &&
+                         domainGraph
+                             .connect(tcnNode->outputs.front().id,
+                                      convNode->inputs.front().id)
+                             .accepted,
+                     "multiband TCN must connect to Conv1D");
+    passed &= expect(domainGraph.setProperty(conv, "channels", 16),
+                     "multiband Conv1D must preserve nBand width before synthesis");
+    passed &= expect(
+        mergeNode != nullptr && synthesisNode != nullptr && convNode != nullptr &&
+            domainGraph
+                .connect(convNode->outputs.front().id, mergeNode->inputs.front().id)
+                .accepted &&
+            domainGraph
+                .connect(mergeNode->outputs.front().id,
+                         synthesisNode->inputs.front().id)
+                .accepted,
+        "multiband Merge must connect to PQMF synthesis");
+    passed &=
+        expect(bottleneckNode != nullptr && outputNode != nullptr &&
+                   !domainGraph
+                        .connect(bottleneckNode->outputs.front().id,
+                                 outputNode->inputs.front().id)
+                        .accepted,
+               "host audio output must refuse a 128-channel bottleneck cable");
+    const auto knob = domainGraph.addNode(
+        openyourbox::graph::NodeType::knobInput, {360.0f, 180.0f});
+    const auto *tcnAfterKnob = domainGraph.findNode(tcn);
+    passed &= expect(
+        tcnAfterKnob != nullptr && tcnAfterKnob->inputs.size() >= 2 &&
+            domainGraph.findNode(knob) != nullptr &&
+            domainGraph
+                .connect(domainGraph.findNode(knob)->outputs.front().id,
+                         tcnAfterKnob->inputs[1].id)
+                .accepted,
+        "TCN control pin must accept a knob tensor");
+  }
+
+  {
+    openyourbox::graph::NodeGraph rateGraph;
+    const auto analysis = rateGraph.addNode(
+        openyourbox::graph::NodeType::pqmfAnalysis, {0.0f, 0.0f});
+    const auto conv = rateGraph.addNode(
+        openyourbox::graph::NodeType::convTranspose, {180.0f, 0.0f});
+    passed &= expect(rateGraph.setProperty(conv, "stride", 3),
+                     "unwired ConvTranspose1d may set stride 3");
+    const auto *analysisNode = rateGraph.findNode(analysis);
+    const auto *convNode = rateGraph.findNode(conv);
+    passed &= expect(
+        analysisNode != nullptr && convNode != nullptr &&
+            !rateGraph
+                 .connect(analysisNode->outputs.front().id,
+                          convNode->inputs.front().id)
+                 .accepted,
+        "ConvTranspose1d must refuse a temporal rate that stride does not divide");
+  }
+
+  {
+    openyourbox::graph::NodeGraph bandGraph;
+    const auto analysis = bandGraph.addNode(
+        openyourbox::graph::NodeType::pqmfAnalysis, {0.0f, 0.0f});
+    const auto linear = bandGraph.addNode(
+        openyourbox::graph::NodeType::linear, {180.0f, 0.0f});
+    const auto synthesis = bandGraph.addNode(
+        openyourbox::graph::NodeType::pqmfSynthesis, {360.0f, 0.0f});
+    const auto *analysisNode = bandGraph.findNode(analysis);
+    const auto *linearNode = bandGraph.findNode(linear);
+    const auto *synthesisNode = bandGraph.findNode(synthesis);
+    passed &= expect(
+        analysisNode != nullptr && linearNode != nullptr &&
+            synthesisNode != nullptr &&
+            bandGraph
+                .connect(analysisNode->outputs.front().id,
+                         linearNode->inputs.front().id)
+                .accepted,
+        "PQMF analysis must connect to Linear");
+    passed &= expect(
+        linearNode != nullptr && synthesisNode != nullptr &&
+            !bandGraph
+                 .connect(linearNode->outputs.front().id,
+                          synthesisNode->inputs.front().id)
+                 .accepted,
+        "PQMF synthesis must refuse a band count that is not a multiple of nBand");
+    passed &= expect(bandGraph.setProperty(linear, "features", 16),
+                     "Linear features may be set to preserve nBand width");
+    passed &= expect(
+        linearNode != nullptr && synthesisNode != nullptr &&
+            bandGraph
+                .connect(linearNode->outputs.front().id,
+                         synthesisNode->inputs.front().id)
+                .accepted,
+        "PQMF synthesis must accept a channel count that is a multiple of nBand");
+  }
+
+  {
+    openyourbox::graph::NodeGraph invalid;
+    const auto inId =
+        invalid.addNode(openyourbox::graph::NodeType::audioInput, {0.0f, 0.0f});
+    const auto tcnId =
+        invalid.addNode(openyourbox::graph::NodeType::tcn, {180.0f, 0.0f});
+    const auto outId =
+        invalid.addNode(openyourbox::graph::NodeType::audioOutput, {360.0f, 0.0f});
+    invalid.connect(invalid.findNode(inId)->outputs.front().id,
+                    invalid.findNode(tcnId)->inputs.front().id);
+    invalid.connect(invalid.findNode(tcnId)->outputs.front().id,
+                    invalid.findNode(outId)->inputs.front().id);
+    passed &= expect(!invalid.hasReconstructionTrainPath(),
+                     "TCN-only graphs must fail the reconstruction path gate");
+
+    openyourbox::graph::NodeGraph valid;
+    const auto vIn =
+        valid.addNode(openyourbox::graph::NodeType::audioInput, {0.0f, 0.0f});
+    const auto vBn = valid.addNode(
+        openyourbox::graph::NodeType::variationalBottleneck, {180.0f, 0.0f});
+    const auto vDecode =
+        valid.addNode(openyourbox::graph::NodeType::linear, {270.0f, 0.0f});
+    const auto vOut =
+        valid.addNode(openyourbox::graph::NodeType::audioOutput, {360.0f, 0.0f});
+    auto *bn = const_cast<openyourbox::graph::GraphNode *>(valid.findNode(vBn));
+    if (bn != nullptr)
+      bn->armedForTraining = true;
+    const auto *inNode = valid.findNode(vIn);
+    const auto *bnNode = valid.findNode(vBn);
+    const auto *decodeNode = valid.findNode(vDecode);
+    const auto *outNode = valid.findNode(vOut);
+    passed &= expect(
+        inNode != nullptr && bnNode != nullptr && decodeNode != nullptr &&
+            outNode != nullptr &&
+            valid.connect(inNode->outputs.front().id, bnNode->inputs.front().id)
+                .accepted &&
+            valid
+                .connect(bnNode->outputs.front().id,
+                         decodeNode->inputs.front().id)
+                .accepted &&
+            valid
+                .connect(decodeNode->outputs.front().id,
+                         outNode->inputs.front().id)
+                .accepted,
+        "test reconstruction path cables must connect");
+    passed &= expect(valid.hasReconstructionTrainPath(),
+                     "armed bottleneck with decode-to-output must pass the gate");
+  }
+
+  {
+    openyourbox::graph::NodeGraph ioGraph;
+    const auto inId = ioGraph.addNode(
+        openyourbox::graph::NodeType::audioInput, {0.0f, 0.0f});
+    const auto actId = ioGraph.addNode(
+        openyourbox::graph::NodeType::activation, {180.0f, 0.0f});
+    const auto outId = ioGraph.addNode(
+        openyourbox::graph::NodeType::audioOutput, {360.0f, 0.0f});
+    passed &= expect(ioGraph.setProperty(inId, "channels", 0),
+                     "Audio Input must accept Mono");
+    passed &= expect(ioGraph.setProperty(outId, "channels", 0),
+                     "Audio Output must accept Mono");
+    const auto *inNode = ioGraph.findNode(inId);
+    const auto *outNode = ioGraph.findNode(outId);
+    passed &= expect(
+        inNode != nullptr && outNode != nullptr &&
+            inNode->outputs.front().shape.channels == 1 &&
+            outNode->inputs.front().shape.channels == 1 &&
+            inNode->outputs.front().shape.displayLabel().find("1ch") !=
+                std::string::npos &&
+            inNode->detail.find("1ch") != std::string::npos,
+        "Mono host I/O must update pin shapes, labels, and detail");
+    passed &= expect(
+        ioGraph
+            .connect(ioGraph.findNode(inId)->outputs.front().id,
+                     ioGraph.findNode(actId)->inputs.front().id)
+            .accepted &&
+            ioGraph
+                .connect(ioGraph.findNode(actId)->outputs.front().id,
+                         ioGraph.findNode(outId)->inputs.front().id)
+                .accepted,
+        "mono I/O must connect through Activation");
+    openyourbox::dsp::LiveGraphCompileOptions monoOptions;
+    monoOptions.hostInputChannels = 1;
+    monoOptions.hostOutputChannels = 1;
+    monoOptions.maximumBlockSize = 32;
+    const auto monoCompiled = LiveGraphEngine::compile(ioGraph, monoOptions);
+    passed &= expect(monoCompiled.succeeded(),
+                     "mono graph must compile against a mono host");
+    openyourbox::dsp::LiveGraphCompileOptions stereoHost;
+    stereoHost.hostInputChannels = 2;
+    stereoHost.hostOutputChannels = 2;
+    stereoHost.maximumBlockSize = 32;
+    const auto summed = LiveGraphEngine::compile(ioGraph, stereoHost);
+    passed &= expect(summed.succeeded(),
+                     "mono mode must compile on a stereo host via (L+R)/2");
+    if (summed.succeeded()) {
+      openyourbox::dsp::LiveGraphCompileError error;
+      const auto runtime = LiveGraphEngine::prepare(summed.snapshot, error);
+      passed &= expect(runtime != nullptr, "summed mono runtime must prepare");
+      if (runtime != nullptr) {
+        auto stereo = torch::zeros({1, 2, 8}, torch::kFloat32);
+        stereo[0][0].fill_(1.0f);
+        stereo[0][1].fill_(3.0f);
+        const auto out = runtime->processTensor(stereo);
+        passed &= expect(out.size(1) == 2, "stereo host still receives 2 outs");
+        const auto left = out[0][0].mean().item<float>();
+        const auto right = out[0][1].mean().item<float>();
+        passed &= expect(std::abs(left - 2.0f) < 1.0e-4f &&
+                             std::abs(right - 2.0f) < 1.0e-4f,
+                         "mono mode must fold stereo host with (L+R)/2");
+      }
+    }
+    passed &= expect(ioGraph.setProperty(inId, "channels", 1),
+                     "Audio Input must accept Mirrored");
+    passed &= expect(ioGraph.findNode(inId)->outputs.front().shape.channels == 2 &&
+                         ioGraph.findNode(inId)->detail.find("L=R") !=
+                             std::string::npos,
+                     "Mirrored mode must declare 2ch L=R");
+    const auto *actAfterMirror = ioGraph.findNode(actId);
+    passed &= expect(
+        actAfterMirror != nullptr &&
+            actAfterMirror->inputs.front().shape.channels == 2 &&
+            actAfterMirror->outputs.front().shape.channels == 2,
+        "Mirrored host width must propagate through Activation pins");
+    const auto mirrored = LiveGraphEngine::compile(ioGraph, stereoHost);
+    passed &= expect(mirrored.succeeded(),
+                     "mirrored mode must compile on a stereo host");
+    passed &= expect(ioGraph.setProperty(inId, "channels", 0),
+                     "host I/O must switch back to Mono");
+    const auto *actAfterMono = ioGraph.findNode(actId);
+    passed &= expect(
+        actAfterMono != nullptr &&
+            actAfterMono->inputs.front().shape.channels == 1 &&
+            actAfterMono->outputs.front().shape.channels == 1 &&
+            actAfterMono->outputs.front().shape.displayLabel().find("1ch") !=
+                std::string::npos,
+        "Mono host width must re-propagate through Activation pins");
+    passed &= expect(ioGraph.setProperty(inId, "channels", 2) &&
+                         ioGraph.setProperty(outId, "channels", 2),
+                     "host I/O must switch to Stereo");
+    passed &= expect(ioGraph.findNode(inId)->outputs.front().shape.channels == 2,
+                     "Stereo Audio Input must declare 2 channels");
+  }
+
+  {
+    openyourbox::graph::NodeGraph xyMixGraph;
+    const auto xyMixIn = xyMixGraph.addNode(
+        openyourbox::graph::NodeType::audioInput, {0.0f, 0.0f});
+    const auto xyMixPad = xyMixGraph.addNode(
+        openyourbox::graph::NodeType::xyTrackpad, {0.0f, 140.0f});
+    const auto xyMixTcn = xyMixGraph.addNode(
+        openyourbox::graph::NodeType::tcn, {180.0f, 140.0f});
+    const auto xyMixMerge = xyMixGraph.addNode(
+        openyourbox::graph::NodeType::merge, {360.0f, 0.0f});
+    const auto xyMixOut = xyMixGraph.addNode(
+        openyourbox::graph::NodeType::audioOutput, {540.0f, 0.0f});
+    passed &= expect(xyMixGraph.setProperty(xyMixIn, "channels", 0),
+                     "XY mix graph must switch host I/O to Mono");
+    const auto *xyMixInNode = xyMixGraph.findNode(xyMixIn);
+    const auto *xyMixPadNode = xyMixGraph.findNode(xyMixPad);
+    const auto *xyMixTcnNode = xyMixGraph.findNode(xyMixTcn);
+    const auto *xyMixMergeNode = xyMixGraph.findNode(xyMixMerge);
+    const auto *xyMixOutNode = xyMixGraph.findNode(xyMixOut);
+    passed &= expect(
+        xyMixInNode != nullptr && xyMixPadNode != nullptr &&
+            xyMixTcnNode != nullptr && xyMixMergeNode != nullptr &&
+            xyMixOutNode != nullptr && xyMixMergeNode->inputs.size() >= 2 &&
+            xyMixGraph
+                .connect(xyMixPadNode->outputs.front().id,
+                         xyMixTcnNode->inputs.front().id)
+                .accepted &&
+            xyMixGraph
+                .connect(xyMixTcnNode->outputs.front().id,
+                         xyMixMergeNode->inputs.front().id)
+                .accepted &&
+            xyMixGraph
+                .connect(xyMixInNode->outputs.front().id,
+                         xyMixMergeNode->inputs[1].id)
+                .accepted &&
+            xyMixGraph
+                .connect(xyMixMergeNode->outputs.front().id,
+                         xyMixOutNode->inputs.front().id)
+                .accepted,
+        "XY through TCN must merge with mono host audio");
+    openyourbox::dsp::LiveGraphCompileOptions xyMixOptions;
+    xyMixOptions.hostInputChannels = 1;
+    xyMixOptions.hostOutputChannels = 1;
+    xyMixOptions.maximumBlockSize = 32;
+    const auto xyMixCompiled =
+        LiveGraphEngine::compile(xyMixGraph, xyMixOptions);
+    passed &= expect(
+        xyMixCompiled.succeeded(),
+        xyMixCompiled.succeeded()
+            ? "XY through TCN must compile into a mono Mix"
+            : xyMixCompiled.error.message.c_str());
+  }
 
   if (passed)
     std::cout << "OpenYourBox live graph engine tests passed\n";

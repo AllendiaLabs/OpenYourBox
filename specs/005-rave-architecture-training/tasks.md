@@ -34,9 +34,9 @@ description: "Task list for RAVE Architecture & Training"
 
 **Purpose**: Confirm design artifacts and CMake wiring before node/DSP work.
 
-- [ ] T001 Verify RAVE design artifact cross-links and path conventions in `specs/005-rave-architecture-training/plan.md`
-- [ ] T002 [P] Confirm `Backend/train_worker.py` is already embedded beside freeze in `CMakeLists.txt`
-- [ ] T003 Add new DSP/graph sources (`PqmfBank`, `RateConv`, `VariationalBottleneck`, `NoiseSynthesizer`, `RaveLayouts`) to the plug-in target in `CMakeLists.txt`
+- [X] T001 Verify RAVE design artifact cross-links and path conventions in `specs/005-rave-architecture-training/plan.md`
+- [X] T002 [P] Confirm `Backend/train_worker.py` is already embedded beside freeze in `CMakeLists.txt`
+- [X] T003 Add new DSP/graph sources (`PqmfBank`, `RateConv`, `VariationalBottleneck`, `NoiseSynthesizer`, `RaveLayouts`) to the plug-in target in `CMakeLists.txt`
 
 ---
 
@@ -46,13 +46,13 @@ description: "Task list for RAVE Architecture & Training"
 
 **⚠️ CRITICAL**: No user story work can begin until this phase is complete.
 
-- [ ] T004 Extend `NodeType`, `ShapeSignature` (`domain` audio|multiband|latent, `temporalRate`), and RAVE defaults (nBand 16, latent 128) in `OpenYourBox/Source/graph/GraphTypes.h`
-- [ ] T005 [P] Implement domain/rate/channel compatibility helpers on `ShapeSignature` in `OpenYourBox/Source/graph/GraphTypes.h`
-- [ ] T006 Scaffold factory + ValueTree persist for `pqmfAnalysis`, `pqmfSynthesis`, `rateConv`, `variationalBottleneck`, `noiseSynthesizer` in `OpenYourBox/Source/graph/NodeGraph.cpp`
-- [ ] T007 [P] Persist last-used Train `objective` (`mapping`|`reconstruction`, default mapping) on the processor in `OpenYourBox/Source/PluginProcessor.cpp`
-- [ ] T008 Extend Training Library index schema with `kind` (`pair`|`clip`) and system tags, defaulting existing entries to `pair`, in `OpenYourBox/Source/library/TrainingLibrary.h`
-- [ ] T009 [P] Add `train_options.objective` (default `mapping`) to start-request assembly in `OpenYourBox/Source/train/TrainCoordinator.cpp`
-- [ ] T010 Wire new DSP headers into live-engine includes in `OpenYourBox/Source/dsp/LiveGraphEngine.h`
+- [X] T004 Extend `NodeType`, `ShapeSignature` (`domain` audio|multiband|latent, `temporalRate`), and RAVE defaults (nBand 16, latent 128) in `OpenYourBox/Source/graph/GraphTypes.h`
+- [X] T005 [P] Implement domain/rate/channel compatibility helpers on `ShapeSignature` in `OpenYourBox/Source/graph/GraphTypes.h`
+- [X] T006 Scaffold factory + ValueTree persist for `pqmfAnalysis`, `pqmfSynthesis`, `rateConv`, `variationalBottleneck`, `noiseSynthesizer` in `OpenYourBox/Source/graph/NodeGraph.cpp`
+- [X] T007 [P] Persist last-used Train `objective` (`mapping`|`reconstruction`, default mapping) on the processor in `OpenYourBox/Source/PluginProcessor.cpp`
+- [X] T008 Extend Training Library index schema with `kind` (`pair`|`clip`) and system tags, defaulting existing entries to `pair`, in `OpenYourBox/Source/library/TrainingLibrary.h`
+- [X] T009 [P] Add `train_options.objective` (default `mapping`) to start-request assembly in `OpenYourBox/Source/train/TrainCoordinator.cpp`
+- [X] T010 Wire new DSP headers into live-engine includes in `OpenYourBox/Source/dsp/LiveGraphEngine.h`
 
 **Checkpoint**: Types, persistence, and skeletons ready — story work can begin.
 
@@ -66,17 +66,17 @@ description: "Task list for RAVE Architecture & Training"
 
 ### Implementation for User Story 1
 
-- [ ] T011 [P] [US1] Implement Kaiser cosine-modulated PQMF analysis/synthesis (default 16 bands, causal streaming) in `OpenYourBox/Source/dsp/PqmfBank.cpp`
-- [ ] T012 [P] [US1] Implement causal `rateConv` downsample/upsample with preallocated leftover/history rings in `OpenYourBox/Source/dsp/RateConv.cpp`
-- [ ] T013 [US1] Implement live variational bottleneck (reparameterize at inference with prior sample; store fidelity percent) in `OpenYourBox/Source/dsp/VariationalBottleneck.cpp`
-- [ ] T014 [P] [US1] Implement filtered-noise synthesizer addend in `OpenYourBox/Source/dsp/NoiseSynthesizer.cpp`
-- [ ] T015 [US1] Dispatch new node types with zero audio-thread allocations (prepare rings on GUI thread) in `OpenYourBox/Source/dsp/LiveGraphEngine.cpp`
-- [ ] T016 [P] [US1] Add palette items and properties (nBand, stride, direction, latentSize, noiseBands) in `OpenYourBox/Source/graph/NodeRenderer.cpp`
-- [ ] T017 [US1] Create pins and labels for RAVE nodes (audio/multiband/latent) in `OpenYourBox/Source/graph/NodeGraph.cpp`
-- [ ] T018 [US1] Refuse illegal domain, temporal-rate, and nBand mismatches with tooltips in `OpenYourBox/Source/graph/NodeGraph.cpp`
-- [ ] T019 [P] [US1] Show causal delay (samples/ms) on RAVE processing nodes in `OpenYourBox/Source/graph/NodeRenderer.cpp`
-- [ ] T020 [US1] Accept new node types in freeze graph fragments in `Backend/freeze_worker.py`
-- [ ] T021 [P] [US1] Add C++ tests for PQMF analysis→synthesis invertibility and causal rate-conv length in `Tests/LiveGraphEngineTests.cpp`
+- [X] T011 [P] [US1] Implement Kaiser cosine-modulated PQMF analysis/synthesis (default 16 bands, causal streaming) in `OpenYourBox/Source/dsp/PqmfBank.cpp`
+- [X] T012 [P] [US1] Implement causal `rateConv` downsample/upsample with preallocated leftover/history rings in `OpenYourBox/Source/dsp/RateConv.cpp`
+- [X] T013 [US1] Implement live variational bottleneck (reparameterize at inference with prior sample; store fidelity percent) in `OpenYourBox/Source/dsp/VariationalBottleneck.cpp`
+- [X] T014 [P] [US1] Implement filtered-noise synthesizer addend in `OpenYourBox/Source/dsp/NoiseSynthesizer.cpp`
+- [X] T015 [US1] Dispatch new node types with zero audio-thread allocations (prepare rings on GUI thread) in `OpenYourBox/Source/dsp/LiveGraphEngine.cpp`
+- [X] T016 [P] [US1] Add palette items and properties (nBand, stride, direction, latentSize, noiseBands) in `OpenYourBox/Source/graph/NodeRenderer.cpp`
+- [X] T017 [US1] Create pins and labels for RAVE nodes (audio/multiband/latent) in `OpenYourBox/Source/graph/NodeGraph.cpp`
+- [X] T018 [US1] Refuse illegal domain, temporal-rate, and nBand mismatches with tooltips in `OpenYourBox/Source/graph/NodeGraph.cpp`
+- [X] T019 [P] [US1] Show causal delay (samples/ms) on RAVE processing nodes in `OpenYourBox/Source/graph/NodeRenderer.cpp`
+- [X] T020 [US1] Accept new node types in freeze graph fragments in `Backend/freeze_worker.py`
+- [X] T021 [P] [US1] Add C++ tests for PQMF analysis→synthesis invertibility and causal rate-conv length in `Tests/LiveGraphEngineTests.cpp`
 
 **Checkpoint**: Users can wire a RAVE-shaped live graph; TCN mapping graphs still work.
 
@@ -90,12 +90,12 @@ description: "Task list for RAVE Architecture & Training"
 
 ### Implementation for User Story 2
 
-- [ ] T022 [P] [US2] Persist `kind`, system tags `pair`/`unpaired`, and optional user tags in `OpenYourBox/Source/library/TrainingLibrary.cpp`
-- [ ] T023 [P] [US2] Implement single-file import as `clip` entries in `OpenYourBox/Source/library/TrainingLibrary.cpp`
-- [ ] T024 [US2] Implement Capture Samples kind **Single** (no peer; input record; default bypass; append clip) in `OpenYourBox/Source/capture/CaptureRecorder.cpp` and `OpenYourBox/Source/ui/CaptureSamplesPanel.cpp`
-- [ ] T025 [US2] Show tags and objective-based warn/filter in `OpenYourBox/Source/ui/TrainingLibraryPanel.cpp`
-- [ ] T026 [US2] Block mapping Run with an error when any unpaired/clip is selected in `OpenYourBox/Source/ui/TrainPanel.cpp`
-- [ ] T027 [US2] Flatten selected pairs to both x and y plus clips when assembling reconstruction corpus in `OpenYourBox/Source/train/TrainCoordinator.cpp`
+- [X] T022 [P] [US2] Persist `kind`, system tags `pair`/`unpaired`, and optional user tags in `OpenYourBox/Source/library/TrainingLibrary.cpp`
+- [X] T023 [P] [US2] Implement single-file import as `clip` entries in `OpenYourBox/Source/library/TrainingLibrary.cpp`
+- [X] T024 [US2] Implement Capture Samples kind **Single** (no peer; input record; default bypass; append clip) in `OpenYourBox/Source/capture/CaptureRecorder.cpp` and `OpenYourBox/Source/ui/CaptureSamplesPanel.cpp`
+- [X] T025 [US2] Show tags and objective-based warn/filter in `OpenYourBox/Source/ui/TrainingLibraryPanel.cpp`
+- [X] T026 [US2] Block mapping Run with an error when any unpaired/clip is selected in `OpenYourBox/Source/ui/TrainPanel.cpp`
+- [X] T027 [US2] Flatten selected pairs to both x and y plus clips when assembling reconstruction corpus in `OpenYourBox/Source/train/TrainCoordinator.cpp`
 
 **Checkpoint**: Library/Capture remain one product; mapping pair path unchanged.
 
@@ -109,16 +109,16 @@ description: "Task list for RAVE Architecture & Training"
 
 ### Implementation for User Story 3
 
-- [ ] T028 [P] [US3] Add mapping|reconstruction objective control to the existing Train panel in `OpenYourBox/Source/ui/TrainPanel.cpp`
-- [ ] T029 [US3] Restore last-used objective per instance from processor state in `OpenYourBox/Source/ui/TrainPanel.cpp` and `OpenYourBox/Source/PluginProcessor.cpp`
-- [ ] T030 [US3] Gate reconstruction Run on armed autoencoder path (bottleneck + decode to audio) in `OpenYourBox/Source/graph/NodeGraph.cpp` and `OpenYourBox/Source/ui/TrainPanel.cpp`
-- [ ] T031 [US3] Send `objective`, `clips`, reconstruction step counts, and mixed-SR/channel gates per `contracts/unified-train-ipc.md` from `OpenYourBox/Source/train/TrainCoordinator.cpp`
-- [ ] T032 [US3] Parse and display `stage` (`representation`|`quality`) on progress events in `OpenYourBox/Source/train/TrainCoordinator.cpp` and `OpenYourBox/Source/ui/TrainPanel.cpp`
-- [ ] T033 [US3] Keep mapping path (`objective=mapping`) on the existing steerable recipe in `Backend/train_worker.py`
-- [ ] T034 [US3] Implement reconstruction stage 1 (dual spectral distance + KL warmup, causal graph build) in `Backend/train_worker.py`
-- [ ] T035 [US3] Implement reconstruction stage 2 (freeze encoder, hinge GAN + feature matching, train-only discriminators) in `Backend/train_worker.py`
-- [ ] T036 [US3] Compute compactness PCA after stage 1 (fallback full latent + status) in `Backend/train_worker.py`
-- [ ] T037 [P] [US3] Add Python tests for objective dispatch, stage counters, and corpus flatten (pair x+y) in `Tests/test_train_worker.py`
+- [X] T028 [P] [US3] Add mapping|reconstruction objective control to the existing Train panel in `OpenYourBox/Source/ui/TrainPanel.cpp`
+- [X] T029 [US3] Restore last-used objective per instance from processor state in `OpenYourBox/Source/ui/TrainPanel.cpp` and `OpenYourBox/Source/PluginProcessor.cpp`
+- [X] T030 [US3] Gate reconstruction Run on armed autoencoder path (bottleneck + decode to audio) in `OpenYourBox/Source/graph/NodeGraph.cpp` and `OpenYourBox/Source/ui/TrainPanel.cpp`
+- [X] T031 [US3] Send `objective`, `clips`, reconstruction step counts, and mixed-SR/channel gates per `contracts/unified-train-ipc.md` from `OpenYourBox/Source/train/TrainCoordinator.cpp`
+- [X] T032 [US3] Parse and display `stage` (`representation`|`quality`) on progress events in `OpenYourBox/Source/train/TrainCoordinator.cpp` and `OpenYourBox/Source/ui/TrainPanel.cpp`
+- [X] T033 [US3] Keep mapping path (`objective=mapping`) on the existing steerable recipe in `Backend/train_worker.py`
+- [X] T034 [US3] Implement reconstruction stage 1 (dual spectral distance + KL warmup, causal graph build) in `Backend/train_worker.py`
+- [X] T035 [US3] Implement reconstruction stage 2 (freeze encoder, hinge GAN + feature matching, train-only discriminators) in `Backend/train_worker.py`
+- [X] T036 [US3] Compute compactness PCA after stage 1 (fallback full latent + status) in `Backend/train_worker.py`
+- [X] T037 [P] [US3] Add Python tests for objective dispatch, stage counters, and corpus flatten (pair x+y) in `Tests/test_train_worker.py`
 
 **Checkpoint**: One Train shell; recipes differ by objective only.
 
@@ -132,13 +132,13 @@ description: "Task list for RAVE Architecture & Training"
 
 ### Implementation for User Story 4
 
-- [ ] T038 [P] [US4] Add Gold RAVE audio/latent ports (forward default wiring) in `OpenYourBox/Source/graph/NodeGraph.cpp`
-- [ ] T039 [US4] Invoke TorchScript `forward`/`encode`/`decode` from the live Gold path in `OpenYourBox/Source/dsp/TorchScriptBlackBox.cpp` and `OpenYourBox/Source/dsp/LiveGraphEngine.cpp`
-- [ ] T040 [US4] Export encode/decode/forward when a bottleneck is in the freeze fragment in `Backend/freeze_worker.py`
-- [ ] T041 [US4] Export reconstruction success artifact with those methods plus compactness buffers in `Backend/train_worker.py`
-- [ ] T042 [US4] Auto-load RAVE Gold for the armed chain on reconstruction `success` only (not `stopped`) in `OpenYourBox/Source/PluginEditor.cpp` and `OpenYourBox/Source/train/TrainCoordinator.cpp`
-- [ ] T043 [US4] Unfreeze RAVE Gold back to Blue nodes with trained weight paths in `OpenYourBox/Source/graph/NodeGraph.cpp`
-- [ ] T044 [US4] Keep hear-while-training optional checkpoint swap off the success-auto-load path in `OpenYourBox/Source/train/TrainCoordinator.cpp`
+- [X] T038 [P] [US4] Add Gold RAVE audio/latent ports (forward default wiring) in `OpenYourBox/Source/graph/NodeGraph.cpp`
+- [X] T039 [US4] Invoke TorchScript `forward`/`encode`/`decode` from the live Gold path in `OpenYourBox/Source/dsp/TorchScriptBlackBox.cpp` and `OpenYourBox/Source/dsp/LiveGraphEngine.cpp`
+- [X] T040 [US4] Export encode/decode/forward when a bottleneck is in the freeze fragment in `Backend/freeze_worker.py`
+- [X] T041 [US4] Export reconstruction success artifact with those methods plus compactness buffers in `Backend/train_worker.py`
+- [X] T042 [US4] Auto-load RAVE Gold for the armed chain on reconstruction `success` only (not `stopped`) in `OpenYourBox/Source/PluginEditor.cpp` and `OpenYourBox/Source/train/TrainCoordinator.cpp`
+- [X] T043 [US4] Unfreeze RAVE Gold back to Blue nodes with trained weight paths in `OpenYourBox/Source/graph/NodeGraph.cpp`
+- [X] T044 [US4] Keep hear-while-training optional checkpoint swap off the success-auto-load path in `OpenYourBox/Source/train/TrainCoordinator.cpp`
 
 **Checkpoint**: Reconstruction success matches Phase 3 Gold auto-load pattern with extra methods.
 
@@ -152,10 +152,10 @@ description: "Task list for RAVE Architecture & Training"
 
 ### Implementation for User Story 5
 
-- [ ] T045 [P] [US5] Expose Fidelity property on variational bottleneck in `OpenYourBox/Source/graph/NodeGraph.cpp` and `OpenYourBox/Source/graph/NodeRenderer.cpp`
-- [ ] T046 [US5] Expose Fidelity on Gold RAVE (always applies, FiLM-on-Gold pattern) in `OpenYourBox/Source/graph/NodeRenderer.cpp`
-- [ ] T047 [US5] Apply compactness crop inside encode/forward (full-width latent ports) in `OpenYourBox/Source/dsp/VariationalBottleneck.cpp` and `OpenYourBox/Source/dsp/TorchScriptBlackBox.cpp`
-- [ ] T048 [US5] Copy current fidelity onto restored bottleneck on Unfreeze in `OpenYourBox/Source/graph/NodeGraph.cpp`
+- [X] T045 [P] [US5] Expose Fidelity property on variational bottleneck in `OpenYourBox/Source/graph/NodeGraph.cpp` and `OpenYourBox/Source/graph/NodeRenderer.cpp`
+- [X] T046 [US5] Expose Fidelity on Gold RAVE (always applies, FiLM-on-Gold pattern) in `OpenYourBox/Source/graph/NodeRenderer.cpp`
+- [X] T047 [US5] Apply compactness crop inside encode/forward (full-width latent ports) in `OpenYourBox/Source/dsp/VariationalBottleneck.cpp` and `OpenYourBox/Source/dsp/TorchScriptBlackBox.cpp`
+- [X] T048 [US5] Copy current fidelity onto restored bottleneck on Unfreeze in `OpenYourBox/Source/graph/NodeGraph.cpp`
 
 **Checkpoint**: Fidelity is a live Gold control, not a train-only export flag.
 
@@ -169,10 +169,10 @@ description: "Task list for RAVE Architecture & Training"
 
 ### Implementation for User Story 6
 
-- [ ] T049 [P] [US6] Build original RAVE layout (PQMF 16, strides 4-4-4-2, waveform×loudness+noise, latent 128) in `OpenYourBox/Source/graph/RaveLayouts.cpp`
-- [ ] T050 [P] [US6] Build latest-continuous layout (residual dilated stacks + amplitude modulation, same ratios) in `OpenYourBox/Source/graph/RaveLayouts.cpp`
-- [ ] T051 [US6] Add Insert RAVE layout menu (Original|Latest × Mono|Stereo) in `OpenYourBox/Source/graph/NodeRenderer.cpp` or `OpenYourBox/Source/PluginEditor.cpp`
-- [ ] T052 [US6] Refuse mono layout vs stereo host without explicit adapters in `OpenYourBox/Source/graph/NodeGraph.cpp`
+- [X] T049 [P] [US6] Build original RAVE layout (PQMF 16, strides 4-4-4-2, waveform×loudness+noise, latent 128) in `OpenYourBox/Source/graph/RaveLayouts.cpp`
+- [X] T050 [P] [US6] Build latest-continuous layout (residual dilated stacks + amplitude modulation, same ratios) in `OpenYourBox/Source/graph/RaveLayouts.cpp`
+- [X] T051 [US6] Add Insert RAVE layout menu (Original|Latest × Mono|Stereo) in `OpenYourBox/Source/graph/NodeRenderer.cpp` or `OpenYourBox/Source/PluginEditor.cpp`
+- [X] T052 [US6] Refuse mono layout vs stereo host without explicit adapters in `OpenYourBox/Source/graph/NodeGraph.cpp`
 
 **Checkpoint**: Users can start from either published lineage without a second trainer.
 
@@ -182,12 +182,12 @@ description: "Task list for RAVE Architecture & Training"
 
 **Purpose**: Attribution, tests, latent analysis, quickstart sign-off.
 
-- [ ] T053 [P] Add acids-rave / RAVE paper attribution when PQMF or recipe code is ported in `NOTICE`
-- [ ] T054 [P] Confirm latent-domain analysis plots all feature dimensions on shared axes in `OpenYourBox/Source/dsp/LiveGraphPublisher.cpp`
-- [ ] T055 Add C++ tests for illegal domain connections and reconstruction-path validity helper in `Tests/LiveGraphEngineTests.cpp`
-- [ ] T056 Extend Python tests for mapping unpaired rejection (plugin-equivalent flatten rules documented in worker helpers) in `Tests/test_train_worker.py`
-- [ ] T057 Run `specs/005-rave-architecture-training/quickstart.md` scenarios 1–9 (shortened reconstruction steps allowed) and record results in `specs/005-rave-architecture-training/checklists/requirements.md`
-- [ ] T058 Document new public DSP/graph APIs with Doxygen comments in `OpenYourBox/Source/dsp/PqmfBank.h`, `OpenYourBox/Source/dsp/RateConv.h`, `OpenYourBox/Source/dsp/VariationalBottleneck.h`, and `OpenYourBox/Source/graph/RaveLayouts.h`
+- [X] T053 [P] Add acids-rave / RAVE paper attribution when PQMF or recipe code is ported in `NOTICE`
+- [X] T054 [P] Confirm latent-domain analysis plots all feature dimensions on shared axes in `OpenYourBox/Source/dsp/LiveGraphPublisher.cpp`
+- [X] T055 Add C++ tests for illegal domain connections and reconstruction-path validity helper in `Tests/LiveGraphEngineTests.cpp`
+- [X] T056 Extend Python tests for mapping unpaired rejection (plugin-equivalent flatten rules documented in worker helpers) in `Tests/test_train_worker.py`
+- [X] T057 Run `specs/005-rave-architecture-training/quickstart.md` scenarios 1–9 (shortened reconstruction steps allowed) and record results in `specs/005-rave-architecture-training/checklists/requirements.md`
+- [X] T058 Document new public DSP/graph APIs with Doxygen comments in `OpenYourBox/Source/dsp/PqmfBank.h`, `OpenYourBox/Source/dsp/RateConv.h`, `OpenYourBox/Source/dsp/VariationalBottleneck.h`, and `OpenYourBox/Source/graph/RaveLayouts.h`
 
 ---
 

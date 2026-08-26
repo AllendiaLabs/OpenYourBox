@@ -51,6 +51,9 @@ public:
   [[nodiscard]] std::unique_ptr<FrozenBlackBoxKernel>
   createKernel() const override;
 
+  /** @brief True when encode and decode methods were found on the artifact. */
+  [[nodiscard]] bool hasEncodeDecode() const noexcept override;
+
   /** @brief Returns the canonical artifact path. */
   [[nodiscard]] const std::string &getArtifactPath() const noexcept;
 
@@ -65,10 +68,12 @@ private:
    * @param silence Whether zero input remains exactly zero.
    * @param conditioned True when the module accepts a control tensor.
    * @param condDim Validated FiLM control width.
+   * @param encodeDecode True when encode and decode methods exist.
    */
   TorchScriptBlackBoxFactory(std::string path, int inputs, int outputs,
                              std::uint64_t field, std::uint64_t parameters,
-                             bool silence, bool conditioned, int condDim);
+                             bool silence, bool conditioned, int condDim,
+                             bool encodeDecode);
 
   /** @brief Canonical local TorchScript file path. */
   std::string artifactPath;
@@ -86,5 +91,7 @@ private:
   bool conditioned = false;
   /** @brief FiLM control width used at trace and runtime. */
   int conditioningDim = 2;
+  /** @brief True when encode/decode methods were validated. */
+  bool encodeDecode = false;
 };
 } // namespace openyourbox::dsp

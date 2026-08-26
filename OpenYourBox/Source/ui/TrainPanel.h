@@ -73,6 +73,12 @@ public:
     bool isMaster = true;
     /** @brief True when a train artifact exists but graph swap failed. */
     bool retryAvailable = false;
+    /** @brief Mapping is blocked because unpaired clips are selected. */
+    bool unpairedSelected = false;
+    /** @brief Reconstruction graph is missing bottleneck/decode path. */
+    bool reconstructionPathInvalid = false;
+    /** @brief Reconstruction gate text. */
+    juce::String reconstructionReason;
   };
 
   /**
@@ -101,5 +107,7 @@ public:
   char mlflowExperiment[128]{};
   /** @brief Optional MLflow run name; empty lets the server assign one. */
   char mlflowRunName[64]{};
+  /** @brief Last-used Train objective for this plug-in instance. */
+  graph::TrainObjective objective = graph::TrainObjective::mapping;
 };
 } // namespace openyourbox::ui

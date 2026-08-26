@@ -446,6 +446,141 @@ class TrainWorkerMlflowTests(unittest.TestCase):
             else:
                 os.environ["MLFLOW_TRACKING_URI"] = original_uri
 
+    def test_flatten_reconstruction_uses_pair_x_and_y(self) -> None:
+        """Reconstruction corpus must include both sides of each selected pair."""
+        paths = train_worker.flatten_reconstruction_clips(
+            {
+                "pairs": [{"x_path": "/tmp/x.wav", "y_path": "/tmp/y.wav"}],
+                "clips": [{"path": "/tmp/clip.wav"}],
+            }
+        )
+        self.assertEqual(paths, ["/tmp/x.wav", "/tmp/y.wav", "/tmp/clip.wav"])
+
+    def test_mapping_rejects_unpaired_clips(self) -> None:
+        """Mapping must refuse a capture set that includes unpaired clips."""
+        self.assertTrue(
+            train_worker.mapping_rejects_unpaired({"clips": [{"path": "/tmp/a.wav"}]})
+        )
+        self.assertFalse(train_worker.mapping_rejects_unpaired({"pairs": [{}], "clips": []}))
+
+    def test_objective_dispatch_mapping_rejects_clips(self) -> None:
+        """train_request mapping path must error before loading pairs when clips exist."""
+        with self.assertRaisesRegex(ValueError, "unpaired"):
+            train_worker.train_request(
+                {
+                    "request_id": "map-reject",
+                    "operation": "train_steerable",
+                    "train_options": {"objective": "mapping"},
+                    "capture_set": {"pairs": [], "clips": [{"path": "/tmp/a.wav"}]},
+                    "graph_fragment": {"elements": [], "connections": []},
+                },
+                Path("/tmp"),
+                None,
+            )
+
+    def test_reconstruction_two_stage_and_encode_decode_export(self) -> None:
+        """Short reconstruction must emit both stages and export encode/decode."""
+
+        def _write_wav(path: Path) -> None:
+            samples = [0.05] * 256
+            payload = struct.pack("<" + "f" * len(samples), *samples)
+            fmt = struct.pack("<HHIIHH", 3, 1, 44100, 44100 * 4, 4, 32)
+            riff_size = 4 + (8 + len(fmt)) + (8 + len(payload))
+            path.write_bytes(
+                b"RIFF"
+                + struct.pack("<I", riff_size)
+                + b"WAVEfmt "
+                + struct.pack("<I", len(fmt))
+                + fmt
+                + b"data"
+                + struct.pack("<I", len(payload))
+                + payload
+            )
+
+        fragment = {
+            "elements": [
+                {
+                    "id": 1,
+                    "type": "rate_conv",
+                    "properties": [
+                        {"key": "channels", "value": 4},
+                        {"key": "kernel_size", "value": 3},
+                        {"key": "stride", "value": 2},
+                        {"key": "dilation", "value": 1},
+                    ],
+                },
+                {
+                    "id": 2,
+                    "type": "variational_bottleneck",
+                    "properties": [{"key": "latent_size", "value": 4}],
+                },
+                {
+                    "id": 3,
+                    "type": "conv_transpose1d",
+                    "properties": [
+                        {"key": "channels", "value": 1},
+                        {"key": "kernel_size", "value": 3},
+                        {"key": "stride", "value": 2},
+                        {"key": "dilation", "value": 1},
+                    ],
+                },
+            ],
+            "connections": [
+                {"source_element_id": 1, "destination_element_id": 2},
+                {"source_element_id": 2, "destination_element_id": 3},
+            ],
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            wav = Path(tmp) / "clip.wav"
+            _write_wav(wav)
+            events: list[dict] = []
+            original_emit = train_worker._emit
+
+            def _capture(event):
+                events.append(event)
+                original_emit(event)
+
+            train_worker._emit = _capture  # type: ignore[method-assign]
+            try:
+                result = train_worker.train_request(
+                    {
+                        "request_id": "rave-short",
+                        "operation": "train_steerable",
+                        "train_options": {
+                            "objective": "reconstruction",
+                            "host_input_channels": 1,
+                            "segment_length": 128,
+                            "reconstruction": {
+                                "stage1_steps": 1,
+                                "stage2_steps": 1,
+                                "kl_warmup_steps": 1,
+                            },
+                        },
+                        "capture_set": {
+                            "pairs": [{"x_path": str(wav), "y_path": str(wav)}],
+                            "clips": [],
+                        },
+                        "graph_fragment": fragment,
+                    },
+                    Path(tmp),
+                    None,
+                )
+            finally:
+                train_worker._emit = original_emit
+            self.assertEqual(result["status"], "success")
+            self.assertTrue(result["has_encode_decode"])
+            stages = {event.get("stage") for event in events}
+            self.assertIn("representation", stages)
+            self.assertIn("quality", stages)
+            loaded = torch.jit.load(result["artifact_path"])
+            audio = torch.zeros(1, 1, 256)
+            encoded = loaded.encode(audio)
+            decoded = loaded.decode(encoded)
+            forwarded = loaded.forward(audio)
+            self.assertEqual(encoded.dim(), 3)
+            self.assertEqual(decoded.dim(), 3)
+            self.assertEqual(forwarded.dim(), 3)
+
 
 if __name__ == "__main__":
     unittest.main()

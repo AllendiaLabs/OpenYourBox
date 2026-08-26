@@ -11,6 +11,16 @@ void CaptureSamplesPanel::render(
   const bool searching = sync == capture::SyncState::discovering;
   ImGui::TextUnformatted(slave ? "Capture Samples (slave)"
                                : "Capture Samples");
+  if (!slave) {
+    const char *kindLabel = captureKind == 1 ? "Single" : "Pair";
+    if (ImGui::BeginCombo("Kind", kindLabel)) {
+      if (ImGui::Selectable("Pair", captureKind == 0))
+        captureKind = 0;
+      if (ImGui::Selectable("Single", captureKind == 1))
+        captureKind = 1;
+      ImGui::EndCombo();
+    }
+  }
   ImGui::Text("This instance: %s",
               capture::CapturePairing::shortInstanceLabel(
                   pairing.getInstanceId())
@@ -105,6 +115,23 @@ void CaptureSamplesPanel::render(
 
     if (ImGui::Button("Unpair") && callbacks.unpair)
       callbacks.unpair();
+  }
+
+  if (!slave && captureKind == 1 &&
+      sync != capture::SyncState::paired &&
+      sync != capture::SyncState::recording) {
+    ImGui::TextWrapped(
+        "Single capture records this instance input into an unpaired clip.");
+    bool bypass = pairing.isCaptureBypassEnabled();
+    if (ImGui::Checkbox("Bypass graph (default)", &bypass) &&
+        callbacks.setBypass)
+      callbacks.setBypass(bypass);
+    if (sync != capture::SyncState::recording) {
+      if (ImGui::Button("Record") && callbacks.startSingleRecording)
+        callbacks.startSingleRecording();
+    } else if (ImGui::Button("Stop") && callbacks.stopRecording) {
+      callbacks.stopRecording();
+    }
   }
 
   if (!slave && ImGui::Button("Open Library") && callbacks.openLibrary)

@@ -36,13 +36,19 @@ juce::File materializeWorkerScript(std::string &error) {
     return {};
   }
 
-  const auto worker = workerDirectory.getChildFile("freeze_worker.py");
-  if (!worker.replaceWithData(BinaryData::freeze_worker_py,
-                              BinaryData::freeze_worker_pySize)) {
-    error = "Could not materialize the embedded freeze worker";
-    return {};
-  }
-  return worker;
+    const auto worker = workerDirectory.getChildFile("freeze_worker.py");
+    if (!worker.replaceWithData(BinaryData::freeze_worker_py,
+                                BinaryData::freeze_worker_pySize)) {
+      error = "Could not materialize the embedded freeze worker";
+      return {};
+    }
+    const auto trainWorker = workerDirectory.getChildFile("train_worker.py");
+    if (!trainWorker.replaceWithData(BinaryData::train_worker_py,
+                                     BinaryData::train_worker_pySize)) {
+      error = "Could not materialize the embedded train worker for freeze";
+      return {};
+    }
+    return worker;
 }
 
 /**
@@ -246,6 +252,16 @@ void FreezeCoordinator::run() {
   result.acceptsConditioning =
       static_cast<bool>(metadata.getProperty("conditioning", false));
   result.condDim = static_cast<int>(metadata.getProperty("cond_dim", 0));
+  result.hasEncodeDecode =
+      static_cast<bool>(metadata.getProperty("has_encode_decode", false));
+  const auto methods = metadata.getProperty("methods", {});
+  if (methods.isArray()) {
+    for (int index = 0; index < methods.size(); ++index) {
+      const auto name = methods[index].toString();
+      if (name == "encode" || name == "decode")
+        result.hasEncodeDecode = true;
+    }
+  }
 
   std::string preparationError;
   if (result.artifactPath.empty() || prepareArtifact == nullptr ||

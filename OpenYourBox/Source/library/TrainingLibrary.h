@@ -15,6 +15,14 @@ enum class PairSource {
   imported
 };
 
+/** @brief Library entry shape: aligned pair or unpaired clip. */
+enum class LibraryEntryKind {
+  /** @brief Clean/processed pair. */
+  pair,
+  /** @brief Single unpaired clip. */
+  clip
+};
+
 /**
  * @struct TrainingLibraryEntry
  * @brief One aligned clean/processed pair stored in the training library.
@@ -28,6 +36,8 @@ struct TrainingLibraryEntry {
   juce::String createdAt;
   /** @brief Capture or import origin. */
   PairSource source = PairSource::imported;
+  /** @brief Pair vs unpaired clip. */
+  LibraryEntryKind kind = LibraryEntryKind::pair;
   /** @brief Aligned duration in seconds. */
   double durationSeconds = 0.0;
   /** @brief Shared sample rate in Hz. */
@@ -148,6 +158,28 @@ public:
   addCapturedPair(const juce::String &displayName, const juce::File &xFile,
                   const juce::File &yFile, double sampleRate, int channels,
                   double durationSeconds, juce::String &error);
+
+  /**
+   * @brief Imports one unpaired clip as a `clip` library entry.
+   * @param audioFile Source audio.
+   * @param error Receives a user-facing failure.
+   * @return The new entry, or no value on failure.
+   */
+  std::optional<TrainingLibraryEntry> importClip(const juce::File &audioFile,
+                                                 juce::String &error);
+
+  /**
+   * @brief Appends a captured unpaired clip already written as a WAV file.
+   */
+  std::optional<TrainingLibraryEntry>
+  addCapturedClip(const juce::String &displayName, const juce::File &audioFile,
+                  double sampleRate, int channels, double durationSeconds,
+                  juce::String &error);
+
+  /**
+   * @brief Returns true when any selected entry is an unpaired clip.
+   */
+  [[nodiscard]] bool selectedContainsUnpaired() const noexcept;
 
   /**
    * @brief Returns true when selected entries share one sample rate.

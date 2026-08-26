@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <queue>
+#include <string>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -10,6 +11,8 @@ void migrateLegacyMixerNode(openyourbox::graph::GraphNode &node,
                             const juce::String &storedType);
 
 void normalizeMergeNodeProperties(openyourbox::graph::GraphNode &node);
+
+void refreshPropagatedPinShapes(openyourbox::graph::NodeGraph &graph);
 
 /**
  * @brief Ensures Activation and TCN nodes expose a validated Gain property.
@@ -50,7 +53,6 @@ void normalizePhase3Node(openyourbox::graph::GraphNode &node) {
   using openyourbox::graph::NodeProperty;
   using openyourbox::graph::NodeType;
   using openyourbox::graph::PropertyKind;
-  using openyourbox::graph::SignalKind;
   using openyourbox::graph::defaultDilationGrowth;
   using openyourbox::graph::isTrainableType;
   using openyourbox::graph::maximumDilationGrowth;
@@ -110,16 +112,15 @@ void normalizePhase3Node(openyourbox::graph::GraphNode &node) {
 }
 
 /**
- * @brief Restores conditioning pin metadata on Knob/XY source nodes.
+ * @brief Restores Knob/XY widths and TCN/BlackBox control pin roles.
  * @param node Loaded source node.
  */
 void normalizeConditioningPins(openyourbox::graph::GraphNode &node) {
-  using openyourbox::graph::SignalKind;
   using openyourbox::graph::controlPinLabel;
+  using openyourbox::graph::flexibleTensorShape;
   using openyourbox::graph::isControlInputPin;
   if (openyourbox::graph::isConditioningSourceType(node.type)) {
     for (auto &pin : node.outputs) {
-      pin.signalKind = SignalKind::conditioning;
       if (pin.shape.channels <= 0)
         pin.shape.channels = 1;
     }
@@ -132,8 +133,7 @@ void normalizeConditioningPins(openyourbox::graph::GraphNode &node) {
     if (!isControlInputPin(pin))
       continue;
     pin.label = controlPinLabel;
-    pin.signalKind = SignalKind::conditioning;
-    pin.shape.channels = 0;
+    pin.shape = flexibleTensorShape();
   }
 }
 
@@ -225,6 +225,10 @@ int resolvePinChannels(const openyourbox::graph::NodeGraph &graph,
                        std::unordered_set<std::int32_t> &visiting) {
   using openyourbox::graph::NodeType;
   using openyourbox::graph::PinKind;
+  using openyourbox::graph::defaultLatentSize;
+  using openyourbox::graph::defaultPqmfBands;
+  using openyourbox::graph::defaultLatentSize;
+  using openyourbox::graph::defaultPqmfBands;
   if (!visiting.insert(pinId).second)
     return 0;
 
@@ -252,7 +256,9 @@ int resolvePinChannels(const openyourbox::graph::NodeGraph &graph,
 
   switch (node->type) {
   case NodeType::audioInput:
-    return 2;
+    return openyourbox::graph::hostIoChannelsFromChoice(
+        readNodeProperty(*node, "channels",
+                         openyourbox::graph::hostIoChoiceFromChannels(2)));
   case NodeType::linear: {
     const auto features = readNodeProperty(*node, "features", 0);
     return features > 0 ? features : 0;
@@ -261,11 +267,16 @@ int resolvePinChannels(const openyourbox::graph::NodeGraph &graph,
     const auto channels = readNodeProperty(*node, "channels", 0);
     return channels > 0 ? channels : 0;
   }
+  case NodeType::convTranspose: {
+    const auto channels = readNodeProperty(*node, "channels", 0);
+    return channels > 0 ? channels : 0;
+  }
   case NodeType::merge:
     visiting.erase(pinId);
     return computeMergeOutputChannels(graph, *node, visiting);
   case NodeType::activation:
   case NodeType::tcn:
+  case NodeType::batchNorm:
   case NodeType::audioOutput:
     if (node->inputs.empty())
       return 0;
@@ -273,6 +284,32 @@ int resolvePinChannels(const openyourbox::graph::NodeGraph &graph,
   case NodeType::knobInput:
   case NodeType::xyTrackpad:
     return 1;
+  case NodeType::pqmfAnalysis: {
+    const auto nBand = readNodeProperty(*node, "n_band", defaultPqmfBands);
+    const auto audioChannels =
+        node->inputs.empty()
+            ? 0
+            : resolvePinChannels(graph, node->inputs.front().id, visiting);
+    return nBand * std::max(1, audioChannels);
+  }
+  case NodeType::pqmfSynthesis: {
+    const auto nBand = readNodeProperty(*node, "n_band", defaultPqmfBands);
+    const auto bands =
+        node->inputs.empty()
+            ? 0
+            : resolvePinChannels(graph, node->inputs.front().id, visiting);
+    return nBand > 0 ? std::max(1, bands / nBand) : bands;
+  }
+  case NodeType::rateConv: {
+    const auto channels = readNodeProperty(*node, "channels", 0);
+    return channels > 0 ? channels : 0;
+  }
+  case NodeType::variationalBottleneck:
+    return readNodeProperty(*node, "latent_size", defaultLatentSize);
+  case NodeType::noiseSynthesizer:
+    if (node->inputs.empty())
+      return 0;
+    return resolvePinChannels(graph, node->inputs.front().id, visiting);
   default:
     return 0;
   }
@@ -297,10 +334,7 @@ void updateMergeOutputShape(openyourbox::graph::NodeGraph &graph,
  * @param graph Graph document to mutate.
  */
 void refreshAllMergeOutputShapes(openyourbox::graph::NodeGraph &graph) {
-  for (auto &node : graph.getNodes()) {
-    if (node.type == openyourbox::graph::NodeType::merge)
-      updateMergeOutputShape(graph, node);
-  }
+  refreshPropagatedPinShapes(graph);
 }
 
 /**
@@ -345,14 +379,11 @@ bool mergeInputConnectionIsValid(const openyourbox::graph::NodeGraph &graph,
                                  const openyourbox::graph::GraphNode &merge,
                                  std::int32_t newSourcePinId) {
   using openyourbox::graph::MergeMode;
-  if (mergeModeFor(merge) == static_cast<int>(MergeMode::concatenate))
-    return true;
-
+  const auto concatenate =
+      mergeModeFor(merge) == static_cast<int>(MergeMode::concatenate);
   std::unordered_set<std::int32_t> visiting;
   const auto newChannels = resolvePinChannels(graph, newSourcePinId, visiting);
-  if (newChannels == 0)
-    return true;
-
+  const auto *newSourcePin = graph.findPin(newSourcePinId);
   for (const auto &inputPin : merge.inputs) {
     for (const auto &link : graph.getLinks()) {
       if (link.destinationPinId != inputPin.id)
@@ -360,13 +391,535 @@ bool mergeInputConnectionIsValid(const openyourbox::graph::NodeGraph &graph,
       visiting.clear();
       const auto existingChannels =
           resolvePinChannels(graph, link.sourcePinId, visiting);
-      if (existingChannels > 0 &&
+      if (!concatenate && newChannels > 0 && existingChannels > 0 &&
           !channelsAreBroadcastCompatible(existingChannels, newChannels))
         return false;
+      const auto *existingSource = graph.findPin(link.sourcePinId);
+      if (newSourcePin != nullptr && existingSource != nullptr) {
+        auto left = existingSource->shape;
+        auto right = newSourcePin->shape;
+        left.channels = 0;
+        right.channels = 0;
+        if (!left.isCompatibleWith(right))
+          return false;
+      }
       break;
     }
   }
   return true;
+}
+
+const openyourbox::graph::Pin *
+findConnectedSourcePin(const openyourbox::graph::NodeGraph &graph,
+                       std::int32_t destinationPinId) {
+  for (const auto &link : graph.getLinks()) {
+    if (link.destinationPinId == destinationPinId)
+      return graph.findPin(link.sourcePinId);
+  }
+  return nullptr;
+}
+
+/**
+ * @brief Returns the first connected tensor source shape, or a wildcard.
+ * @param graph Graph document to inspect.
+ * @param node Node whose non-control inputs are scanned.
+ */
+openyourbox::graph::ShapeSignature
+firstConnectedTensorSource(const openyourbox::graph::NodeGraph &graph,
+                           const openyourbox::graph::GraphNode &node) {
+  using openyourbox::graph::flexibleTensorShape;
+  using openyourbox::graph::isControlInputPin;
+  for (const auto &pin : node.inputs) {
+    if (isControlInputPin(pin))
+      continue;
+    if (const auto *source = findConnectedSourcePin(graph, pin.id))
+      return source->shape;
+  }
+  return flexibleTensorShape();
+}
+
+/**
+ * @brief Copies inherited hop rate and nBand onto one tensor pin.
+ * @param pin Pin to update.
+ * @param incoming Upstream shape.
+ * @param copyChannels When true, also rewrite @c pin.shape.channels.
+ */
+void inheritTensorFields(openyourbox::graph::Pin &pin,
+                         const openyourbox::graph::ShapeSignature &incoming,
+                         bool copyChannels = false) {
+  pin.shape.temporalRate = incoming.temporalRate;
+  pin.shape.nBand = incoming.nBand;
+  if (copyChannels)
+    pin.shape.channels = incoming.channels;
+}
+
+/**
+ * @brief Writes Conv1D detail text from stride.
+ * @param node Convolution node to update.
+ */
+void updateConv1dDetail(openyourbox::graph::GraphNode &node) {
+  using openyourbox::graph::isConvolutionType;
+  if (!isConvolutionType(node.type))
+    return;
+  const auto stride = std::max(1, readNodeProperty(node, "stride", 1));
+  if (stride <= 1)
+    node.detail = "Temporal convolution";
+  else
+    node.detail = "Downsample x" + std::to_string(stride);
+}
+
+/**
+ * @brief Writes ConvTranspose1d detail text from stride.
+ * @param node Transposed convolution node to update.
+ */
+void updateConvTransposeDetail(openyourbox::graph::GraphNode &node) {
+  using openyourbox::graph::NodeType;
+  if (node.type != NodeType::convTranspose)
+    return;
+  const auto stride = std::max(1, readNodeProperty(node, "stride", 1));
+  if (stride <= 1)
+    node.detail = "Temporal upsampling";
+  else
+    node.detail = "Upsample x" + std::to_string(stride);
+}
+
+/**
+ * @brief Returns the declared host I/O mode on an Audio Input/Output node.
+ * @param node Host boundary node.
+ */
+openyourbox::graph::HostIoMode
+readHostIoMode(const openyourbox::graph::GraphNode &node) {
+  using openyourbox::graph::HostIoMode;
+  using openyourbox::graph::hostIoModeFromChannels;
+  using openyourbox::graph::hostIoModeFromChoice;
+  using openyourbox::graph::isFixedIoType;
+  if (!isFixedIoType(node.type))
+    return HostIoMode::stereo;
+  for (const auto &property : node.properties) {
+    if (property.key != "channels")
+      continue;
+    if (property.kind == openyourbox::graph::PropertyKind::choice) {
+      const auto legacyPair =
+          property.maximum <= 1 || property.choices.size() == 2;
+      return hostIoModeFromChoice(property.value, legacyPair);
+    }
+    return hostIoModeFromChannels(std::clamp(property.value, 1, 2));
+  }
+  for (const auto &pin : node.outputs) {
+    if (pin.shape.channels == 1 || pin.shape.channels == 2)
+      return hostIoModeFromChannels(pin.shape.channels);
+  }
+  for (const auto &pin : node.inputs) {
+    if (pin.shape.channels == 1 || pin.shape.channels == 2)
+      return hostIoModeFromChannels(pin.shape.channels);
+  }
+  return HostIoMode::stereo;
+}
+
+/**
+ * @brief Returns the mono/stereo width declared on a host I/O node.
+ * @param node Audio Input or Audio Output node.
+ */
+int readHostIoChannels(const openyourbox::graph::GraphNode &node) {
+  return openyourbox::graph::hostIoChannelsFromMode(readHostIoMode(node));
+}
+
+/**
+ * @brief Writes host I/O detail text from the Channels choice.
+ * @param node Audio Input or Audio Output node.
+ */
+void updateHostIoDetail(openyourbox::graph::GraphNode &node) {
+  using openyourbox::graph::NodeType;
+  using openyourbox::graph::hostIoModeDetail;
+  using openyourbox::graph::isFixedIoType;
+  if (!isFixedIoType(node.type))
+    return;
+  node.detail =
+      hostIoModeDetail(readHostIoMode(node), node.type == NodeType::audioInput);
+}
+
+/**
+ * @brief Applies the Channels property to host I/O pin shapes and detail.
+ * @param node Audio Input or Audio Output node.
+ */
+void applyHostIoChannels(openyourbox::graph::GraphNode &node) {
+  using openyourbox::graph::isFixedIoType;
+  if (!isFixedIoType(node.type))
+    return;
+  const auto channels = readHostIoChannels(node);
+  for (auto &pin : node.inputs) {
+    pin.shape.channels = channels;
+    pin.shape.temporalRate = 1;
+    pin.shape.nBand = 0;
+  }
+  for (auto &pin : node.outputs) {
+    pin.shape.channels = channels;
+    pin.shape.temporalRate = 1;
+    pin.shape.nBand = 0;
+  }
+  updateHostIoDetail(node);
+}
+
+/**
+ * @brief Ensures Audio Input/Output expose Mono|Mirrored|Stereo Channels.
+ * @param node Host boundary node to normalize.
+ */
+void normalizeHostIoProperties(openyourbox::graph::GraphNode &node) {
+  using openyourbox::graph::HostIoMode;
+  using openyourbox::graph::NodeProperty;
+  using openyourbox::graph::PropertyKind;
+  using openyourbox::graph::hostIoChoiceFromMode;
+  using openyourbox::graph::hostIoModeFromChannels;
+  using openyourbox::graph::hostIoModeFromChoice;
+  using openyourbox::graph::isFixedIoType;
+  if (!isFixedIoType(node.type))
+    return;
+  const auto inferred = readHostIoMode(node);
+  for (auto &property : node.properties) {
+    if (property.key != "channels")
+      continue;
+    const auto wasChoice = property.kind == PropertyKind::choice;
+    const auto legacyPair =
+        wasChoice && (property.maximum <= 1 || property.choices.size() == 2);
+    HostIoMode mode = inferred;
+    if (wasChoice)
+      mode = hostIoModeFromChoice(property.value, legacyPair);
+    else if (property.value == 1 || property.value == 2)
+      mode = hostIoModeFromChannels(property.value);
+    property.label = "Mode";
+    property.kind = PropertyKind::choice;
+    property.choices = {"Mono", "Mirrored", "Stereo"};
+    property.minimum = 0;
+    property.maximum = 2;
+    property.setValue(hostIoChoiceFromMode(mode));
+    applyHostIoChannels(node);
+    return;
+  }
+  NodeProperty channels;
+  channels.key = "channels";
+  channels.label = "Mode";
+  channels.kind = PropertyKind::choice;
+  channels.choices = {"Mono", "Mirrored", "Stereo"};
+  channels.minimum = 0;
+  channels.maximum = 2;
+  channels.setValue(hostIoChoiceFromMode(inferred));
+  node.properties.push_back(std::move(channels));
+  applyHostIoChannels(node);
+}
+
+/**
+ * @brief Migrates legacy Rate Conv / Direction upsample nodes and ensures
+ *        Conv1D stride properties exist.
+ * @param node Loaded or newly created convolution node.
+ */
+void normalizeConvolutionProperties(openyourbox::graph::GraphNode &node) {
+  using openyourbox::graph::NodeProperty;
+  using openyourbox::graph::NodeType;
+  using openyourbox::graph::PropertyKind;
+  using openyourbox::graph::isControlInputPin;
+  using openyourbox::graph::isShapePassthroughType;
+  using openyourbox::graph::flexibleTensorShape;
+  if (node.type == NodeType::rateConv) {
+    node.type = NodeType::convolution;
+    if (node.label == "Rate Conv")
+      node.label = "Conv1D";
+  }
+  if (node.type == NodeType::convolution) {
+    int direction = 0;
+    for (const auto &property : node.properties) {
+      if (property.key == "direction")
+        direction = property.value;
+    }
+    if (direction != 0) {
+      node.type = NodeType::convTranspose;
+      node.label = "ConvTranspose1d";
+    }
+    node.properties.erase(
+        std::remove_if(node.properties.begin(), node.properties.end(),
+                       [](const NodeProperty &property) {
+                         return property.key == "direction";
+                       }),
+        node.properties.end());
+  }
+  auto resetFlexiblePin = [&](openyourbox::graph::Pin &pin) {
+    if (isControlInputPin(pin))
+      return;
+    if (pin.shape.temporalRate == 1 && pin.shape.nBand == 0) {
+      const auto channels = pin.shape.channels;
+      pin.shape = flexibleTensorShape(channels);
+    }
+  };
+  if (isShapePassthroughType(node.type) ||
+      node.type == NodeType::variationalBottleneck ||
+      node.type == NodeType::batchNorm) {
+    for (auto &pin : node.inputs)
+      resetFlexiblePin(pin);
+    for (auto &pin : node.outputs)
+      resetFlexiblePin(pin);
+  }
+  if (node.type == NodeType::convTranspose) {
+    for (auto &pin : node.inputs)
+      resetFlexiblePin(pin);
+    for (auto &pin : node.outputs)
+      resetFlexiblePin(pin);
+    auto ensureInt = [&node](const char *key, const char *label, int value,
+                             int minimum, int maximum) {
+      for (const auto &property : node.properties) {
+        if (property.key == key)
+          return;
+      }
+      node.properties.push_back(
+          NodeProperty{key, label, value, minimum, maximum});
+    };
+    ensureInt("channels", "Channels", 2, 1, 512);
+    ensureInt("kernel_size", "Kernel Size", 3, 2, 65);
+    ensureInt("dilation", "Dilation", 1, 1, 64);
+    ensureInt("stride", "Stride", 1, 1, 16);
+    updateConvTransposeDetail(node);
+    return;
+  }
+  if (node.type != NodeType::convolution)
+    return;
+
+  auto ensureInt = [&node](const char *key, const char *label, int value,
+                           int minimum, int maximum,
+                           PropertyKind kind = PropertyKind::integer,
+                           std::vector<std::string> choices = {}) {
+    for (auto &property : node.properties) {
+      if (property.key != key)
+        continue;
+      return;
+    }
+    node.properties.push_back(NodeProperty{key, label, value, minimum, maximum,
+                                           kind, std::move(choices)});
+  };
+  ensureInt("channels", "Channels", 2, 1, 512);
+  ensureInt("kernel_size", "Kernel Size", 3, 2, 65);
+  ensureInt("dilation", "Dilation", 1, 1, 64);
+  ensureInt("stride", "Stride", 1, 1, 16);
+  updateConv1dDetail(node);
+}
+
+void applyNodePinShapes(openyourbox::graph::NodeGraph &graph,
+                        openyourbox::graph::GraphNode &node);
+
+/**
+ * @brief Refreshes inherited hop rate and nBand on every node.
+ * @param graph Graph document to mutate.
+ */
+void refreshPropagatedPinShapes(openyourbox::graph::NodeGraph &graph) {
+  std::unordered_map<std::int32_t, int> indegree;
+  std::unordered_map<std::int32_t, std::vector<std::int32_t>> outgoing;
+  for (const auto &node : graph.getNodes())
+    indegree[node.id] = 0;
+  for (const auto &link : graph.getLinks()) {
+    const auto source = graph.findNodeForPin(link.sourcePinId);
+    const auto destination = graph.findNodeForPin(link.destinationPinId);
+    if (!source.has_value() || !destination.has_value() ||
+        *source == *destination)
+      continue;
+    outgoing[*source].push_back(*destination);
+    ++indegree[*destination];
+  }
+  std::queue<std::int32_t> ready;
+  std::unordered_set<std::int32_t> visited;
+  for (const auto &entry : indegree) {
+    if (entry.second == 0)
+      ready.push(entry.first);
+  }
+  auto apply = [&graph](std::int32_t nodeId) {
+    if (auto *node = graph.findNode(nodeId))
+      applyNodePinShapes(graph, *node);
+  };
+  while (!ready.empty()) {
+    const auto nodeId = ready.front();
+    ready.pop();
+    if (!visited.insert(nodeId).second)
+      continue;
+    apply(nodeId);
+    for (const auto next : outgoing[nodeId]) {
+      if (--indegree[next] == 0)
+        ready.push(next);
+    }
+  }
+  for (auto &node : graph.getNodes()) {
+    if (visited.count(node.id) == 0)
+      applyNodePinShapes(graph, node);
+  }
+}
+
+/**
+ * @brief Applies hop-rate and nBand rules for one node after its producers.
+ * @param graph Graph document used to resolve upstream cables.
+ * @param node Node whose pins are rewritten.
+ */
+void applyNodePinShapes(openyourbox::graph::NodeGraph &graph,
+                        openyourbox::graph::GraphNode &node) {
+  using openyourbox::graph::NodeType;
+  using openyourbox::graph::convolutionOutputTemporalRate;
+  using openyourbox::graph::defaultLatentSize;
+  using openyourbox::graph::defaultPqmfBands;
+  using openyourbox::graph::flexibleTensorShape;
+  using openyourbox::graph::isControlInputPin;
+  using openyourbox::graph::isConvolutionType;
+  using openyourbox::graph::isConvTransposeType;
+  using openyourbox::graph::isShapePassthroughType;
+  const auto incoming = firstConnectedTensorSource(graph, node);
+  auto inheritInputs = [&]() {
+    for (auto &pin : node.inputs) {
+      if (isControlInputPin(pin))
+        continue;
+      if (const auto *connected = findConnectedSourcePin(graph, pin.id))
+        inheritTensorFields(pin, connected->shape, true);
+      else
+        pin.shape = flexibleTensorShape();
+    }
+  };
+
+  switch (node.type) {
+  case NodeType::pqmfAnalysis: {
+    const auto nBand =
+        std::max(2, readNodeProperty(node, "n_band", defaultPqmfBands));
+    int audioChannels = 0;
+    for (auto &pin : node.inputs) {
+      pin.shape.temporalRate = 1;
+      pin.shape.nBand = 0;
+      if (const auto *connected = findConnectedSourcePin(graph, pin.id)) {
+        pin.shape.channels = connected->shape.channels;
+        if (connected->shape.channels > 0)
+          audioChannels = connected->shape.channels;
+      } else {
+        pin.shape.channels = 0;
+      }
+    }
+    for (auto &pin : node.outputs) {
+      pin.shape.temporalRate = nBand;
+      pin.shape.nBand = nBand;
+      pin.shape.channels =
+          audioChannels > 0 ? audioChannels * nBand : 0;
+    }
+    break;
+  }
+  case NodeType::pqmfSynthesis: {
+    const auto nBand =
+        std::max(2, readNodeProperty(node, "n_band", defaultPqmfBands));
+    int bandChannels = 0;
+    for (auto &pin : node.inputs) {
+      pin.shape.temporalRate = nBand;
+      pin.shape.nBand = nBand;
+      if (const auto *connected = findConnectedSourcePin(graph, pin.id)) {
+        pin.shape.channels = connected->shape.channels;
+        if (connected->shape.channels > 0)
+          bandChannels = connected->shape.channels;
+      } else {
+        pin.shape.channels = 0;
+      }
+    }
+    for (auto &pin : node.outputs) {
+      pin.shape.temporalRate = 1;
+      pin.shape.nBand = 0;
+      pin.shape.channels =
+          bandChannels > 0 ? std::max(1, bandChannels / nBand) : 0;
+    }
+    break;
+  }
+  case NodeType::variationalBottleneck:
+    inheritInputs();
+    for (auto &pin : node.outputs) {
+      pin.shape.temporalRate = incoming.temporalRate;
+      pin.shape.nBand = incoming.nBand;
+      const auto latent = readNodeProperty(node, "latent_size", defaultLatentSize);
+      if (latent > 0)
+        pin.shape.channels = latent;
+    }
+    break;
+  default: {
+    if (!isShapePassthroughType(node.type) && !isConvolutionType(node.type) &&
+        !isConvTransposeType(node.type))
+      break;
+    inheritInputs();
+    auto outgoing = incoming;
+    if (isConvolutionType(node.type)) {
+      const auto stride = std::max(1, readNodeProperty(node, "stride", 1));
+      const auto rate =
+          convolutionOutputTemporalRate(incoming.temporalRate, stride, false);
+      outgoing.temporalRate = rate < 0 ? 0 : rate;
+      const auto channels = readNodeProperty(node, "channels", 0);
+      if (channels > 0)
+        outgoing.channels = channels;
+      updateConv1dDetail(node);
+    } else if (isConvTransposeType(node.type)) {
+      const auto stride = std::max(1, readNodeProperty(node, "stride", 1));
+      const auto rate =
+          convolutionOutputTemporalRate(incoming.temporalRate, stride, true);
+      outgoing.temporalRate = rate < 0 ? 0 : rate;
+      const auto channels = readNodeProperty(node, "channels", 0);
+      if (channels > 0)
+        outgoing.channels = channels;
+      updateConvTransposeDetail(node);
+    } else if (node.type == NodeType::linear) {
+      const auto features = readNodeProperty(node, "features", 0);
+      if (features > 0)
+        outgoing.channels = features;
+    } else if (node.type == NodeType::merge) {
+      updateMergeOutputShape(graph, node);
+      outgoing.channels =
+          node.outputs.empty() ? 0 : node.outputs.front().shape.channels;
+    }
+    for (auto &pin : node.outputs)
+      inheritTensorFields(pin, outgoing, true);
+    break;
+  }
+  }
+}
+
+/**
+ * @brief Returns a tooltip when any committed cable is now illegal.
+ * @param graph Graph document to inspect.
+ */
+std::string firstIncompatibleLinkMessage(const openyourbox::graph::NodeGraph &graph) {
+  using openyourbox::graph::convolutionRateIsError;
+  using openyourbox::graph::convolutionRateMessage;
+  using openyourbox::graph::defaultPqmfBands;
+  using openyourbox::graph::isConvolutionType;
+  using openyourbox::graph::isConvTransposeType;
+  using openyourbox::graph::NodeType;
+  using openyourbox::graph::pqmfSynthesisChannelIsError;
+  using openyourbox::graph::pqmfSynthesisChannelMessage;
+  for (const auto &link : graph.getLinks()) {
+    const auto *source = graph.findPin(link.sourcePinId);
+    const auto *destination = graph.findPin(link.destinationPinId);
+    if (source == nullptr || destination == nullptr)
+      continue;
+    if (!source->shape.isCompatibleWith(destination->shape)) {
+      auto message = source->shape.incompatibilityMessage(destination->shape);
+      if (message.empty())
+        message = "Shape mismatch: channel counts are incompatible";
+      return message;
+    }
+    const auto destNode = graph.findNodeForPin(destination->id);
+    if (!destNode.has_value())
+      continue;
+    const auto *node = graph.findNode(*destNode);
+    if (node == nullptr)
+      continue;
+    if (node->type == NodeType::pqmfSynthesis &&
+        pqmfSynthesisChannelIsError(source->shape.channels,
+                                    std::max(2, readNodeProperty(
+                                                    *node, "n_band",
+                                                    defaultPqmfBands))))
+      return pqmfSynthesisChannelMessage(
+          source->shape.channels,
+          std::max(2, readNodeProperty(*node, "n_band", defaultPqmfBands)));
+    if (!isConvolutionType(node->type) && !isConvTransposeType(node->type))
+      continue;
+    const auto stride = std::max(1, readNodeProperty(*node, "stride", 1));
+    const auto upsample = isConvTransposeType(node->type);
+    if (convolutionRateIsError(stride, upsample, source->shape.temporalRate))
+      return convolutionRateMessage(stride, upsample,
+                                    source->shape.temporalRate);
+  }
+  return {};
 }
 
 juce::Colour colourForType(openyourbox::graph::NodeType type,
@@ -411,6 +964,20 @@ const char *nodeTypeName(openyourbox::graph::NodeType type) noexcept {
     return "knob_input";
   case NodeType::xyTrackpad:
     return "xy_trackpad";
+  case NodeType::pqmfAnalysis:
+    return "pqmf_analysis";
+  case NodeType::pqmfSynthesis:
+    return "pqmf_synthesis";
+  case NodeType::rateConv:
+    return "rate_conv";
+  case NodeType::variationalBottleneck:
+    return "variational_bottleneck";
+  case NodeType::noiseSynthesizer:
+    return "noise_synthesizer";
+  case NodeType::convTranspose:
+    return "conv_transpose1d";
+  case NodeType::batchNorm:
+    return "batch_norm";
   }
   return "tcn";
 }
@@ -423,8 +990,6 @@ openyourbox::graph::NodeType nodeTypeFromName(const juce::String &name) {
     return NodeType::audioOutput;
   if (name == "linear")
     return NodeType::linear;
-  if (name == "conv1d")
-    return NodeType::convolution;
   if (name == "activation")
     return NodeType::activation;
   if (name == "sum" || name == "multiply" || name == "concatenate" ||
@@ -436,6 +1001,20 @@ openyourbox::graph::NodeType nodeTypeFromName(const juce::String &name) {
     return NodeType::knobInput;
   if (name == "xy_trackpad")
     return NodeType::xyTrackpad;
+  if (name == "pqmf_analysis")
+    return NodeType::pqmfAnalysis;
+  if (name == "pqmf_synthesis")
+    return NodeType::pqmfSynthesis;
+  if (name == "rate_conv" || name == "conv1d")
+    return NodeType::convolution;
+  if (name == "conv_transpose1d")
+    return NodeType::convTranspose;
+  if (name == "batch_norm")
+    return NodeType::batchNorm;
+  if (name == "variational_bottleneck")
+    return NodeType::variationalBottleneck;
+  if (name == "noise_synthesizer")
+    return NodeType::noiseSynthesizer;
   return NodeType::tcn;
 }
 
@@ -482,6 +1061,8 @@ juce::ValueTree nodeToTree(const openyourbox::graph::GraphNode &node) {
                        ? "train_autoload"
                        : "manual_freeze",
                    nullptr);
+  tree.setProperty("fidelityPercent", node.fidelityPercent, nullptr);
+  tree.setProperty("compactnessReady", node.compactnessReady, nullptr);
 
   if (node.metrics.has_value()) {
     tree.setProperty("compileMs", node.metrics->compileTimeMilliseconds,
@@ -499,13 +1080,8 @@ juce::ValueTree nodeToTree(const openyourbox::graph::GraphNode &node) {
           child.setProperty("label", juce::String(pin.label), nullptr);
           child.setProperty("kind", kind, nullptr);
           child.setProperty("channels", pin.shape.channels, nullptr);
-          child.setProperty("domain", juce::String(pin.shape.domain), nullptr);
-          child.setProperty("signalKind",
-                            pin.signalKind == openyourbox::graph::SignalKind::
-                                                  conditioning
-                                ? "conditioning"
-                                : "audio",
-                            nullptr);
+          child.setProperty("temporalRate", pin.shape.temporalRate, nullptr);
+          child.setProperty("nBand", pin.shape.nBand, nullptr);
           tree.appendChild(child, nullptr);
         }
       };
@@ -579,6 +1155,10 @@ openyourbox::graph::GraphNode nodeFromTree(const juce::ValueTree &tree) {
               "train_autoload"
           ? BlackBoxOrigin::trainAutoload
           : BlackBoxOrigin::manualFreeze;
+  node.fidelityPercent = openyourbox::graph::clampFidelity(static_cast<float>(
+      tree.getProperty("fidelityPercent", defaultFidelityPercent)));
+  node.compactnessReady =
+      static_cast<bool>(tree.getProperty("compactnessReady", false));
 
   if (tree.hasProperty("inferenceMs")) {
     node.metrics =
@@ -594,12 +1174,9 @@ openyourbox::graph::GraphNode nodeFromTree(const juce::ValueTree &tree) {
       pin.kind = child["kind"].toString() == "output" ? PinKind::output
                                                       : PinKind::input;
       pin.shape.channels = static_cast<int>(child["channels"]);
-      pin.shape.domain =
-          child.getProperty("domain", "audio").toString().toStdString();
-      pin.signalKind =
-          child.getProperty("signalKind", "audio").toString() == "conditioning"
-              ? SignalKind::conditioning
-              : SignalKind::audio;
+      pin.shape.temporalRate =
+          static_cast<int>(child.getProperty("temporalRate", 1));
+      pin.shape.nBand = static_cast<int>(child.getProperty("nBand", 0));
       (pin.kind == PinKind::input ? node.inputs : node.outputs)
           .push_back(std::move(pin));
     } else if (child.hasType("Property")) {
@@ -629,6 +1206,8 @@ openyourbox::graph::GraphNode nodeFromTree(const juce::ValueTree &tree) {
   normalizeGainProperty(node);
   normalizeConditioningPins(node);
   normalizePhase3Node(node);
+  normalizeConvolutionProperties(node);
+  normalizeHostIoProperties(node);
   return node;
 }
 
@@ -731,14 +1310,16 @@ void NodeGraph::rebuildFromModel(const dsp::TCNConfiguration &configuration) {
   auto *output = findNode(outputId);
   tcn = findNode(tcnId);
   if (input != nullptr && tcn != nullptr && output != nullptr) {
-    input->outputs.front().shape.channels = configuration.inputChannels;
+    setProperty(inputId, "channels",
+                hostIoChoiceFromChannels(configuration.inputChannels));
+    setProperty(outputId, "channels",
+                hostIoChoiceFromChannels(configuration.outputChannels));
     tcn->inputs.front().shape.channels = configuration.inputChannels;
     tcn->outputs.front().shape.channels = configuration.outputChannels;
-    output->inputs.front().shape.channels = configuration.outputChannels;
     connect(input->outputs.front().id, tcn->inputs.front().id);
     connect(tcn->outputs.front().id, output->inputs.front().id);
   }
-  ensureFixedStereoIo();
+  ensureFixedHostIo();
 }
 
 std::int32_t NodeGraph::addNode(NodeType type, juce::Point<float> position) {
@@ -748,7 +1329,7 @@ std::int32_t NodeGraph::addNode(NodeType type, juce::Point<float> position) {
   return id;
 }
 
-void NodeGraph::ensureFixedStereoIo() {
+void NodeGraph::ensureFixedHostIo() {
   GraphNode *input = nullptr;
   GraphNode *output = nullptr;
   for (auto &node : nodes) {
@@ -764,11 +1345,8 @@ void NodeGraph::ensureFixedStereoIo() {
   for (auto &node : nodes) {
     if (!isFixedIoType(node.type))
       continue;
+    normalizeHostIoProperties(node);
     node.colour = colourForType(node.type, node.state);
-    for (auto &pin : node.inputs)
-      pin.shape.channels = 2;
-    for (auto &pin : node.outputs)
-      pin.shape.channels = 2;
   }
 }
 
@@ -891,51 +1469,61 @@ ConnectionResult NodeGraph::connect(std::int32_t firstPinId,
 
   const auto *destinationNodePtr = findNode(*destinationNode);
   const auto *sourceNodePtr = findNode(*sourceNode);
-  const bool sourceIsConditioning =
-      (source != nullptr &&
-       source->signalKind == SignalKind::conditioning) ||
-      (sourceNodePtr != nullptr &&
-       isConditioningSourceType(sourceNodePtr->type));
-  const bool destinationIsControl =
-      destination != nullptr && isControlInputPin(*destination);
-
-  if (sourceIsConditioning && !destinationIsControl &&
-      destination->signalKind != SignalKind::conditioning &&
-      !(destinationNodePtr != nullptr &&
-        destinationNodePtr->type == NodeType::merge))
-    return {false, "Audio inputs cannot accept a conditioning cable"};
-
-  if (!destinationIsControl &&
-      destination->signalKind == SignalKind::conditioning &&
-      !sourceIsConditioning)
-    return {false,
-            "Control input requires a Knob, XY, Merge, or audio signal"};
 
   if (destinationNodePtr != nullptr &&
       destinationNodePtr->type == NodeType::merge &&
-      destination->kind == PinKind::input && !sourceIsConditioning &&
-      !destinationIsControl &&
+      destination->kind == PinKind::input &&
       !mergeInputConnectionIsValid(*this, *destinationNodePtr, source->id))
     return {false,
-            "Merge add/multiply inputs must share the same channel count"};
+            "Merge inputs must share temporal rate, band count, and channel count"};
 
   if (sourceNodePtr != nullptr && sourceNodePtr->type == NodeType::merge)
     updateMergeOutputShape(*this, *const_cast<GraphNode *>(sourceNodePtr));
 
-  if (!destinationIsControl && !sourceIsConditioning &&
-      !source->shape.isCompatibleWith(destination->shape)) {
+  if (!source->shape.isCompatibleWith(destination->shape)) {
     if (sourceNodePtr != nullptr && sourceNodePtr->type == NodeType::merge) {
       std::unordered_set<std::int32_t> visiting;
       const auto outputChannels =
           computeMergeOutputChannels(*this, *sourceNodePtr, visiting);
-      if (outputChannels > 0 &&
-          !ShapeSignature{outputChannels, source->shape.domain}
-               .isCompatibleWith(destination->shape))
-        return {false, "Shape mismatch: channel counts are incompatible"};
+      ShapeSignature mergeShape = source->shape;
+      if (outputChannels > 0)
+        mergeShape.channels = outputChannels;
+      if (!mergeShape.isCompatibleWith(destination->shape)) {
+        auto message = mergeShape.incompatibilityMessage(destination->shape);
+        if (message.empty())
+          message = "Shape mismatch: channel counts are incompatible";
+        return {false, message};
+      }
     } else {
-      return {false, "Shape mismatch: channel counts are incompatible"};
+      auto message = source->shape.incompatibilityMessage(destination->shape);
+      if (message.empty())
+        message = "Shape mismatch: channel counts are incompatible";
+      return {false, message};
     }
   }
+
+  if (destinationNodePtr != nullptr &&
+      (isConvolutionType(destinationNodePtr->type) ||
+       isConvTransposeType(destinationNodePtr->type))) {
+    const auto stride =
+        std::max(1, readNodeProperty(*destinationNodePtr, "stride", 1));
+    const auto upsample = isConvTransposeType(destinationNodePtr->type);
+    if (convolutionRateIsError(stride, upsample, source->shape.temporalRate))
+      return {false, convolutionRateMessage(stride, upsample,
+                                            source->shape.temporalRate)};
+  }
+
+  if (destinationNodePtr != nullptr &&
+      destinationNodePtr->type == NodeType::pqmfSynthesis &&
+      pqmfSynthesisChannelIsError(
+          source->shape.channels,
+          std::max(2, readNodeProperty(*destinationNodePtr, "n_band",
+                                       defaultPqmfBands))))
+    return {false, pqmfSynthesisChannelMessage(
+                       source->shape.channels,
+                       std::max(2, readNodeProperty(*destinationNodePtr,
+                                                      "n_band",
+                                                      defaultPqmfBands)))};
 
   const auto duplicate = std::any_of(
       links.begin(), links.end(), [source, destination](const GraphLink &link) {
@@ -953,14 +1541,12 @@ ConnectionResult NodeGraph::connect(std::int32_t firstPinId,
     return {false, "This input already has a connection"};
 
   links.push_back({nextLinkId++, source->id, destination->id});
-  if (destinationNodePtr != nullptr &&
-      destinationNodePtr->type == NodeType::merge) {
-    updateMergeOutputShape(*this, *const_cast<GraphNode *>(destinationNodePtr));
-    if (!mergeDownstreamIsCompatible(*this, *destinationNodePtr)) {
-      links.pop_back();
-      return {false,
-              "Merge output channels would be incompatible with downstream"};
-    }
+  refreshPropagatedPinShapes(*this);
+  const auto incompatible = firstIncompatibleLinkMessage(*this);
+  if (!incompatible.empty()) {
+    links.pop_back();
+    refreshPropagatedPinShapes(*this);
+    return {false, incompatible};
   }
   return {true, {}};
 }
@@ -990,7 +1576,44 @@ bool NodeGraph::setProperty(std::int32_t nodeId, const std::string &key,
   const auto previousValue = property->value;
   property->setValue(value);
 
-  if (key == "channels" && node->type == NodeType::convolution) {
+  if (key == "channels" && isFixedIoType(node->type)) {
+    property->setValue(std::clamp(property->value, 0, 2));
+    const auto choice = property->value;
+    int pairedPrevious = choice;
+    GraphNode *paired = nullptr;
+    for (auto &candidate : nodes) {
+      if (!isFixedIoType(candidate.type) || candidate.id == node->id)
+        continue;
+      paired = &candidate;
+      for (auto &pairedProperty : candidate.properties) {
+        if (pairedProperty.key != "channels")
+          continue;
+        pairedPrevious = pairedProperty.value;
+        pairedProperty.setValue(choice);
+        break;
+      }
+      applyHostIoChannels(candidate);
+    }
+    applyHostIoChannels(*node);
+    refreshPropagatedPinShapes(*this);
+    const auto incompatible = firstIncompatibleLinkMessage(*this);
+    if (!incompatible.empty()) {
+      property->setValue(previousValue);
+      applyHostIoChannels(*node);
+      if (paired != nullptr) {
+        for (auto &pairedProperty : paired->properties) {
+          if (pairedProperty.key != "channels")
+            continue;
+          pairedProperty.setValue(pairedPrevious);
+          break;
+        }
+        applyHostIoChannels(*paired);
+      }
+      refreshPropagatedPinShapes(*this);
+      return false;
+    }
+    return true;
+  } else if (key == "channels" && isConvolutionType(node->type)) {
     for (auto &pin : node->outputs)
       pin.shape.channels = property->value;
   } else if (key == "features" && node->type == NodeType::linear) {
@@ -1018,6 +1641,35 @@ bool NodeGraph::setProperty(std::int32_t nodeId, const std::string &key,
     node->dilationGrowth =
         std::clamp(property->value, minimumDilationGrowth, maximumDilationGrowth);
     property->value = node->dilationGrowth;
+  } else if (key == "n_band" &&
+             (node->type == NodeType::pqmfAnalysis ||
+              node->type == NodeType::pqmfSynthesis)) {
+    const auto nBand = std::clamp(property->value, minimumPqmfBands, maximumPqmfBands);
+    property->value = nBand;
+  } else if (key == "latent_size" &&
+             node->type == NodeType::variationalBottleneck) {
+    for (auto &pin : node->outputs) {
+      pin.shape.channels = property->value;
+    }
+  } else if (key == "stride" &&
+             (isConvolutionType(node->type) ||
+              isConvTransposeType(node->type))) {
+    property->value = std::max(1, property->value);
+    if (isConvolutionType(node->type))
+      updateConv1dDetail(*node);
+    else
+      updateConvTransposeDetail(*node);
+  }
+  refreshPropagatedPinShapes(*this);
+  const auto incompatible = firstIncompatibleLinkMessage(*this);
+  if (!incompatible.empty()) {
+    property->setValue(previousValue);
+    if (isConvolutionType(node->type))
+      updateConv1dDetail(*node);
+    else if (isConvTransposeType(node->type))
+      updateConvTransposeDetail(*node);
+    refreshPropagatedPinShapes(*this);
+    return false;
   }
   return true;
 }
@@ -1025,7 +1677,11 @@ bool NodeGraph::setProperty(std::int32_t nodeId, const std::string &key,
 bool NodeGraph::setFloatProperty(std::int32_t nodeId, const std::string &key,
                                  float value) {
   auto *node = findNode(nodeId);
-  if (node == nullptr || node->state == NodeState::frozenGold)
+  if (node == nullptr)
+    return false;
+  const bool fidelityOnGold =
+      key == "fidelity" && node->state == NodeState::frozenGold;
+  if (node->state == NodeState::frozenGold && !fidelityOnGold)
     return false;
   const auto property = std::find_if(
       node->properties.begin(), node->properties.end(),
@@ -1034,6 +1690,8 @@ bool NodeGraph::setFloatProperty(std::int32_t nodeId, const std::string &key,
       property->kind != PropertyKind::real)
     return false;
   property->setFloatValue(value);
+  if (key == "fidelity")
+    node->fidelityPercent = clampFidelity(property->floatValue);
   return true;
 }
 
@@ -1143,6 +1801,7 @@ bool NodeGraph::unfreeze(std::int32_t nodeId) {
         node->weightsProvenance == WeightsProvenance::file;
     const auto trainOrigin =
         node->blackBoxOrigin == BlackBoxOrigin::trainAutoload;
+    const auto fidelity = node->fidelityPercent;
 
     removeNode(nodeId);
     for (const auto child : fragment) {
@@ -1160,6 +1819,13 @@ bool NodeGraph::unfreeze(std::int32_t nodeId) {
         restored.artifactPath = trainedPath;
         if (trainOrigin)
           restored.blackBoxOrigin = BlackBoxOrigin::trainAutoload;
+      }
+      if (restored.type == NodeType::variationalBottleneck) {
+        restored.fidelityPercent = fidelity;
+        for (auto &property : restored.properties) {
+          if (property.key == "fidelity")
+            property.floatValue = fidelity;
+        }
       }
       nodes.push_back(std::move(restored));
     }
@@ -1462,7 +2128,7 @@ bool NodeGraph::restoreFromValueTree(const juce::ValueTree &tree) {
                                       findPin(link.destinationPinId) == nullptr;
                              }),
               links.end());
-  ensureFixedStereoIo();
+  ensureFixedHostIo();
   refreshAllMergeOutputShapes(*this);
   for (auto &node : nodes) {
     if (node.type != NodeType::tcn && node.type != NodeType::blackBox)
@@ -1471,13 +2137,13 @@ bool NodeGraph::restoreFromValueTree(const juce::ValueTree &tree) {
     for (auto &pin : node.inputs) {
       if (isControlInputPin(pin)) {
         pin.label = controlPinLabel;
-        pin.signalKind = SignalKind::conditioning;
+        pin.shape = flexibleTensorShape();
         hasControl = true;
       }
     }
     if (!hasControl)
       node.inputs.push_back({nextPinId++, controlPinLabel, PinKind::input,
-                             {0, "audio"}, SignalKind::conditioning});
+                             flexibleTensorShape()});
   }
   return true;
 }
@@ -1536,6 +2202,8 @@ std::string NodeGraph::toJson() const {
 }
 
 GraphNode NodeGraph::makeNode(NodeType type, juce::Point<float> position) {
+  if (type == NodeType::rateConv)
+    type = NodeType::convolution;
   GraphNode node;
   node.id = nextNodeId++;
   node.type = type;
@@ -1544,15 +2212,13 @@ GraphNode NodeGraph::makeNode(NodeType type, juce::Point<float> position) {
       type == NodeType::blackBox ? NodeState::frozenGold : NodeState::liveBlue;
   node.colour = colourForType(type, node.state);
 
-  const auto addInput = [&](const char *label = "in", int channels = 0,
-                            SignalKind kind = SignalKind::audio) {
+  const auto addInput = [&](const char *label = "in", int channels = 0) {
     node.inputs.push_back(
-        {nextPinId++, label, PinKind::input, {channels, "audio"}, kind});
+        {nextPinId++, label, PinKind::input, {channels}});
   };
-  const auto addOutput = [&](const char *label = "out", int channels = 0,
-                             SignalKind kind = SignalKind::audio) {
+  const auto addOutput = [&](const char *label = "out", int channels = 0) {
     node.outputs.push_back(
-        {nextPinId++, label, PinKind::output, {channels, "audio"}, kind});
+        {nextPinId++, label, PinKind::output, {channels}});
   };
   const auto property = [](std::string key, std::string label, int value,
                            int minimum, int maximum,
@@ -1572,17 +2238,35 @@ GraphNode NodeGraph::makeNode(NodeType type, juce::Point<float> position) {
     gain.floatMaximum = gainMaximum;
     return gain;
   };
+  const auto fidelityProperty = []() {
+    NodeProperty fidelity;
+    fidelity.key = "fidelity";
+    fidelity.label = "Fidelity";
+    fidelity.kind = PropertyKind::real;
+    fidelity.floatValue = defaultFidelityPercent;
+    fidelity.floatMinimum = fidelityMinimum;
+    fidelity.floatMaximum = fidelityMaximum;
+    return fidelity;
+  };
 
   switch (type) {
   case NodeType::audioInput:
     node.label = "Audio Input";
-    node.detail = "Stereo host input";
+    node.detail = hostIoModeDetail(HostIoMode::stereo, true);
     addOutput("out", 2);
+    node.properties.push_back(property("channels", "Mode", 2, 0, 2,
+                                       PropertyKind::choice,
+                                       {"Mono", "Mirrored", "Stereo"}));
+    applyHostIoChannels(node);
     break;
   case NodeType::audioOutput:
     node.label = "Audio Output";
-    node.detail = "Stereo host output";
+    node.detail = hostIoModeDetail(HostIoMode::stereo, false);
     addInput("in", 2);
+    node.properties.push_back(property("channels", "Mode", 2, 0, 2,
+                                       PropertyKind::choice,
+                                       {"Mono", "Mirrored", "Stereo"}));
+    applyHostIoChannels(node);
     break;
   case NodeType::linear:
     node.label = "Linear";
@@ -1591,24 +2275,56 @@ GraphNode NodeGraph::makeNode(NodeType type, juce::Point<float> position) {
     node.armedForTraining = true;
     addInput();
     addOutput();
+    node.inputs.front().shape = flexibleTensorShape();
+    node.outputs.front().shape = flexibleTensorShape();
     node.properties.push_back(property("features", "Features", 2, 1, 512));
     break;
   case NodeType::convolution:
+  case NodeType::rateConv:
     node.label = "Conv1D";
     node.detail = "Temporal convolution";
     node.hasWeights = true;
     node.armedForTraining = true;
     addInput();
     addOutput();
+    node.inputs.front().shape = flexibleTensorShape();
+    node.outputs.front().shape = flexibleTensorShape();
     node.properties.push_back(property("channels", "Channels", 2, 1, 512));
     node.properties.push_back(property("kernel_size", "Kernel Size", 3, 2, 65));
     node.properties.push_back(property("dilation", "Dilation", 1, 1, 64));
+    node.properties.push_back(property("stride", "Stride", 1, 1, 16));
+    break;
+  case NodeType::convTranspose:
+    node.label = "ConvTranspose1d";
+    node.detail = "Temporal upsampling";
+    node.hasWeights = true;
+    node.armedForTraining = true;
+    addInput();
+    addOutput();
+    node.inputs.front().shape = flexibleTensorShape();
+    node.outputs.front().shape = flexibleTensorShape();
+    node.properties.push_back(property("channels", "Channels", 2, 1, 512));
+    node.properties.push_back(property("kernel_size", "Kernel Size", 3, 2, 65));
+    node.properties.push_back(property("dilation", "Dilation", 1, 1, 64));
+    node.properties.push_back(property("stride", "Stride", 1, 1, 16));
+    break;
+  case NodeType::batchNorm:
+    node.label = "BatchNorm1d";
+    node.detail = "Affine normalization";
+    node.hasWeights = true;
+    node.armedForTraining = true;
+    addInput();
+    addOutput();
+    node.inputs.front().shape = flexibleTensorShape();
+    node.outputs.front().shape = flexibleTensorShape();
     break;
   case NodeType::activation:
     node.label = "Activation";
     node.detail = "ReLU";
     addInput();
     addOutput();
+    node.inputs.front().shape = flexibleTensorShape();
+    node.outputs.front().shape = flexibleTensorShape();
     node.properties.push_back(
         property("activation", "Function", 0, 0, 4, PropertyKind::choice,
                  {"ReLU", "Sigmoid", "Tanh", "LeakyReLU", "PReLU"}));
@@ -1621,8 +2337,11 @@ GraphNode NodeGraph::makeNode(NodeType type, juce::Point<float> position) {
     node.armedForTraining = true;
     node.dilationGrowth = defaultDilationGrowth;
     addInput();
-    addInput(controlPinLabel, 0, SignalKind::conditioning);
+    addInput(controlPinLabel);
     addOutput();
+    node.inputs.front().shape = flexibleTensorShape();
+    node.inputs.back().shape = flexibleTensorShape();
+    node.outputs.front().shape = flexibleTensorShape();
     node.properties.push_back(property("depth", "Depth", 4, 1, 30));
     node.properties.push_back(property("kernel_size", "Kernel Size", 3, 2, 65));
     node.properties.push_back(property("channels", "Channels", 16, 1, 512));
@@ -1640,6 +2359,7 @@ GraphNode NodeGraph::makeNode(NodeType type, juce::Point<float> position) {
     node.label = "Merge";
     node.detail = "Elementwise combine";
     addOutput();
+    node.outputs.front().shape = flexibleTensorShape();
     node.properties.push_back(
         property("mode", "Mode", 0, 0, 2, PropertyKind::choice,
                  {"Add", "Multiply", "Concatenate"}));
@@ -1649,21 +2369,71 @@ GraphNode NodeGraph::makeNode(NodeType type, juce::Point<float> position) {
   case NodeType::knobInput:
     node.label = "Knob Input";
     node.detail = "1D conditioning";
-    addOutput("c", 1, SignalKind::conditioning);
+    addOutput("c", 1);
     break;
   case NodeType::xyTrackpad:
     node.label = "XY Trackpad";
     node.detail = "Independent X and Y outputs";
-    addOutput("x", 1, SignalKind::conditioning);
-    addOutput("y", 1, SignalKind::conditioning);
+    addOutput("x", 1);
+    addOutput("y", 1);
     break;
   case NodeType::blackBox:
     node.label = "Frozen Selection";
     node.detail = "Locked";
     node.hasWeights = true;
     addInput();
-    addInput(controlPinLabel, 0, SignalKind::conditioning);
+    addInput(controlPinLabel);
     addOutput();
+    node.inputs.front().shape = flexibleTensorShape();
+    node.inputs.back().shape = flexibleTensorShape();
+    node.outputs.front().shape = flexibleTensorShape();
+    node.properties.push_back(fidelityProperty());
+    break;
+  case NodeType::pqmfAnalysis:
+    node.label = "PQMF Analysis";
+    node.detail = "Audio to multiband";
+    addInput("in", 0);
+    addOutput("bands", 0);
+    node.outputs.front().shape.temporalRate = defaultPqmfBands;
+    node.outputs.front().shape.nBand = defaultPqmfBands;
+    node.properties.push_back(property("n_band", "nBand", defaultPqmfBands,
+                                       minimumPqmfBands, maximumPqmfBands));
+    break;
+  case NodeType::pqmfSynthesis:
+    node.label = "PQMF Synthesis";
+    node.detail = "Multiband to audio";
+    addInput("bands", 0);
+    addOutput("out", 0);
+    node.inputs.front().shape.temporalRate = defaultPqmfBands;
+    node.inputs.front().shape.nBand = defaultPqmfBands;
+    node.properties.push_back(property("n_band", "nBand", defaultPqmfBands,
+                                       minimumPqmfBands, maximumPqmfBands));
+    break;
+  case NodeType::variationalBottleneck:
+    node.label = "Variational Bottleneck";
+    node.detail = "Latent sample";
+    node.hasWeights = true;
+    node.armedForTraining = true;
+    node.fidelityPercent = defaultFidelityPercent;
+    addInput("features", 0);
+    addOutput("z", defaultLatentSize);
+    node.inputs.front().shape = flexibleTensorShape();
+    node.outputs.front().shape.temporalRate = 0;
+    node.properties.push_back(property("latent_size", "Latent", defaultLatentSize,
+                                       1, 512));
+    node.properties.push_back(fidelityProperty());
+    break;
+  case NodeType::noiseSynthesizer:
+    node.label = "Noise Synth";
+    node.detail = "Filtered noise addend";
+    node.hasWeights = true;
+    node.armedForTraining = true;
+    addInput();
+    addOutput();
+    node.inputs.front().shape = flexibleTensorShape();
+    node.outputs.front().shape = flexibleTensorShape();
+    node.properties.push_back(
+        property("noise_bands", "Noise bands", defaultNoiseBands, 1, 16));
     break;
   }
   return node;
@@ -1684,7 +2454,7 @@ void NodeGraph::setMixerInputCount(GraphNode &node, int inputCount) {
   while (static_cast<int>(node.inputs.size()) < count) {
     const auto index = static_cast<int>(node.inputs.size()) + 1;
     node.inputs.push_back({nextPinId++, "in " + std::to_string(index),
-                           PinKind::input, {0, "audio"}});
+                           PinKind::input, flexibleTensorShape()});
   }
   for (int index = 0; index < static_cast<int>(node.inputs.size()); ++index)
     node.inputs[static_cast<std::size_t>(index)].label =
@@ -1884,12 +2654,41 @@ std::optional<TrainJobRequest> NodeGraph::createTrainRequest() const {
 
   juce::Array<juce::var> armedIds;
   juce::Array<juce::var> elements;
-  const std::unordered_set<std::int32_t> selected(armed.begin(), armed.end());
-  for (const auto nodeId : armed) {
+  std::unordered_set<std::int32_t> selected(armed.begin(), armed.end());
+  std::int32_t inputId = 0;
+  for (const auto &node : nodes) {
+    if (node.type == NodeType::audioInput)
+      inputId = node.id;
+  }
+  if (inputId != 0) {
+    std::queue<std::int32_t> pending;
+    pending.push(inputId);
+    std::unordered_set<std::int32_t> visited;
+    while (!pending.empty()) {
+      const auto current = pending.front();
+      pending.pop();
+      if (!visited.insert(current).second)
+        continue;
+      const auto *node = findNode(current);
+      if (node != nullptr && !isControlSourceType(node->type) &&
+          node->state == NodeState::liveBlue)
+        selected.insert(current);
+      for (const auto &link : links) {
+        const auto source = findNodeForPin(link.sourcePinId);
+        const auto destination = findNodeForPin(link.destinationPinId);
+        if (source.has_value() && *source == current && destination.has_value())
+          pending.push(*destination);
+      }
+    }
+  }
+  const std::unordered_set<std::int32_t> snapshot(selected.begin(),
+                                                  selected.end());
+  for (const auto nodeId : armed)
+    armedIds.add(nodeId);
+  for (const auto nodeId : snapshot) {
     const auto *node = findNode(nodeId);
     if (node == nullptr)
-      return std::nullopt;
-    armedIds.add(nodeId);
+      continue;
     auto element = std::make_unique<juce::DynamicObject>();
     element->setProperty("id", node->id);
     element->setProperty("type", nodeTypeName(node->type));
@@ -1920,8 +2719,8 @@ std::optional<TrainJobRequest> NodeGraph::createTrainRequest() const {
     const auto destinationNode = findNodeForPin(link.destinationPinId);
     if (!sourceNode.has_value() || !destinationNode.has_value())
       continue;
-    const auto sourceArmed = selected.count(*sourceNode) != 0;
-    const auto destinationArmed = selected.count(*destinationNode) != 0;
+    const auto sourceArmed = snapshot.count(*sourceNode) != 0;
+    const auto destinationArmed = snapshot.count(*destinationNode) != 0;
     if (sourceArmed && destinationArmed) {
       auto connection = std::make_unique<juce::DynamicObject>();
       connection->setProperty("source_element_id", *sourceNode);
@@ -1994,7 +2793,7 @@ NodeGraph::absorbArmedChain(const TrainJobResult &result) {
   }
 
   auto box = makeNode(NodeType::blackBox, centroid);
-  box.label = "Trained Steerable";
+  box.label = result.hasEncodeDecode ? "Trained RAVE" : "Trained Steerable";
   box.detail = "Locked";
   box.state = NodeState::frozenGold;
   box.colour = colourForType(box.type, box.state);
@@ -2003,7 +2802,15 @@ NodeGraph::absorbArmedChain(const TrainJobResult &result) {
   box.weightsProvenance = WeightsProvenance::file;
   box.blackBoxOrigin = BlackBoxOrigin::trainAutoload;
   box.hasWeights = true;
+  box.compactnessReady = result.hasEncodeDecode;
   box.sourceSubgraph = fragment.toXmlString().toStdString();
+  if (result.hasEncodeDecode) {
+    box.outputs.push_back({nextPinId++, latentPinLabel, PinKind::output,
+                           flexibleTensorShape(defaultLatentSize)});
+    box.inputs.push_back({nextPinId++, latentPinLabel, PinKind::input,
+                          flexibleTensorShape(defaultLatentSize)});
+    box.fidelityPercent = defaultFidelityPercent;
+  }
   const auto boxId = box.id;
   const auto audioIn = box.inputs.front().id;
   std::int32_t controlIn = 0;
@@ -2036,5 +2843,74 @@ NodeGraph::absorbArmedChain(const TrainJobResult &result) {
   for (auto nodeId : armed)
     removeNode(nodeId);
   return boxId;
+}
+
+bool NodeGraph::hasReconstructionTrainPath() const {
+  return reconstructionGateMessage().empty();
+}
+
+std::string NodeGraph::reconstructionGateMessage() const {
+  const GraphNode *bottleneck = nullptr;
+  for (const auto &node : nodes) {
+    if (node.type == NodeType::variationalBottleneck &&
+        node.state == NodeState::liveBlue && node.armedForTraining) {
+      bottleneck = &node;
+      break;
+    }
+  }
+  if (bottleneck == nullptr)
+    return "Reconstruction requires an armed variational bottleneck";
+
+  std::unordered_map<std::int32_t, std::vector<std::int32_t>> outgoing;
+  std::unordered_map<std::int32_t, std::vector<std::int32_t>> incoming;
+  for (const auto &link : links) {
+    const auto source = findNodeForPin(link.sourcePinId);
+    const auto destination = findNodeForPin(link.destinationPinId);
+    if (!source.has_value() || !destination.has_value())
+      continue;
+    outgoing[*source].push_back(*destination);
+    incoming[*destination].push_back(*source);
+  }
+
+  const auto reaches = [&](std::int32_t from, NodeType targetType) {
+    std::queue<std::int32_t> pending;
+    std::unordered_set<std::int32_t> visited;
+    pending.push(from);
+    while (!pending.empty()) {
+      const auto current = pending.front();
+      pending.pop();
+      if (!visited.insert(current).second)
+        continue;
+      const auto *node = findNode(current);
+      if (node != nullptr && node->type == targetType)
+        return true;
+      for (const auto next : outgoing[current])
+        pending.push(next);
+    }
+    return false;
+  };
+  const auto reachedFrom = [&](NodeType sourceType, std::int32_t to) {
+    std::queue<std::int32_t> pending;
+    std::unordered_set<std::int32_t> visited;
+    pending.push(to);
+    while (!pending.empty()) {
+      const auto current = pending.front();
+      pending.pop();
+      if (!visited.insert(current).second)
+        continue;
+      const auto *node = findNode(current);
+      if (node != nullptr && node->type == sourceType)
+        return true;
+      for (const auto prev : incoming[current])
+        pending.push(prev);
+    }
+    return false;
+  };
+
+  if (!reachedFrom(NodeType::audioInput, bottleneck->id))
+    return "Reconstruction requires a path from Audio Input to the bottleneck";
+  if (!reaches(bottleneck->id, NodeType::audioOutput))
+    return "Reconstruction requires a decode path from the bottleneck to Audio Output";
+  return {};
 }
 } // namespace openyourbox::graph

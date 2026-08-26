@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import math
 import struct
@@ -17,6 +18,24 @@ from torch import nn
 from torch.nn import functional as functional
 
 _UINT64_MASK = (1 << 64) - 1
+_RAVE_TYPES = {
+    "pqmf_analysis",
+    "pqmf_synthesis",
+    "rate_conv",
+    "variational_bottleneck",
+    "noise_synthesizer",
+}
+
+
+def _load_train_worker():
+    """Load the sibling train worker so freeze can reuse the RAVE graph builder."""
+    path = Path(__file__).with_name("train_worker.py")
+    spec = importlib.util.spec_from_file_location("openyourbox_train_worker", path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError("could not locate train_worker.py beside freeze_worker.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 def _float32(value: float) -> float:
@@ -377,7 +396,9 @@ def _topological_elements(fragment: dict[str, Any]) -> list[dict[str, Any]]:
     if len(ordered) != len(elements):
         raise ValueError("selected graph is cyclic")
     if any(len(destinations) > 1 for destinations in outgoing.values()):
-        raise ValueError("branched selected graphs are not supported by this worker")
+        types = {str(element.get("type", "")) for element in elements}
+        if not (types & _RAVE_TYPES):
+            raise ValueError("branched selected graphs are not supported by this worker")
     return ordered
 
 
@@ -389,6 +410,16 @@ def build_module(
     When ``cond_dim`` is positive, TCN elements keep a live Control pin: the
     returned module is ``(audio, cond)`` so Knob/XY still steer after freeze.
     """
+    types = {
+        str(element.get("type", ""))
+        for element in fragment.get("elements", [])
+        if isinstance(element, dict)
+    }
+    if types & _RAVE_TYPES:
+        return _load_train_worker().build_rave_graph_module(
+            fragment, input_channels, cond_dim
+        )
+
     modules: list[nn.Module] = []
     channels = input_channels
     cond_dim = max(0, int(cond_dim))
@@ -408,17 +439,37 @@ def build_module(
             _assign_deterministic_weights(module, seed)
             modules.append(module)
             channels = output_channels
-        elif element_type == "conv1d":
+        elif element_type in {"conv1d", "rate_conv"}:
             output_channels = properties.get("channels", channels)
-            module = CausalConv1d(
+            stride = max(1, int(properties.get("stride", 1)))
+            if stride > 1:
+                module = _load_train_worker()._make_strided_conv(
+                    channels,
+                    output_channels,
+                    properties,
+                )
+            else:
+                module = CausalConv1d(
+                    channels,
+                    output_channels,
+                    properties.get("kernel_size", 3),
+                    properties.get("dilation", 1),
+                )
+            _assign_deterministic_weights(module, seed)
+            modules.append(module)
+            channels = output_channels
+        elif element_type == "conv_transpose1d":
+            output_channels = properties.get("channels", channels)
+            module = _load_train_worker()._make_conv_transpose(
                 channels,
                 output_channels,
-                properties.get("kernel_size", 3),
-                properties.get("dilation", 1),
+                properties,
             )
             _assign_deterministic_weights(module, seed)
             modules.append(module)
             channels = output_channels
+        elif element_type == "batch_norm":
+            modules.append(nn.BatchNorm1d(channels))
         elif element_type == "tcn":
             hidden = properties.get("channels", channels)
             depth = properties.get("depth", 1)
@@ -445,6 +496,10 @@ def build_module(
             raise ValueError(
                 "mixer elements cannot be frozen by the linear freeze worker"
             )
+        elif element_type in _RAVE_TYPES:
+            return _load_train_worker().build_rave_graph_module(
+                fragment, input_channels, cond_dim
+            )
 
     if not modules:
         return nn.Identity()
@@ -455,11 +510,12 @@ def build_module(
 
 def _receptive_field(module: nn.Module) -> int:
     """Return the aggregate causal receptive field of a sequential graph."""
-    return 1 + sum(
-        layer.left_padding
-        for layer in module.modules()
-        if isinstance(layer, CausalConv1d)
-    )
+    field = 1
+    for layer in module.modules():
+        padding = getattr(layer, "left_padding", None)
+        if padding is not None:
+            field += int(padding)
+    return field
 
 
 def compile_request(request: dict[str, Any], artifact_dir: Path) -> dict[str, Any]:
@@ -484,9 +540,23 @@ def compile_request(request: dict[str, Any], artifact_dir: Path) -> dict[str, An
     module = build_module(request["graph_fragment"], input_channels, cond_dim).eval()
     receptive_field = _receptive_field(module)
     example = torch.zeros(1, input_channels, example_samples)
+    train_worker = None
+    rave_type = False
+    try:
+        train_worker = _load_train_worker()
+        rave_type = isinstance(module, train_worker.RaveGraphModule)
+    except Exception:
+        rave_type = False
     conditioned = isinstance(module, ConditionedSequential)
+    has_encode_decode = bool(rave_type and getattr(module, "bottleneck_id", None) is not None)
     with torch.inference_mode():
-        if conditioned:
+        if has_encode_decode and train_worker is not None:
+            artifact_dir.mkdir(parents=True, exist_ok=True)
+            artifact_path = (artifact_dir / f"{request_id}.pt").resolve()
+            train_worker._export_rave_scripted(module, input_channels, artifact_path)
+            scripted = torch.jit.load(str(artifact_path))
+            output = scripted(example)
+        elif conditioned:
             example_c = torch.zeros(1, max(1, cond_dim), example_samples)
             scripted = torch.jit.trace(module, (example, example_c), strict=False)
             scripted = torch.jit.freeze(scripted)
@@ -511,10 +581,12 @@ def compile_request(request: dict[str, Any], artifact_dir: Path) -> dict[str, An
 
     artifact_dir.mkdir(parents=True, exist_ok=True)
     artifact_path = (artifact_dir / f"{request_id}.pt").resolve()
-    temporary_path = artifact_path.with_suffix(".pt.tmp")
-    torch.jit.save(scripted, str(temporary_path))
-    temporary_path.replace(artifact_path)
+    if not has_encode_decode:
+        temporary_path = artifact_path.with_suffix(".pt.tmp")
+        torch.jit.save(scripted, str(temporary_path))
+        temporary_path.replace(artifact_path)
     compile_ms = (time.perf_counter() - started) * 1000.0
+    methods = ["forward", "encode", "decode"] if has_encode_decode else ["forward"]
     return {
         "request_id": request_id,
         "status": "success",
@@ -524,11 +596,13 @@ def compile_request(request: dict[str, Any], artifact_dir: Path) -> dict[str, An
             "ports": [],
             "shape_signature": {
                 "input_channels": input_channels,
-                "output_channels": output_channels,
+                "output_channels": int(output.size(1)),
             },
             "receptive_field_samples": receptive_field,
             "conditioning": conditioned,
             "cond_dim": int(cond_dim) if conditioned else 0,
+            "has_encode_decode": has_encode_decode,
+            "methods": methods,
             "baseline_metrics": {
                 "compile_time_ms": compile_ms,
                 "estimated_latency_ms": latency_ms,

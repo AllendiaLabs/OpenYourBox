@@ -1,4 +1,5 @@
 #include "NodeRenderer.h"
+#include "RaveLayouts.h"
 
 #include <imgui.h>
 #include <imgui_internal.h>
@@ -21,14 +22,20 @@ struct PaletteItem {
   openyourbox::graph::NodeType type;
 };
 
-constexpr std::array<PaletteItem, 7> paletteItems{{
+constexpr std::array<PaletteItem, 13> paletteItems{{
     {"Linear", openyourbox::graph::NodeType::linear},
     {"Conv1D", openyourbox::graph::NodeType::convolution},
+    {"ConvTranspose1d", openyourbox::graph::NodeType::convTranspose},
+    {"BatchNorm1d", openyourbox::graph::NodeType::batchNorm},
     {"Activation", openyourbox::graph::NodeType::activation},
     {"TCN", openyourbox::graph::NodeType::tcn},
     {"Merge", openyourbox::graph::NodeType::merge},
     {"Knob Input", openyourbox::graph::NodeType::knobInput},
     {"XY Trackpad", openyourbox::graph::NodeType::xyTrackpad},
+    {"PQMF Analysis", openyourbox::graph::NodeType::pqmfAnalysis},
+    {"PQMF Synthesis", openyourbox::graph::NodeType::pqmfSynthesis},
+    {"Bottleneck", openyourbox::graph::NodeType::variationalBottleneck},
+    {"Noise Synth", openyourbox::graph::NodeType::noiseSynthesizer},
 }};
 
 constexpr float nodeBodyWidth = 188.0f;
@@ -203,6 +210,10 @@ void NodeRenderer::render(NodeGraph &graph,
   const auto overMap = mapHoveredLastFrame;
   const auto wheelX = input.MouseWheelH;
   const auto wheelY = input.MouseWheel;
+  /** @brief Screen-space pointer used for zoom pivots (pre-canvas transform). */
+  const auto mouseScreen = input.MousePos;
+  /** @brief Screen-space drag delta used for middle-button pan. */
+  const auto mouseDeltaScreen = input.MouseDelta;
   input.MouseWheel = 0.0f;
   input.MouseWheelH = 0.0f;
 
@@ -229,20 +240,29 @@ void NodeRenderer::render(NodeGraph &graph,
 
   if ((std::abs(wheelX) > 0.0f || std::abs(wheelY) > 0.0f) &&
       ImGui::IsWindowHovered(ImGuiHoveredFlags_ChildWindows) && !overMap &&
-      !ImGui::IsAnyItemActive())
-    navigateCanvas(ImVec2(-wheelX * canvasWheelPanStep * canvasPanSpeed,
-                          -wheelY * canvasWheelPanStep * canvasPanSpeed),
-                   1.0f, input.MousePos);
+      !ImGui::IsAnyItemActive()) {
+    if (input.KeyCtrl || input.KeySuper) {
+      const auto zoomSteps = wheelY + wheelX;
+      if (std::abs(zoomSteps) > 0.0f) {
+        const auto zoomFactor = std::pow(1.1f, zoomSteps);
+        navigateCanvas(ImVec2(0.0f, 0.0f), zoomFactor, mouseScreen);
+      }
+    } else {
+      navigateCanvas(ImVec2(-wheelX * canvasWheelPanStep * canvasPanSpeed,
+                            -wheelY * canvasWheelPanStep * canvasPanSpeed),
+                     1.0f, mouseScreen);
+    }
+  }
 
   if (ImGui::IsMouseDragging(canvasDragPanButton, 0.0f) &&
       ImGui::IsWindowHovered(ImGuiHoveredFlags_ChildWindows) && !overMap &&
       !ImGui::IsAnyItemActive())
-    navigateCanvas(ImVec2(-input.MouseDelta.x * canvasPanSpeed,
-                          -input.MouseDelta.y * canvasPanSpeed),
-                   1.0f, input.MousePos);
+    navigateCanvas(ImVec2(-mouseDeltaScreen.x * canvasPanSpeed,
+                          -mouseDeltaScreen.y * canvasPanSpeed),
+                   1.0f, mouseScreen);
 
   if (std::abs(pinchMagnification - 1.0f) > 0.0001f && !overMap)
-    navigateCanvas(ImVec2(0.0f, 0.0f), pinchMagnification, input.MousePos);
+    navigateCanvas(ImVec2(0.0f, 0.0f), pinchMagnification, mouseScreen);
 
   for (auto &node : graph.getNodes())
     renderNode(graph, node, callbacks);
@@ -354,7 +374,36 @@ void NodeRenderer::renderPalette(NodeGraph &graph) {
     ImGui::PopID();
   }
   ImGui::Separator();
-  ImGui::TextWrapped("Scroll to pan. Pinch to zoom. Middle-drag also pans.");
+  if (ImGui::BeginMenu("Insert RAVE layout")) {
+    const auto insert = [&](RaveLayoutId id, int channels) {
+      const auto error = insertRaveLayout(graph, id, channels);
+      if (!error.empty()) {
+        transientMessage = error;
+        transientMessageDeadline = ImGui::GetTime() + 3.0;
+      } else {
+        mutatedThisFrame = true;
+        recompileThisFrame = true;
+      }
+    };
+    if (ImGui::BeginMenu("Original")) {
+      if (ImGui::MenuItem("Mono"))
+        insert(RaveLayoutId::original, 1);
+      if (ImGui::MenuItem("Stereo"))
+        insert(RaveLayoutId::original, 2);
+      ImGui::EndMenu();
+    }
+    if (ImGui::BeginMenu("Latest continuous")) {
+      if (ImGui::MenuItem("Mono"))
+        insert(RaveLayoutId::latestContinuous, 1);
+      if (ImGui::MenuItem("Stereo"))
+        insert(RaveLayoutId::latestContinuous, 2);
+      ImGui::EndMenu();
+    }
+    ImGui::EndMenu();
+  }
+  ImGui::TextWrapped(
+      "Scroll to pan. Ctrl/Cmd+scroll or pinch to zoom at the pointer. "
+      "Middle-drag also pans.");
   ImGui::EndChild();
 }
 
@@ -381,11 +430,38 @@ void NodeRenderer::renderNode(NodeGraph &graph, GraphNode &node,
 
   for (const auto &pin : node.inputs) {
     ed::BeginPin(ed::PinId(editorIdentifier(pin.id)), ed::PinKind::Input);
-    ImGui::Text("<- %s", pin.label.c_str());
+    const auto shapeLabel = pin.shape.displayLabel();
+    if (!shapeLabel.empty())
+      ImGui::Text("<- %s (%s)", pin.label.c_str(), shapeLabel.c_str());
+    else
+      ImGui::Text("<- %s", pin.label.c_str());
     ed::EndPin();
   }
 
   ImGui::TextDisabled("%s", node.detail.c_str());
+  int convStride = 1;
+  if (node.type == NodeType::convolution || node.type == NodeType::convTranspose) {
+    for (const auto &property : node.properties) {
+      if (property.key == "stride")
+        convStride = property.value;
+    }
+  }
+  const bool stridedConv =
+      (node.type == NodeType::convolution || node.type == NodeType::convTranspose) &&
+      convStride > 1;
+  if (isRaveProcessingType(node.type) || stridedConv ||
+      (node.type == NodeType::blackBox && node.outputs.size() > 1)) {
+    const auto delay = raveNodeDelaySamples(node);
+    if (delay > 0 || node.type == NodeType::blackBox) {
+      const auto samples =
+          node.metrics.has_value()
+              ? static_cast<double>(
+                    std::max<std::uint64_t>(delay, 1))
+              : static_cast<double>(delay);
+      ImGui::TextDisabled("Delay %.0f smp / %.2f ms @ 48 kHz", samples,
+                          samples * 1000.0 / 48000.0);
+    }
+  }
   const auto frozen = node.state == NodeState::frozenGold;
   if (node.type == NodeType::knobInput)
     renderKnobControl(graph, node, callbacks);
@@ -394,6 +470,9 @@ void NodeRenderer::renderNode(NodeGraph &graph, GraphNode &node,
   if (frozen)
     ImGui::BeginDisabled();
   for (auto &property : node.properties) {
+    const bool liveOnGold = frozen && property.key == "fidelity";
+    if (liveOnGold)
+      ImGui::EndDisabled();
     ImGui::PushID(property.key.c_str());
     auto value = property.value;
     bool changed = false;
@@ -530,9 +609,28 @@ void NodeRenderer::renderNode(NodeGraph &graph, GraphNode &node,
       }
     }
     ImGui::PopID();
+    if (liveOnGold)
+      ImGui::BeginDisabled();
   }
   if (frozen)
     ImGui::EndDisabled();
+
+  if (node.type == NodeType::convolution || node.type == NodeType::convTranspose) {
+    const auto inputRate =
+        node.inputs.empty() ? 0 : node.inputs.front().shape.temporalRate;
+    const auto upsample = node.type == NodeType::convTranspose;
+    const auto notice =
+        convolutionRateMessage(convStride, upsample, inputRate);
+    if (!notice.empty()) {
+      const auto error =
+          convolutionRateIsError(convStride, upsample, inputRate);
+      const ImVec4 colour = error ? ImVec4(1.0f, 0.38f, 0.38f, 1.0f)
+                                  : ImVec4(1.0f, 0.78f, 0.28f, 1.0f);
+      ImGui::PushStyleColor(ImGuiCol_Text, colour);
+      ImGui::TextWrapped("%s", notice.c_str());
+      ImGui::PopStyleColor();
+    }
+  }
 
   if (node.hasWeights && node.state == NodeState::liveBlue) {
     const auto insertion = seedBuffers.try_emplace(node.id);
@@ -583,7 +681,10 @@ void NodeRenderer::renderNode(NodeGraph &graph, GraphNode &node,
     }
     if (!node.useExplicitSeed)
       ImGui::EndDisabled();
-    if (ImGui::Button("Randomize Weights", ImVec2(nodeBodyWidth, 0.0f)) &&
+    const char *weightsActionLabel =
+        node.type == openyourbox::graph::NodeType::batchNorm ? "Reset"
+                                                             : "Randomize Weights";
+    if (ImGui::Button(weightsActionLabel, ImVec2(nodeBodyWidth, 0.0f)) &&
         callbacks.randomizeNode) {
       auto appliedSeed = node.explicitSeed;
       if (node.useExplicitSeed) {
@@ -639,7 +740,11 @@ void NodeRenderer::renderNode(NodeGraph &graph, GraphNode &node,
 
   for (const auto &pin : node.outputs) {
     ed::BeginPin(ed::PinId(editorIdentifier(pin.id)), ed::PinKind::Output);
-    ImGui::Text("%s ->", pin.label.c_str());
+    const auto shapeLabel = pin.shape.displayLabel();
+    if (!shapeLabel.empty())
+      ImGui::Text("%s (%s) ->", pin.label.c_str(), shapeLabel.c_str());
+    else
+      ImGui::Text("%s ->", pin.label.c_str());
     ed::PinPivotAlignment(ImVec2(1.0f, 0.5f));
     ed::EndPin();
   }
@@ -1151,6 +1256,7 @@ void NodeRenderer::navigateCanvas(ImVec2 panDelta, float zoomFactor,
   auto view = editor->GetViewRect();
   const auto currentScale =
       std::clamp(editor->GetView().Scale, minimumZoom, maximumZoom);
+  auto appliedScale = currentScale;
   if (std::abs(zoomFactor - 1.0f) > 0.0001f) {
     const auto pivot = ed::ScreenToCanvas(pivotScreen);
     const auto targetScale =
@@ -1161,8 +1267,9 @@ void NodeRenderer::navigateCanvas(ImVec2 panDelta, float zoomFactor,
     view.Min.y = pivot.y + (view.Min.y - pivot.y) / applied;
     view.Max.x = pivot.x + (view.Max.x - pivot.x) / applied;
     view.Max.y = pivot.y + (view.Max.y - pivot.y) / applied;
+    appliedScale = targetScale;
   }
-  const auto invScale = currentScale > 0.0f ? 1.0f / currentScale : 1.0f;
+  const auto invScale = appliedScale > 0.0f ? 1.0f / appliedScale : 1.0f;
   view.Translate(ImVec2(panDelta.x * invScale, panDelta.y * invScale));
   commitCanvasView(view);
   layoutMutatedThisFrame = true;

@@ -297,6 +297,9 @@ void OpenYourBoxAudioProcessor::getStateInformation(
     xml->setAttribute("weights", weights.toBase64Encoding());
   }
 
+  xml->setAttribute("lastTrainObjective",
+                    juce::String(openyourbox::graph::trainObjectiveName(
+                        lastTrainObjective)));
   copyXmlToBinary(*xml, destData);
 }
 
@@ -315,6 +318,8 @@ void OpenYourBoxAudioProcessor::setStateInformation(const void *data,
     restoredState.removeChild(restoredGraph, nullptr);
   }
   parameters.replaceState(restoredState);
+  lastTrainObjective = openyourbox::graph::trainObjectiveFromName(
+      xml->getStringAttribute("lastTrainObjective", "mapping").toStdString());
   restoringState.store(false, std::memory_order_release);
 
   const auto counter = static_cast<std::uint64_t>(
@@ -530,8 +535,8 @@ bool OpenYourBoxAudioProcessor::prepareFrozenArtifact(
 
   const auto factory = openyourbox::dsp::TorchScriptBlackBoxFactory::load(
       result.artifactPath, result.inputChannels, result.receptiveFieldSamples,
-      error, !result.acceptsConditioning, result.acceptsConditioning,
-      result.condDim);
+      error, !result.acceptsConditioning && !result.hasEncodeDecode,
+      result.acceptsConditioning, result.condDim);
   if (factory == nullptr ||
       factory->getOutputChannels() != result.outputChannels)
     return false;
@@ -1033,6 +1038,34 @@ bool OpenYourBoxAudioProcessor::startLocalCapture(const juce::String &pairId,
                            getTotalNumInputChannels());
 }
 
+void OpenYourBoxAudioProcessor::startSingleRecording() {
+  const auto clipId = juce::Uuid().toDashedString();
+  {
+    const juce::ScopedLock lock(captureStateLock);
+    activeCapturePairId = clipId;
+    localCaptureClip = juce::File();
+    pendingPeerClip = juce::File();
+    waitingForPeerClip = false;
+    singleCaptureActive = true;
+  }
+  if (!startLocalCapture(clipId, "_clip")) {
+    singleCaptureActive = false;
+    setCaptureStatusMessage("Could not start capture");
+    return;
+  }
+  requestTransportStartIfNeeded();
+}
+
+openyourbox::graph::TrainObjective
+OpenYourBoxAudioProcessor::getLastTrainObjective() const noexcept {
+  return lastTrainObjective;
+}
+
+void OpenYourBoxAudioProcessor::setLastTrainObjective(
+    openyourbox::graph::TrainObjective objective) noexcept {
+  lastTrainObjective = objective;
+}
+
 void OpenYourBoxAudioProcessor::startPairedRecording() {
   if (!capturePairing.canRecord()) {
     setCaptureStatusMessage("Assign complementary Clean/Processed roles.");
@@ -1055,9 +1088,43 @@ void OpenYourBoxAudioProcessor::startPairedRecording() {
 }
 
 void OpenYourBoxAudioProcessor::stopPairedRecording() {
+  const bool single = singleCaptureActive;
   capturePairing.stopRecording();
   const auto clip = stopInputCapture();
   setCaptureBypass(false);
+  singleCaptureActive = false;
+  if (single) {
+    if (!clip.existsAsFile()) {
+      setCaptureStatusMessage("Capture discarded: no local audio was recorded");
+      return;
+    }
+    juce::String error;
+    juce::AudioFormatManager formats;
+    formats.registerBasicFormats();
+    std::unique_ptr<juce::AudioFormatReader> reader(
+        formats.createReaderFor(clip));
+    const auto duration =
+        reader != nullptr && reader->sampleRate > 0.0
+            ? static_cast<double>(reader->lengthInSamples) / reader->sampleRate
+            : 0.0;
+    const auto name = juce::String("Clip ") +
+                      juce::Time::getCurrentTime().formatted("%Y-%m-%d %H:%M");
+    if (!trainingLibrary.addCapturedClip(
+            name, clip,
+            reader != nullptr ? reader->sampleRate : getCurrentSampleRate(),
+            reader != nullptr ? static_cast<int>(reader->numChannels)
+                              : std::max(1, getTotalNumInputChannels()),
+            duration, error)) {
+      setCaptureStatusMessage(error);
+      return;
+    }
+    {
+      const juce::ScopedLock lock(captureStateLock);
+      libraryFocusRequested = true;
+      captureStatusMessage = "Clip added to Training Library";
+    }
+    return;
+  }
   {
     const juce::ScopedLock lock(captureStateLock);
     localCaptureClip = clip;

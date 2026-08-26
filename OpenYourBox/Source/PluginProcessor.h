@@ -262,8 +262,21 @@ public:
   /** @brief Starts a synchronized dual-instance capture take. */
   void startPairedRecording();
 
+  /** @brief Starts a single-instance unpaired clip capture. */
+  void startSingleRecording();
+
   /** @brief Stops capture and assembles the library pair when both clips exist. */
   void stopPairedRecording();
+
+  /** @brief Last-used Train objective for this instance. */
+  [[nodiscard]] openyourbox::graph::TrainObjective
+  getLastTrainObjective() const noexcept;
+
+  /**
+   * @brief Stores the last-used Train objective.
+   * @param objective Mapping or reconstruction.
+   */
+  void setLastTrainObjective(openyourbox::graph::TrainObjective objective) noexcept;
 
   /**
    * @brief Consumes a pending capture status string for the editor.
@@ -517,6 +530,11 @@ private:
   bool libraryFocusRequested = false;
   /** @brief Latest capture status consumed by the editor. */
   juce::String captureStatusMessage;
+  /** @brief Last-used Train objective persisted with the project. */
+  openyourbox::graph::TrainObjective lastTrainObjective{
+      openyourbox::graph::TrainObjective::mapping};
+  /** @brief True when the active take is unpaired Single capture. */
+  bool singleCaptureActive = false;
   /** @brief Protects capture assembly paths and status. */
   juce::CriticalSection captureStateLock;
   /** @brief Preview playback buffer mixed on the audio thread. */

@@ -35,6 +35,8 @@ public:
     std::function<void(bool)> setStartTransportOnRecord;
     /** @brief Start a synchronized take. */
     std::function<void()> startRecording;
+    /** @brief Start a single-instance unpaired clip capture. */
+    std::function<void()> startSingleRecording;
     /** @brief Stop the current take and ingest into the library. */
     std::function<void()> stopRecording;
     /** @brief Open the Training Library panel. */
@@ -50,5 +52,8 @@ public:
   void render(const capture::CapturePairing &pairing,
               const std::vector<capture::DiscoveredInstance> &peers,
               const Callbacks &callbacks);
+
+  /** @brief Capture Samples kind: 0 = Pair, 1 = Single. */
+  int captureKind = 0;
 };
 } // namespace openyourbox::ui

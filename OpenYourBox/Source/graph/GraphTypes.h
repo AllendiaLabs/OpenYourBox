@@ -21,14 +21,24 @@ enum class NodeType {
   merge,
   blackBox,
   knobInput,
-  xyTrackpad
+  xyTrackpad,
+  pqmfAnalysis,
+  pqmfSynthesis,
+  rateConv,
+  variationalBottleneck,
+  noiseSynthesizer,
+  convTranspose,
+  batchNorm
 };
+
+/** @brief Train recipe selected in the unified Train panel. */
+enum class TrainObjective { mapping, reconstruction };
+
+/** @brief Rate-changing convolution direction. */
+enum class RateConvDirection { downsample, upsample };
 
 /** @brief Merge element operating mode. */
 enum class MergeMode : int { add = 0, multiply = 1, concatenate = 2 };
-
-/** @brief Distinguishes tensor audio paths from scalar conditioning paths. */
-enum class SignalKind { audio, conditioning };
 
 /** @brief Provenance shown by the Weights property on weight-bearing nodes. */
 enum class WeightsProvenance {
@@ -59,9 +69,9 @@ enum class AnalysisView {
 inline const juce::Colour liveBlueColour{100, 180, 255};
 /** @brief Frozen Gold node colour. */
 inline const juce::Colour frozenGoldColour{218, 165, 32};
-/** @brief Fixed stereo host-input node colour. */
+/** @brief Host audio-input node colour. */
 inline const juce::Colour audioInputColour{70, 200, 150};
-/** @brief Fixed stereo host-output node colour. */
+/** @brief Host audio-output node colour. */
 inline const juce::Colour audioOutputColour{240, 160, 80};
 /** @brief Conditioning source node colour for Knob Input and XY Trackpad. */
 inline const juce::Colour conditioningColour{180, 140, 255};
@@ -96,7 +106,50 @@ inline bool isControlSourceType(NodeType type) noexcept {
 inline bool isTrainableType(NodeType type) noexcept {
   return type == NodeType::linear || type == NodeType::convolution ||
          type == NodeType::tcn || type == NodeType::activation ||
-         type == NodeType::blackBox;
+         type == NodeType::blackBox || type == NodeType::rateConv ||
+         type == NodeType::variationalBottleneck ||
+         type == NodeType::noiseSynthesizer ||
+         type == NodeType::convTranspose || type == NodeType::batchNorm;
+}
+
+/** @brief Returns true for RAVE-specific processing elements. */
+inline bool isRaveProcessingType(NodeType type) noexcept {
+  return type == NodeType::pqmfAnalysis || type == NodeType::pqmfSynthesis ||
+         type == NodeType::rateConv || type == NodeType::convTranspose ||
+         type == NodeType::variationalBottleneck ||
+         type == NodeType::noiseSynthesizer || type == NodeType::batchNorm;
+}
+
+/**
+ * @brief Returns true for tensor ops that inherit hop rate and nBand.
+ *
+ * Linear, Conv1D, Activation, TCN, Merge, and Noise Synth process whatever
+ * tensor they receive. Their pins start unspecified and copy the connected
+ * upstream rate and band count.
+ */
+inline bool isShapePassthroughType(NodeType type) noexcept {
+  return type == NodeType::linear || type == NodeType::convolution ||
+         type == NodeType::activation || type == NodeType::tcn ||
+         type == NodeType::merge || type == NodeType::noiseSynthesizer ||
+         type == NodeType::batchNorm;
+}
+
+/**
+ * @brief Returns true for the unified Conv1D element, including loaded Rate Conv.
+ * @param type Graph node type.
+ */
+inline bool isConvolutionType(NodeType type) noexcept {
+  return type == NodeType::convolution || type == NodeType::rateConv;
+}
+
+/** @brief Returns true for causal ConvTranspose1d upsampling elements. */
+inline bool isConvTransposeType(NodeType type) noexcept {
+  return type == NodeType::convTranspose;
+}
+
+/** @brief Returns true for Conv1D or ConvTranspose1d rate-changing elements. */
+inline bool isRateChangingConvType(NodeType type) noexcept {
+  return isConvolutionType(type) || isConvTransposeType(type);
 }
 
 /** @brief Default TCN dilation growth (RONN/WaveNet-like 2^n). */
@@ -117,6 +170,26 @@ inline constexpr int defaultTrainCheckpointInterval = 50;
 inline constexpr const char *defaultMlflowExperiment = "openyourbox";
 /** @brief Default MLflow tracking server origin for Train logging. */
 inline constexpr const char *defaultMlflowTrackingUri = "http://127.0.0.1:5000";
+/** @brief Default PQMF band count matching acids-rave continuous layouts. */
+inline constexpr int defaultPqmfBands = 16;
+/** @brief Inclusive minimum PQMF band count (power-of-two layouts). */
+inline constexpr int minimumPqmfBands = 2;
+/** @brief Inclusive maximum PQMF band count. */
+inline constexpr int maximumPqmfBands = 64;
+/** @brief Default variational latent width. */
+inline constexpr int defaultLatentSize = 128;
+/** @brief Default reconstruction stage-1 (representation) steps. */
+inline constexpr int defaultReconstructionStage1Steps = 1000000;
+/** @brief Default reconstruction stage-2 (quality) steps. */
+inline constexpr int defaultReconstructionStage2Steps = 1000000;
+/** @brief Default bottleneck/Gold fidelity percent. */
+inline constexpr float defaultFidelityPercent = 99.0f;
+/** @brief Inclusive lower bound for fidelity. */
+inline constexpr float fidelityMinimum = 0.0f;
+/** @brief Inclusive upper bound for fidelity. */
+inline constexpr float fidelityMaximum = 100.0f;
+/** @brief Default filtered-noise band count (RAVE v1 noise). */
+inline constexpr int defaultNoiseBands = 5;
 
 /**
  * @brief Computes integer G^n without overflowing `int`.
@@ -157,6 +230,35 @@ inline float clampGain(float gain) noexcept {
 }
 
 /**
+ * @brief Clamps a fidelity percent into the supported range.
+ * @param percent Proposed fidelity.
+ * @return Value in `[fidelityMinimum, fidelityMaximum]`.
+ */
+inline float clampFidelity(float percent) noexcept {
+  return std::clamp(percent, fidelityMinimum, fidelityMaximum);
+}
+
+/**
+ * @brief Parses a persisted Train objective token.
+ * @param name Objective string.
+ * @return Mapping unless the token is reconstruction.
+ */
+inline TrainObjective trainObjectiveFromName(const std::string &name) noexcept {
+  return name == "reconstruction" ? TrainObjective::reconstruction
+                                  : TrainObjective::mapping;
+}
+
+/**
+ * @brief Returns the persisted Train objective token.
+ * @param objective Selected recipe.
+ * @return `mapping` or `reconstruction`.
+ */
+inline const char *trainObjectiveName(TrainObjective objective) noexcept {
+  return objective == TrainObjective::reconstruction ? "reconstruction"
+                                                     : "mapping";
+}
+
+/**
  * @brief Clamps a conditioning scalar into the Knob/XY range.
  * @param value Proposed conditioning value.
  * @return Value in `[conditioningMinimum, conditioningMaximum]`.
@@ -176,23 +278,275 @@ enum class NodeState { liveBlue, frozenGold };
 /** @brief Direction of a graph pin. */
 enum class PinKind { input, output };
 
-/** @brief Coarse audio tensor shape used for interactive link validation. */
+/** @brief Coarse tensor shape used for interactive link validation. */
 struct ShapeSignature {
   /** @brief Channel count, or zero when inferred from the adjacent node. */
   int channels = 0;
-  /** @brief Human-readable temporal domain name. */
-  std::string domain{"audio"};
+  /**
+   * @brief Hop product along the path (host audio = 1).
+   *
+   * Zero means unspecified and matches any rate. PQMF analysis multiplies
+   * by `nBand`; downsample Conv1D multiplies by stride; upsample divides.
+   */
+  int temporalRate = 1;
+  /** @brief PQMF band count when set, otherwise 0 (unspecified). */
+  int nBand = 0;
 
-  /** @brief Returns whether this shape can connect to another endpoint. */
+  /**
+   * @brief Returns whether hop rate, band count, and channels agree.
+   * @param other Destination shape.
+   */
   [[nodiscard]] bool
   isCompatibleWith(const ShapeSignature &other) const noexcept {
-    return domain == other.domain &&
-           (channels == 0 || other.channels == 0 || channels == other.channels);
+    if (temporalRate != other.temporalRate && temporalRate > 0 &&
+        other.temporalRate > 0)
+      return false;
+    if (nBand > 0 && other.nBand > 0 && nBand != other.nBand)
+      return false;
+    return channels == 0 || other.channels == 0 || channels == other.channels;
+  }
+
+  /**
+   * @brief Explains the first failing compatibility field.
+   * @param other Destination shape.
+   * @return Empty when compatible; otherwise a tooltip sentence.
+   */
+  [[nodiscard]] std::string
+  incompatibilityMessage(const ShapeSignature &other) const {
+    if (temporalRate != other.temporalRate && temporalRate > 0 &&
+        other.temporalRate > 0)
+      return "Shape mismatch: temporal rate " + std::to_string(temporalRate) +
+             " cannot connect to " + std::to_string(other.temporalRate);
+    if (nBand > 0 && other.nBand > 0 && nBand != other.nBand)
+      return "Shape mismatch: nBand " + std::to_string(nBand) +
+             " cannot connect to " + std::to_string(other.nBand);
+    if (channels != 0 && other.channels != 0 && channels != other.channels)
+      return "Shape mismatch: channel counts are incompatible";
+    return {};
+  }
+
+  /**
+   * @brief Builds a compact user-facing label for pin headers.
+   * @return Empty when no concrete shape fields are known yet.
+   */
+  [[nodiscard]] std::string displayLabel() const {
+    if (channels <= 0 && temporalRate <= 0 && nBand <= 0)
+      return {};
+    std::string label;
+    if (channels > 0)
+      label += std::to_string(channels) + "ch";
+    if (nBand > 0) {
+      if (!label.empty())
+        label += " ";
+      label += "n" + std::to_string(nBand);
+    }
+    if (temporalRate > 1) {
+      if (!label.empty())
+        label += " ";
+      label += "×" + std::to_string(temporalRate);
+    }
+    return label;
   }
 };
 
+/**
+ * @brief Declared host Audio Input/Output channel mode.
+ *
+ * Mono and Mirrored both fold stereo host audio with `(L+R)/2`. Mirrored then
+ * copies that mono signal onto both channels so the graph stays 2-wide.
+ */
+enum class HostIoMode : int {
+  /** @brief Single-channel path. */
+  mono = 0,
+  /** @brief Mono content duplicated across two channels (L = R). */
+  mirrored = 1,
+  /** @brief Independent left and right channels. */
+  stereo = 2
+};
+
+/**
+ * @brief Returns the graph pin width for a host I/O mode.
+ * @param mode Declared Audio Input/Output mode.
+ * @return 1 for Mono, 2 for Mirrored or Stereo.
+ */
+inline int hostIoChannelsFromMode(HostIoMode mode) noexcept {
+  return mode == HostIoMode::mono ? 1 : 2;
+}
+
+/**
+ * @brief Parses a persisted Channels choice index into a host I/O mode.
+ * @param choiceIndex 0 = Mono, 1 = Mirrored, 2 = Stereo (legacy 1 = Stereo).
+ * @param legacyStereoPair True when the property still used Mono|Stereo only.
+ */
+inline HostIoMode hostIoModeFromChoice(int choiceIndex,
+                                       bool legacyStereoPair = false) noexcept {
+  if (legacyStereoPair)
+    return choiceIndex <= 0 ? HostIoMode::mono : HostIoMode::stereo;
+  switch (choiceIndex) {
+  case 0:
+    return HostIoMode::mono;
+  case 1:
+    return HostIoMode::mirrored;
+  default:
+    return HostIoMode::stereo;
+  }
+}
+
+/**
+ * @brief Maps a mono/stereo width to a default host I/O mode.
+ * @param channels Declared pin width.
+ * @return Mono for 1 channel, otherwise Stereo.
+ */
+inline HostIoMode hostIoModeFromChannels(int channels) noexcept {
+  return channels <= 1 ? HostIoMode::mono : HostIoMode::stereo;
+}
+
+/**
+ * @brief Returns the Channels choice index for a host I/O mode.
+ * @param mode Declared mode.
+ */
+inline int hostIoChoiceFromMode(HostIoMode mode) noexcept {
+  return static_cast<int>(mode);
+}
+
+/**
+ * @brief Short UI label for a host I/O mode.
+ * @param mode Declared mode.
+ */
+inline const char *hostIoModeLabel(HostIoMode mode) noexcept {
+  switch (mode) {
+  case HostIoMode::mono:
+    return "Mono";
+  case HostIoMode::mirrored:
+    return "Mirrored";
+  case HostIoMode::stereo:
+    break;
+  }
+  return "Stereo";
+}
+
+/**
+ * @brief Detail sentence for a host I/O mode.
+ * @param mode Declared mode.
+ * @param isInput True for Audio Input.
+ */
+inline std::string hostIoModeDetail(HostIoMode mode, bool isInput) {
+  const char *suffix = isInput ? " host input" : " host output";
+  switch (mode) {
+  case HostIoMode::mono:
+    return std::string("1ch graph; sum (L+R)/2") + suffix;
+  case HostIoMode::mirrored:
+    return std::string("2ch L=R; sum (L+R)/2 then copy") + suffix;
+  case HostIoMode::stereo:
+    break;
+  }
+  return std::string("Independent L/R") + suffix;
+}
+
+/** @brief @deprecated Prefer `hostIoChannelsFromMode`. */
+inline int hostIoChannelsFromChoice(int choiceIndex) noexcept {
+  return hostIoChannelsFromMode(hostIoModeFromChoice(choiceIndex));
+}
+
+/** @brief @deprecated Prefer `hostIoChoiceFromMode`. */
+inline int hostIoChoiceFromChannels(int channels) noexcept {
+  return hostIoChoiceFromMode(hostIoModeFromChannels(channels));
+}
+
+/**
+ * @brief Builds a tensor shape that inherits hop rate and nBand from a cable.
+ * @param channels Declared channels, or 0 when inferred.
+ */
+inline ShapeSignature flexibleTensorShape(int channels = 0) noexcept {
+  ShapeSignature shape;
+  shape.channels = channels;
+  shape.temporalRate = 0;
+  shape.nBand = 0;
+  return shape;
+}
+
+/**
+ * @brief Computes Conv1D output hop rate from an incoming rate and stride.
+ * @param inputRate Upstream temporal rate, or 0 when unknown.
+ * @param stride Integer hop ≥ 1. Stride 1 never changes rate.
+ * @param upsample True for ConvTranspose1d upsampling.
+ * @return Output rate, 0 when unknown, or -1 when upsample stride does not
+ *         divide @p inputRate.
+ */
+inline int convolutionOutputTemporalRate(int inputRate, int stride,
+                                         bool upsample) noexcept {
+  const auto hop = std::max(1, stride);
+  if (hop == 1 || inputRate <= 0)
+    return inputRate;
+  if (upsample) {
+    if (inputRate % hop != 0)
+      return -1;
+    return inputRate / hop;
+  }
+  if (inputRate > std::numeric_limits<int>::max() / hop)
+    return std::numeric_limits<int>::max();
+  return inputRate * hop;
+}
+
+/**
+ * @brief User-facing Conv1D warning or error for the current stride settings.
+ * @param stride Configured stride.
+ * @param upsample True for ConvTranspose1d upsampling.
+ * @param inputRate Incoming temporal rate, or 0 when unknown.
+ * @return Empty when the configuration is valid and needs no notice.
+ */
+inline std::string convolutionRateMessage(int stride, bool upsample,
+                                          int inputRate) {
+  const auto hop = std::max(1, stride);
+  if (hop == 1)
+    return std::string{};
+  if (upsample && inputRate > 0 && inputRate % hop != 0)
+    return "Upsample stride must divide incoming temporal rate " +
+           std::to_string(inputRate);
+  return {};
+}
+
+/**
+ * @brief Returns true when @p convolutionRateMessage is a hard error.
+ * @param stride Configured stride.
+ * @param upsample True for ConvTranspose1d upsampling.
+ * @param inputRate Incoming temporal rate, or 0 when unknown.
+ */
+inline bool convolutionRateIsError(int stride, bool upsample,
+                                   int inputRate) noexcept {
+  const auto hop = std::max(1, stride);
+  return hop > 1 && upsample && inputRate > 0 && inputRate % hop != 0;
+}
+
+/**
+ * @brief User-facing error when multiband channels are not grouped by nBand.
+ * @param channels Incoming channel count on a PQMF synthesis input.
+ * @param nBand Configured synthesis band count.
+ * @return Empty when the cable width is valid for synthesis.
+ */
+inline std::string pqmfSynthesisChannelMessage(int channels, int nBand) {
+  if (channels <= 0 || nBand <= 0)
+    return {};
+  if (channels % nBand == 0)
+    return {};
+  return "PQMF synthesis requires channel count to be a multiple of nBand (got " +
+         std::to_string(channels) + " for nBand " + std::to_string(nBand) +
+         ")";
+}
+
+/**
+ * @brief Returns true when @p pqmfSynthesisChannelMessage is a hard error.
+ * @param channels Incoming channel count on a PQMF synthesis input.
+ * @param nBand Configured synthesis band count.
+ */
+inline bool pqmfSynthesisChannelIsError(int channels, int nBand) noexcept {
+  return channels > 0 && nBand > 0 && channels % nBand != 0;
+}
+
 /** @brief User-visible label of the TCN/BlackBox control (former FiLM) pin. */
 inline constexpr const char *controlPinLabel = "control";
+/** @brief User-visible label of Gold RAVE encode/decode latent pins. */
+inline constexpr const char *latentPinLabel = "latent";
 
 /** @brief A stable endpoint belonging to one graph node. */
 struct Pin {
@@ -202,20 +556,28 @@ struct Pin {
   std::string label;
   /** @brief Input or output direction. */
   PinKind kind = PinKind::input;
-  /** @brief Audio shape accepted or produced by the endpoint. */
+  /** @brief Tensor shape accepted or produced by the endpoint. */
   ShapeSignature shape;
-  /** @brief Whether this pin carries audio or scalar conditioning. */
-  SignalKind signalKind = SignalKind::audio;
 };
 
 /**
- * @brief Returns true for the TCN/BlackBox control input (accepts any signal).
+ * @brief Returns true for the TCN/BlackBox control input (FiLM).
+ *
+ * Pin role only: any shape-compatible tensor may be wired here, including
+ * host audio.
  * @param pin Endpoint to inspect.
  */
 inline bool isControlInputPin(const Pin &pin) noexcept {
   return pin.kind == PinKind::input &&
-         (pin.signalKind == SignalKind::conditioning || pin.label == "film" ||
-          pin.label == controlPinLabel);
+         (pin.label == "film" || pin.label == controlPinLabel);
+}
+
+/**
+ * @brief Returns true for Gold RAVE encode/decode latent endpoints.
+ * @param pin Endpoint to inspect.
+ */
+inline bool isLatentPin(const Pin &pin) noexcept {
+  return pin.label == latentPinLabel;
 }
 
 /** @brief Value type accepted by an inline graph property. */
@@ -325,6 +687,10 @@ struct GraphNode {
   std::string weightsPath;
   /** @brief How a Gold BlackBox was produced. */
   BlackBoxOrigin blackBoxOrigin = BlackBoxOrigin::manualFreeze;
+  /** @brief Live fidelity percent applied inside bottleneck/Gold encode. */
+  float fidelityPercent = defaultFidelityPercent;
+  /** @brief True when compactness PCA buffers are present on the artifact. */
+  bool compactnessReady = false;
 };
 
 /** @brief Directed connection between two graph pins. */
@@ -387,6 +753,8 @@ struct FreezeSelectionResult {
   bool acceptsConditioning = false;
   /** @brief FiLM control width the artifact was traced with, or 0 if unused. */
   int condDim = 0;
+  /** @brief True when the artifact exports encode/decode in addition to forward. */
+  bool hasEncodeDecode = false;
 };
 
 /** @brief Serializable train job sent to the Python train worker. */
@@ -429,6 +797,12 @@ struct TrainJobResult {
   bool acceptsConditioning = false;
   /** @brief FiLM control width the artifact was traced with, or 0 if unknown. */
   int condDim = 0;
+  /** @brief Reconstruction stage token (`representation`|`quality`), else empty. */
+  std::string stage;
+  /** @brief Selected Train objective echoed by the worker. */
+  std::string objective;
+  /** @brief True when the artifact exposes encode/decode methods. */
+  bool hasEncodeDecode = false;
 };
 
 /** @brief Inclusive lower bound for element randomization seeds. */

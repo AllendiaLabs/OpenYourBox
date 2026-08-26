@@ -218,6 +218,10 @@ void TrainCoordinator::applyProgressObject(const juce::var &parsed) {
       parsed.getProperty("learning_rate", progress.learningRate));
   progress.artifactPath = jsonString(parsed, "artifact_path");
   progress.errorMessage = jsonString(parsed, "error_message");
+  progress.stage = jsonString(parsed, "stage");
+  progress.objective = jsonString(parsed, "objective");
+  progress.hasEncodeDecode =
+      static_cast<bool>(parsed.getProperty("has_encode_decode", false));
   if (progress.errorMessage.empty())
     progress.errorMessage = jsonString(parsed, "message");
   if (!progress.artifactPath.empty())

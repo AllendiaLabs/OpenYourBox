@@ -136,13 +136,22 @@ void TrainingLibrary::load() {
       entry.notes = item.getProperty("notes", {}).toString();
       entry.selectedForTrain =
           static_cast<bool>(item.getProperty("selectedForTrain", false));
+      const auto kindName = item.getProperty("kind", "pair").toString();
+      entry.kind = kindName == "clip" ? LibraryEntryKind::clip
+                                      : LibraryEntryKind::pair;
       const auto tags = item.getProperty("tags", juce::var());
       if (auto *tagArray = tags.getArray()) {
         for (const auto &tag : *tagArray)
           entry.tags.add(tag.toString());
       }
-      if (entry.id.isNotEmpty())
+      if (entry.id.isNotEmpty()) {
+        if (!entry.tags.contains(entry.kind == LibraryEntryKind::clip
+                                     ? "unpaired"
+                                     : "pair"))
+          entry.tags.add(entry.kind == LibraryEntryKind::clip ? "unpaired"
+                                                              : "pair");
         entries.push_back(std::move(entry));
+      }
     }
   }
   const auto selected = parsed.getProperty("selectedPairIds", juce::var());
@@ -175,6 +184,8 @@ bool TrainingLibrary::save() const {
     object->setProperty("byteSize", entry.byteSize);
     object->setProperty("notes", entry.notes);
     object->setProperty("selectedForTrain", entry.selectedForTrain);
+    object->setProperty("kind",
+                        entry.kind == LibraryEntryKind::clip ? "clip" : "pair");
     juce::Array<juce::var> tags;
     for (const auto &tag : entry.tags)
       tags.add(tag);
@@ -262,7 +273,8 @@ bool TrainingLibrary::removeEntry(const juce::String &id) {
   if (entry == nullptr)
     return false;
   juce::File(entry->xPath).deleteFile();
-  juce::File(entry->yPath).deleteFile();
+  if (entry->yPath.isNotEmpty())
+    juce::File(entry->yPath).deleteFile();
   entries.erase(std::remove_if(entries.begin(), entries.end(),
                                [&id](const TrainingLibraryEntry &candidate) {
                                  return candidate.id == id;
@@ -324,6 +336,8 @@ TrainingLibrary::importPair(const juce::File &cleanFile,
   entry.displayName = cleanFile.getFileNameWithoutExtension() + " / " +
                       processedFile.getFileNameWithoutExtension();
   entry.selectedForTrain = true;
+  entry.kind = LibraryEntryKind::pair;
+  entry.tags.add("pair");
   if (!writeAlignedPair(cleanFile, processedFile, entry.id, entry, error))
     return std::nullopt;
   entries.push_back(entry);
@@ -364,6 +378,8 @@ std::optional<TrainingLibraryEntry> TrainingLibrary::addCapturedPair(
   entry.yPath = destY.getFullPathName();
   entry.byteSize = destX.getSize() + destY.getSize();
   entry.selectedForTrain = true;
+  entry.kind = LibraryEntryKind::pair;
+  entry.tags.add("pair");
   entries.push_back(entry);
   if (!save()) {
     error = "Could not persist the training library index";
@@ -415,5 +431,83 @@ double TrainingLibrary::getSelectedDurationSeconds() const noexcept {
       total += entry.durationSeconds;
   }
   return total;
+}
+
+bool TrainingLibrary::selectedContainsUnpaired() const noexcept {
+  for (const auto &entry : entries) {
+    if (entry.selectedForTrain && entry.kind == LibraryEntryKind::clip)
+      return true;
+  }
+  return false;
+}
+
+std::optional<TrainingLibraryEntry>
+TrainingLibrary::importClip(const juce::File &audioFile, juce::String &error) {
+  juce::AudioBuffer<float> buffer;
+  double sampleRate = 0.0;
+  if (!readAudioFile(audioFile, buffer, sampleRate, error))
+    return std::nullopt;
+  TrainingLibraryEntry entry;
+  entry.id = juce::Uuid().toDashedString();
+  entry.source = PairSource::imported;
+  entry.kind = LibraryEntryKind::clip;
+  entry.createdAt = juce::Time::getCurrentTime().toISO8601(true);
+  entry.displayName = audioFile.getFileNameWithoutExtension();
+  entry.selectedForTrain = true;
+  entry.tags.add("unpaired");
+  const auto dest = root.getChildFile(entry.id + "_clip.wav");
+  if (!writeWavFile(dest, buffer, sampleRate, error))
+    return std::nullopt;
+  entry.xPath = dest.getFullPathName();
+  entry.sampleRate = sampleRate;
+  entry.channels = buffer.getNumChannels();
+  entry.durationSeconds =
+      sampleRate > 0.0 ? static_cast<double>(buffer.getNumSamples()) / sampleRate
+                       : 0.0;
+  entry.byteSize = dest.getSize();
+  entries.push_back(entry);
+  if (!save()) {
+    error = "Could not persist the training library index";
+    return std::nullopt;
+  }
+  return entry;
+}
+
+std::optional<TrainingLibraryEntry> TrainingLibrary::addCapturedClip(
+    const juce::String &displayName, const juce::File &audioFile,
+    double sampleRate, int channels, double durationSeconds,
+    juce::String &error) {
+  if (!audioFile.existsAsFile()) {
+    error = "Capture file was not written";
+    return std::nullopt;
+  }
+  TrainingLibraryEntry entry;
+  entry.id = juce::Uuid().toDashedString();
+  entry.source = PairSource::capture;
+  entry.kind = LibraryEntryKind::clip;
+  entry.createdAt = juce::Time::getCurrentTime().toISO8601(true);
+  entry.displayName =
+      displayName.isNotEmpty()
+          ? displayName
+          : juce::String("Clip ") +
+                juce::Time::getCurrentTime().formatted("%Y-%m-%d %H:%M");
+  entry.sampleRate = sampleRate;
+  entry.channels = channels;
+  entry.durationSeconds = durationSeconds;
+  entry.tags.add("unpaired");
+  const auto dest = root.getChildFile(entry.id + "_clip.wav");
+  if (!audioFile.copyFileTo(dest)) {
+    error = "Could not copy captured audio into the library";
+    return std::nullopt;
+  }
+  entry.xPath = dest.getFullPathName();
+  entry.byteSize = dest.getSize();
+  entry.selectedForTrain = true;
+  entries.push_back(entry);
+  if (!save()) {
+    error = "Could not persist the training library index";
+    return std::nullopt;
+  }
+  return entry;
 }
 } // namespace openyourbox::library

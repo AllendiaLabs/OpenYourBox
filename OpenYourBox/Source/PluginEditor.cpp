@@ -44,6 +44,7 @@ OpenYourBoxAudioProcessorEditor::OpenYourBoxAudioProcessorEditor(
   setResizeLimits(760, 480, 1920, 1200);
   addAndMakeVisible(imguiHost);
   setSize(1100, 680);
+  trainPanel.objective = audioProcessor.getLastTrainObjective();
 }
 
 OpenYourBoxAudioProcessorEditor::~OpenYourBoxAudioProcessorEditor() = default;
@@ -258,6 +259,7 @@ void OpenYourBoxAudioProcessorEditor::renderFrame() {
   } else if (sidePanelTab == 1) {
     openyourbox::ui::TrainingLibraryPanel::Callbacks libraryCallbacks;
     libraryCallbacks.importPair = [this] { handleLibraryImport(); };
+    libraryCallbacks.importClip = [this] { handleLibraryImportClip(); };
     libraryCallbacks.rename = [&library](const juce::String &id,
                                          const juce::String &name) {
       library.rename(id, name);
@@ -272,6 +274,7 @@ void OpenYourBoxAudioProcessorEditor::renderFrame() {
             juce::File(playX ? entry->xPath : entry->yPath));
     };
     libraryCallbacks.stopPreview = [this] { audioProcessor.stopPreview(); };
+    libraryPanel.objective = trainPanel.objective;
     libraryPanel.render(library, libraryCallbacks,
                         audioProcessor.isPreviewPlaying());
   } else if (sidePanelTab == 2) {
@@ -302,6 +305,9 @@ void OpenYourBoxAudioProcessorEditor::renderFrame() {
     captureCallbacks.startRecording = [this] {
       audioProcessor.startPairedRecording();
     };
+    captureCallbacks.startSingleRecording = [this] {
+      audioProcessor.startSingleRecording();
+    };
     captureCallbacks.stopRecording = [this] {
       audioProcessor.stopPairedRecording();
     };
@@ -328,6 +334,14 @@ void OpenYourBoxAudioProcessorEditor::renderFrame() {
     gates.isMaster = pairing.getPairingRole() !=
                      openyourbox::capture::PairingRole::slave;
     gates.retryAvailable = retryTrainResult.has_value();
+    gates.unpairedSelected =
+        library.selectedContainsUnpaired();
+    gates.reconstructionPathInvalid =
+        trainPanel.objective ==
+            openyourbox::graph::TrainObjective::reconstruction &&
+        !nodeGraph.hasReconstructionTrainPath();
+    gates.reconstructionReason =
+        juce::String(nodeGraph.reconstructionGateMessage());
     openyourbox::ui::TrainPanel::Callbacks trainCallbacks;
     trainCallbacks.run = [this] { handleTrainRun(); };
     trainCallbacks.pause = [this] { trainCoordinator.pause(); };
@@ -683,6 +697,18 @@ void OpenYourBoxAudioProcessorEditor::handleTrainRun() {
     showError(mixed);
     return;
   }
+  if (trainPanel.objective == openyourbox::graph::TrainObjective::mapping &&
+      audioProcessor.getTrainingLibrary().selectedContainsUnpaired()) {
+    showError("Mapping cannot train unpaired clips. Deselect them or switch to reconstruction.");
+    return;
+  }
+  if (trainPanel.objective ==
+          openyourbox::graph::TrainObjective::reconstruction &&
+      !nodeGraph.hasReconstructionTrainPath()) {
+    showError(juce::String(nodeGraph.reconstructionGateMessage()));
+    return;
+  }
+  audioProcessor.setLastTrainObjective(trainPanel.objective);
   auto request = nodeGraph.createTrainRequest();
   if (!request.has_value()) {
     showError("Arm at least one trainable element before Train");
@@ -693,13 +719,23 @@ void OpenYourBoxAudioProcessorEditor::handleTrainRun() {
   if (root == nullptr)
     return;
   juce::Array<juce::var> pairs;
+  juce::Array<juce::var> clips;
   for (const auto &entry : audioProcessor.getTrainingLibrary().getEntries()) {
     if (!entry.selectedForTrain)
       continue;
+    if (entry.kind == openyourbox::library::LibraryEntryKind::clip) {
+      auto clip = std::make_unique<juce::DynamicObject>();
+      clip->setProperty("clip_id", entry.id);
+      clip->setProperty("path", entry.xPath);
+      clip->setProperty("kind", "clip");
+      clips.add(juce::var(clip.release()));
+      continue;
+    }
     auto pair = std::make_unique<juce::DynamicObject>();
     pair->setProperty("pair_id", entry.id);
     pair->setProperty("x_path", entry.xPath);
     pair->setProperty("y_path", entry.yPath);
+    pair->setProperty("kind", "pair");
     pair->setProperty("source", entry.source ==
                                         openyourbox::library::PairSource::capture
                                     ? "capture"
@@ -708,9 +744,19 @@ void OpenYourBoxAudioProcessorEditor::handleTrainRun() {
   }
   auto captureSet = std::make_unique<juce::DynamicObject>();
   captureSet->setProperty("pairs", pairs);
+  captureSet->setProperty("clips", clips);
   root->setProperty("capture_set", juce::var(captureSet.release()));
   auto options = std::make_unique<juce::DynamicObject>();
   options->setProperty("optimizer", "adam");
+  options->setProperty(
+      "objective",
+      juce::String(openyourbox::graph::trainObjectiveName(trainPanel.objective)));
+  auto reconstruction = std::make_unique<juce::DynamicObject>();
+  reconstruction->setProperty("stage1_steps",
+                              openyourbox::graph::defaultReconstructionStage1Steps);
+  reconstruction->setProperty("stage2_steps",
+                              openyourbox::graph::defaultReconstructionStage2Steps);
+  options->setProperty("reconstruction", juce::var(reconstruction.release()));
   auto loss = std::make_unique<juce::DynamicObject>();
   loss->setProperty("type", "multiresolution_stft");
   loss->setProperty("fft_sizes", juce::Array<juce::var>{32, 128, 512, 2048});
@@ -839,6 +885,24 @@ void OpenYourBoxAudioProcessorEditor::focusLibraryTab() {
 
 void OpenYourBoxAudioProcessorEditor::handleLibraryImport() {
   juce::MessageManager::callAsync([this] { promptLibraryImportClean(); });
+}
+
+void OpenYourBoxAudioProcessorEditor::handleLibraryImportClip() {
+  fileChooser = std::make_shared<juce::FileChooser>(
+      "Import unpaired clip", openyourbox::library::samplesDirectory(),
+      "*.wav;*.aiff;*.flac");
+  fileChooser->launchAsync(juce::FileBrowserComponent::openMode |
+                               juce::FileBrowserComponent::canSelectFiles,
+                           [this](const juce::FileChooser &chosen) {
+                             const auto file = chosen.getResult();
+                             fileChooser.reset();
+                             if (!file.existsAsFile())
+                               return;
+                             juce::String error;
+                             if (!audioProcessor.getTrainingLibrary().importClip(
+                                     file, error))
+                               showError(error);
+                           });
 }
 
 void OpenYourBoxAudioProcessorEditor::promptLibraryImportClean() {
