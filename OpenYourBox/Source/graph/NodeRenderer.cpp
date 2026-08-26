@@ -633,61 +633,71 @@ void NodeRenderer::renderNode(NodeGraph &graph, GraphNode &node,
   }
 
   if (node.hasWeights && node.state == NodeState::liveBlue) {
-    const auto insertion = seedBuffers.try_emplace(node.id);
-    auto &seedBuffer = insertion.first->second;
-    if (insertion.second)
-      std::snprintf(seedBuffer.data(), seedBuffer.size(), "%d",
-                    node.useExplicitSeed ? node.explicitSeed : node.seed);
-    if (!node.useExplicitSeed)
-      std::snprintf(seedBuffer.data(), seedBuffer.size(), "%d", node.seed);
-
-    const auto rowStart = ImGui::GetCursorPosX();
-    ImGui::TextUnformatted("Seed");
-    ImGui::SameLine();
-    constexpr float seedControlWidth = 96.0f;
-    ImGui::SetCursorPosX(rowStart + nodeBodyWidth - seedControlWidth);
-    if (ImGui::Checkbox("##useExplicitSeed", &node.useExplicitSeed)) {
-      if (node.useExplicitSeed)
-        std::snprintf(seedBuffer.data(), seedBuffer.size(), "%d",
-                      node.explicitSeed);
-      else
-        std::snprintf(seedBuffer.data(), seedBuffer.size(), "%d", node.seed);
-      mutatedThisFrame = true;
-    }
-    ImGui::SameLine();
-    ImGui::SetNextItemWidth(seedControlWidth - ImGui::GetFrameHeight() - 8.0f);
-    if (!node.useExplicitSeed)
-      ImGui::BeginDisabled();
-    if (ImGui::InputText("##seed", seedBuffer.data(), seedBuffer.size(),
-                         ImGuiInputTextFlags_EnterReturnsTrue)) {
-      std::int32_t parsed = 0;
-      const auto *begin = seedBuffer.data();
-      const auto *end = begin + std::strlen(begin);
-      const auto result = std::from_chars(begin, end, parsed);
-      if (result.ec == std::errc{} && result.ptr == end &&
-          parsed >= minimumSeed && parsed <= maximumSeed) {
-        graph.setSeed(node.id, parsed);
-        node.seed = clampSeed(parsed);
-        node.explicitSeed = node.seed;
-        mutatedThisFrame = true;
-      } else {
-        transientMessage = "Seed must be an integer between 0 and 999999";
-        transientMessageDeadline = ImGui::GetTime() + 2.5;
-        if (callbacks.showMessage)
-          callbacks.showMessage(transientMessage);
+    const auto isBatchNorm =
+        node.type == openyourbox::graph::NodeType::batchNorm;
+    if (!isBatchNorm) {
+      const auto insertion = seedBuffers.try_emplace(node.id);
+      auto &seedBuffer = insertion.first->second;
+      if (insertion.second)
         std::snprintf(seedBuffer.data(), seedBuffer.size(), "%d",
                       node.useExplicitSeed ? node.explicitSeed : node.seed);
+      if (!node.useExplicitSeed)
+        std::snprintf(seedBuffer.data(), seedBuffer.size(), "%d", node.seed);
+
+      const auto rowStart = ImGui::GetCursorPosX();
+      ImGui::TextUnformatted("Seed");
+      ImGui::SameLine();
+      constexpr float seedControlWidth = 96.0f;
+      ImGui::SetCursorPosX(rowStart + nodeBodyWidth - seedControlWidth);
+      if (ImGui::Checkbox("##useExplicitSeed", &node.useExplicitSeed)) {
+        if (node.useExplicitSeed)
+          std::snprintf(seedBuffer.data(), seedBuffer.size(), "%d",
+                        node.explicitSeed);
+        else
+          std::snprintf(seedBuffer.data(), seedBuffer.size(), "%d", node.seed);
+        mutatedThisFrame = true;
       }
+      ImGui::SameLine();
+      ImGui::SetNextItemWidth(seedControlWidth - ImGui::GetFrameHeight() - 8.0f);
+      if (!node.useExplicitSeed)
+        ImGui::BeginDisabled();
+      if (ImGui::InputText("##seed", seedBuffer.data(), seedBuffer.size(),
+                           ImGuiInputTextFlags_EnterReturnsTrue)) {
+        std::int32_t parsed = 0;
+        const auto *begin = seedBuffer.data();
+        const auto *end = begin + std::strlen(begin);
+        const auto result = std::from_chars(begin, end, parsed);
+        if (result.ec == std::errc{} && result.ptr == end &&
+            parsed >= minimumSeed && parsed <= maximumSeed) {
+          graph.setSeed(node.id, parsed);
+          node.seed = clampSeed(parsed);
+          node.explicitSeed = node.seed;
+          mutatedThisFrame = true;
+        } else {
+          transientMessage = "Seed must be an integer between 0 and 999999";
+          transientMessageDeadline = ImGui::GetTime() + 2.5;
+          if (callbacks.showMessage)
+            callbacks.showMessage(transientMessage);
+          std::snprintf(seedBuffer.data(), seedBuffer.size(), "%d",
+                        node.useExplicitSeed ? node.explicitSeed : node.seed);
+        }
+      }
+      if (!node.useExplicitSeed)
+        ImGui::EndDisabled();
     }
-    if (!node.useExplicitSeed)
-      ImGui::EndDisabled();
+
     const char *weightsActionLabel =
-        node.type == openyourbox::graph::NodeType::batchNorm ? "Reset"
-                                                             : "Randomize Weights";
+        isBatchNorm ? "Reset" : "Randomize Weights";
     if (ImGui::Button(weightsActionLabel, ImVec2(nodeBodyWidth, 0.0f)) &&
         callbacks.randomizeNode) {
-      auto appliedSeed = node.explicitSeed;
-      if (node.useExplicitSeed) {
+      std::int32_t appliedSeed = node.seed;
+      if (isBatchNorm) {
+        // BatchNorm Reset restores identity affine + stats; seed is unused.
+        appliedSeed = 0;
+        graph.setSeed(node.id, appliedSeed);
+        node.seed = appliedSeed;
+      } else if (node.useExplicitSeed) {
+        auto &seedBuffer = seedBuffers[node.id];
         std::int32_t parsed = 0;
         const auto *begin = seedBuffer.data();
         const auto *end = begin + std::strlen(begin);
@@ -698,8 +708,11 @@ void NodeRenderer::renderNode(NodeGraph &graph, GraphNode &node,
           graph.setSeed(node.id, appliedSeed);
           node.seed = appliedSeed;
           node.explicitSeed = appliedSeed;
+        } else {
+          appliedSeed = node.explicitSeed;
         }
       } else {
+        auto &seedBuffer = seedBuffers[node.id];
         appliedSeed = juce::Random::getSystemRandom().nextInt(maximumSeed + 1);
         graph.setSeed(node.id, appliedSeed);
         node.seed = appliedSeed;
@@ -726,6 +739,8 @@ void NodeRenderer::renderNode(NodeGraph &graph, GraphNode &node,
         !node.weightsPath.empty())
       ImGui::TextWrapped("Weights: %s",
                          juce::File(node.weightsPath).getFileName().toRawUTF8());
+    else if (node.type == NodeType::batchNorm)
+      ImGui::TextUnformatted("Weights: identity");
     else
       ImGui::Text("Weights: seed %d", node.seed);
     if (ImGui::SmallButton("Browse weights") && callbacks.browseWeights)
