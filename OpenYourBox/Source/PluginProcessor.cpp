@@ -57,12 +57,19 @@ OpenYourBoxAudioProcessor::OpenYourBoxAudioProcessor()
   capturePairing.setMessageHandler([this](const juce::var &message) {
     handlePairingMessage(message);
   });
+  editHistory.setApplyFn([this](const openyourbox::state::PatchSnapshot &snapshot,
+                                const openyourbox::state::CurrentPresetState
+                                    &association) {
+    return applyHistorySnapshot(snapshot, association);
+  });
   startTimerHz(20);
 }
 
 OpenYourBoxAudioProcessor::~OpenYourBoxAudioProcessor() {
   stopTimer();
   cancelPendingUpdate();
+  onPatchApplied = nullptr;
+  editHistory.setApplyFn({});
   modelBuilder.setPublishCallback({});
   for (const auto *identifier : listenedParameterIDs)
     parameters.removeParameterListener(identifier, this);
@@ -273,85 +280,211 @@ juce::AudioProcessorEditor *OpenYourBoxAudioProcessor::createEditor() {
 
 void OpenYourBoxAudioProcessor::getStateInformation(
     juce::MemoryBlock &destData) {
-  auto xml = parameters.copyState().createXml();
-  const auto snapshot = modelBuilder.getPublishedModel();
+  if (auto xml = capturePatchSnapshot().toXml())
+    copyXmlToBinary(*xml, destData);
+}
+
+openyourbox::state::PatchSnapshot
+OpenYourBoxAudioProcessor::capturePatchSnapshot() {
+  openyourbox::state::PatchSnapshot snapshot;
+  snapshot.parameterState = parameters.copyState();
   {
     const juce::ScopedLock lock(graphStateLock);
     if (persistedGraphState.isValid())
-      xml->addChildElement(persistedGraphState.createXml().release());
+      snapshot.graphDocument = persistedGraphState.createCopy();
   }
+  snapshot.randomizationCounter =
+      randomizationCounter.load(std::memory_order_acquire);
+  snapshot.lastTrainObjective = juce::String(
+      openyourbox::graph::trainObjectiveName(lastTrainObjective));
 
-  if (snapshot != nullptr && snapshot->model != nullptr) {
+  const auto published = modelBuilder.getPublishedModel();
+  if (published != nullptr && published->model != nullptr) {
     std::ostringstream stream(std::ios::binary);
     torch::serialize::OutputArchive archive;
-    snapshot->model->save(archive);
+    published->model->save(archive);
     archive.save_to(stream);
     const auto bytes = stream.str();
-    const juce::MemoryBlock weights(bytes.data(), bytes.size());
-
-    xml->setAttribute("architectureHash",
-                      juce::String::toHexString(static_cast<juce::int64>(
-                          snapshot->model->getArchitectureHash())));
-    xml->setAttribute("randomizationCounter",
-                      juce::String(snapshot->randomizationCounter));
-    xml->setAttribute("weights", weights.toBase64Encoding());
+    snapshot.weightsBlob =
+        juce::MemoryBlock(bytes.data(), bytes.size());
+    snapshot.hasWeights = true;
+    snapshot.architectureHash = juce::String::toHexString(
+        static_cast<juce::int64>(published->model->getArchitectureHash()));
+    snapshot.randomizationCounter = published->randomizationCounter;
   }
-
-  xml->setAttribute("lastTrainObjective",
-                    juce::String(openyourbox::graph::trainObjectiveName(
-                        lastTrainObjective)));
-  copyXmlToBinary(*xml, destData);
+  return snapshot;
 }
 
-void OpenYourBoxAudioProcessor::setStateInformation(const void *data,
-                                                   int sizeInBytes) {
-  const auto xml = getXmlFromBinary(data, sizeInBytes);
-  if (xml == nullptr || !xml->hasTagName(parameters.state.getType().toString()))
-    return;
-
-  restoringState.store(true, std::memory_order_release);
-  auto restoredState = juce::ValueTree::fromXml(*xml);
-  const auto restoredGraph = restoredState.getChildWithName("GraphDocument");
-  if (restoredGraph.isValid()) {
-    const juce::ScopedLock lock(graphStateLock);
-    persistedGraphState = restoredGraph.createCopy();
-    restoredState.removeChild(restoredGraph, nullptr);
+bool OpenYourBoxAudioProcessor::applyPatchSnapshot(
+    const openyourbox::state::PatchSnapshot &snapshot,
+    const openyourbox::state::ApplyOptions &options, juce::String &error) {
+  juce::String restoreError;
+  if (!snapshot.isValid() || !openyourbox::state::graphDocumentIsRestorable(
+                                 snapshot.graphDocument, restoreError)) {
+    error = restoreError.isNotEmpty()
+                ? restoreError
+                : juce::String("Patch snapshot is not restorable");
+    return false;
   }
-  parameters.replaceState(restoredState);
+  if (options.weightPolicy ==
+          openyourbox::state::ApplyOptions::WeightPolicy::failClosed &&
+      !snapshot.referencedArtifactsExist(restoreError)) {
+    error = restoreError;
+    return false;
+  }
+
+  auto incoming = snapshot;
+  if (options.preserveViewport) {
+    const juce::ScopedLock lock(graphStateLock);
+    incoming.copyViewportFrom(persistedGraphState);
+  }
+
+  const auto rollback = applyingSnapshot;
+  openyourbox::state::PatchSnapshot backup;
+  openyourbox::state::CurrentPresetState backupPreset;
+  if (!rollback) {
+    backup = capturePatchSnapshot();
+    backupPreset = currentPreset;
+  }
+
+  applyingSnapshot = true;
+  const auto wasSuppressed = editHistory.isSuppressed();
+  editHistory.setSuppressed(true);
+  restoringState.store(true, std::memory_order_release);
+  {
+    const juce::ScopedLock lock(graphStateLock);
+    persistedGraphState = incoming.graphDocument.createCopy();
+  }
+  parameters.replaceState(incoming.parameterState.createCopy());
   lastTrainObjective = openyourbox::graph::trainObjectiveFromName(
-      xml->getStringAttribute("lastTrainObjective", "mapping").toStdString());
+      incoming.lastTrainObjective.toStdString());
+  randomizationCounter.store(incoming.randomizationCounter,
+                             std::memory_order_release);
   restoringState.store(false, std::memory_order_release);
 
-  const auto counter = static_cast<std::uint64_t>(
-      xml->getStringAttribute("randomizationCounter", "0").getLargeIntValue());
-  randomizationCounter.store(counter, std::memory_order_release);
   const auto seed = static_cast<std::uint64_t>(
       parameters.getRawParameterValue(openyourbox::params::globalSeed)->load());
-  auto snapshot = modelBuilder.buildNow(getRequestedConfiguration(),
-                                        seed + counter, counter);
+  auto published = modelBuilder.buildNow(getRequestedConfiguration(),
+                                         seed + incoming.randomizationCounter,
+                                         incoming.randomizationCounter);
 
-  if (snapshot != nullptr && xml->hasAttribute("weights")) {
+  auto weightsOk = true;
+  if (incoming.hasWeights && published != nullptr && published->model != nullptr) {
     const auto expectedHash = static_cast<std::uint64_t>(
-        xml->getStringAttribute("architectureHash").getHexValue64());
-    juce::MemoryBlock weights;
-
-    if (expectedHash == snapshot->model->getArchitectureHash() &&
-        weights.fromBase64Encoding(xml->getStringAttribute("weights"))) {
+        incoming.architectureHash.getHexValue64());
+    if (expectedHash != published->model->getArchitectureHash()) {
+      weightsOk = false;
+    } else {
       try {
-        const std::string bytes(static_cast<const char *>(weights.getData()),
-                                weights.getSize());
+        const std::string bytes(
+            static_cast<const char *>(incoming.weightsBlob.getData()),
+            incoming.weightsBlob.getSize());
         std::istringstream stream(bytes, std::ios::binary);
         torch::serialize::InputArchive archive;
         archive.load_from(stream);
-        snapshot->model->load(archive);
+        published->model->load(archive);
       } catch (const std::exception &) {
-        // The deterministic seed/counter model remains a valid fallback.
+        weightsOk = false;
       }
     }
+  } else if (incoming.hasWeights) {
+    weightsOk = false;
   }
 
-  publishRuntime(snapshot);
+  if (!weightsOk && options.weightPolicy ==
+                        openyourbox::state::ApplyOptions::WeightPolicy::failClosed) {
+    if (!rollback) {
+      currentPreset = backupPreset;
+      openyourbox::state::ApplyOptions fallback;
+      fallback.weightPolicy =
+          openyourbox::state::ApplyOptions::WeightPolicy::hostFallback;
+      juce::String ignored;
+      applyPatchSnapshot(backup, fallback, ignored);
+    }
+    applyingSnapshot = rollback;
+    editHistory.setSuppressed(wasSuppressed);
+    error = "Preset weights or Gold artifacts could not be restored";
+    return false;
+  }
+
+  publishRuntime(published);
   requestGraphCompile();
+  applyingSnapshot = rollback;
+  editHistory.setSuppressed(wasSuppressed);
+  if (onPatchApplied)
+    onPatchApplied();
+  return true;
+}
+
+void OpenYourBoxAudioProcessor::setStateInformation(const void *data,
+                                                    int sizeInBytes) {
+  const auto xml = getXmlFromBinary(data, sizeInBytes);
+  if (xml == nullptr || !xml->hasTagName(parameters.state.getType().toString()))
+    return;
+  const auto parsed = openyourbox::state::PatchSnapshot::fromXml(*xml);
+  if (!parsed.has_value())
+    return;
+  juce::String error;
+  openyourbox::state::ApplyOptions options;
+  options.weightPolicy =
+      openyourbox::state::ApplyOptions::WeightPolicy::hostFallback;
+  applyPatchSnapshot(*parsed, options, error);
+}
+
+openyourbox::state::EditHistory &
+OpenYourBoxAudioProcessor::getEditHistory() noexcept {
+  return editHistory;
+}
+
+const openyourbox::state::EditHistory &
+OpenYourBoxAudioProcessor::getEditHistory() const noexcept {
+  return editHistory;
+}
+
+openyourbox::state::CurrentPresetState &
+OpenYourBoxAudioProcessor::getCurrentPreset() noexcept {
+  return currentPreset;
+}
+
+const openyourbox::state::CurrentPresetState &
+OpenYourBoxAudioProcessor::getCurrentPreset() const noexcept {
+  return currentPreset;
+}
+
+void OpenYourBoxAudioProcessor::setCurrentPreset(
+    openyourbox::state::CurrentPresetState next) {
+  currentPreset = std::move(next);
+}
+
+void OpenYourBoxAudioProcessor::markPresetDirty() {
+  if (currentPreset.isAssociated())
+    currentPreset.dirty = true;
+}
+
+void OpenYourBoxAudioProcessor::clearPresetDirty(const juce::String &fingerprint) {
+  currentPreset.dirty = false;
+  currentPreset.baselineFingerprint = fingerprint;
+}
+
+void OpenYourBoxAudioProcessor::refreshPresetDirtyFromFingerprint(
+    const juce::String &fingerprint) {
+  if (!currentPreset.isAssociated()) {
+    currentPreset.dirty = false;
+    return;
+  }
+  currentPreset.dirty = fingerprint != currentPreset.baselineFingerprint;
+}
+
+bool OpenYourBoxAudioProcessor::applyHistorySnapshot(
+    const openyourbox::state::PatchSnapshot &snapshot,
+    const openyourbox::state::CurrentPresetState &association) {
+  currentPreset = association;
+  juce::String error;
+  openyourbox::state::ApplyOptions options;
+  options.weightPolicy =
+      openyourbox::state::ApplyOptions::WeightPolicy::hostFallback;
+  options.preserveViewport = true;
+  return applyPatchSnapshot(snapshot, options, error);
 }
 
 juce::AudioProcessorValueTreeState &

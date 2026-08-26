@@ -262,8 +262,9 @@ void normalizePhase3Node(openyourbox::graph::GraphNode &node) {
   using openyourbox::graph::PropertyKind;
   using openyourbox::graph::defaultDilationGrowth;
   using openyourbox::graph::isTrainableType;
-  using openyourbox::graph::maximumDilationGrowth;
   using openyourbox::graph::minimumDilationGrowth;
+  using openyourbox::graph::unlimitedPropertyMaximum;
+  using openyourbox::graph::widenIntegerPropertyBounds;
 
   auto ensureActivationChoices = [](NodeProperty &property) {
     if (property.key != "activation")
@@ -304,8 +305,10 @@ void normalizePhase3Node(openyourbox::graph::GraphNode &node) {
     node.properties.push_back(property);
   };
   ensureInt("dilation_growth", "Dilation growth", defaultDilationGrowth,
-            minimumDilationGrowth, maximumDilationGrowth);
+            minimumDilationGrowth, unlimitedPropertyMaximum);
   ensureInt("residual", "Residual", 0, 0, 1);
+  for (auto &property : node.properties)
+    widenIntegerPropertyBounds(property);
   node.properties.erase(
       std::remove_if(node.properties.begin(), node.properties.end(),
                      [](const NodeProperty &property) {
@@ -416,7 +419,7 @@ int computeMergeOutputChannels(const openyourbox::graph::NodeGraph &graph,
     int outputChannels = 0;
     for (const auto channels : connectedChannels)
       outputChannels += channels;
-    return std::clamp(outputChannels, 0, 512);
+    return outputChannels;
   }
   int width = 0;
   for (const auto channels : connectedChannels) {
@@ -819,6 +822,16 @@ void normalizeHostIoProperties(openyourbox::graph::GraphNode &node) {
  *        Conv1D stride properties exist.
  * @param node Loaded or newly created convolution node.
  */
+/**
+ * @brief Removes persisted upper bounds on numeric node properties.
+ * @param node Loaded or newly created graph node.
+ */
+void normalizePropertyBounds(openyourbox::graph::GraphNode &node) {
+  using openyourbox::graph::widenIntegerPropertyBounds;
+  for (auto &property : node.properties)
+    widenIntegerPropertyBounds(property);
+}
+
 void normalizeConvolutionProperties(openyourbox::graph::GraphNode &node) {
   using openyourbox::graph::NodeProperty;
   using openyourbox::graph::NodeType;
@@ -826,6 +839,9 @@ void normalizeConvolutionProperties(openyourbox::graph::GraphNode &node) {
   using openyourbox::graph::isControlInputPin;
   using openyourbox::graph::isShapePassthroughType;
   using openyourbox::graph::flexibleTensorShape;
+  using openyourbox::graph::minimumPositiveProperty;
+  using openyourbox::graph::unlimitedPropertyMaximum;
+  using openyourbox::graph::widenIntegerPropertyBounds;
   if (node.type == NodeType::rateConv) {
     node.type = NodeType::convolution;
     if (node.label == "Rate Conv")
@@ -870,18 +886,23 @@ void normalizeConvolutionProperties(openyourbox::graph::GraphNode &node) {
     for (auto &pin : node.outputs)
       resetFlexiblePin(pin);
     auto ensureInt = [&node](const char *key, const char *label, int value,
-                             int minimum, int maximum) {
-      for (const auto &property : node.properties) {
-        if (property.key == key)
+                             int minimum) {
+      for (auto &property : node.properties) {
+        if (property.key == key) {
+          property.minimum = minimum;
+          property.maximum = unlimitedPropertyMaximum;
           return;
+        }
       }
       node.properties.push_back(
-          NodeProperty{key, label, value, minimum, maximum});
+          NodeProperty{key, label, value, minimum, unlimitedPropertyMaximum});
     };
-    ensureInt("channels", "Channels", 2, 1, 512);
-    ensureInt("kernel_size", "Kernel Size", 3, 2, 65);
-    ensureInt("dilation", "Dilation", 1, 1, 64);
-    ensureInt("stride", "Stride", 1, 1, 16);
+    ensureInt("channels", "Channels", 2, minimumPositiveProperty);
+    ensureInt("kernel_size", "Kernel Size", 3, minimumPositiveProperty);
+    ensureInt("dilation", "Dilation", 1, minimumPositiveProperty);
+    ensureInt("stride", "Stride", 1, minimumPositiveProperty);
+    for (auto &property : node.properties)
+      widenIntegerPropertyBounds(property);
     updateConvTransposeDetail(node);
     return;
   }
@@ -889,21 +910,26 @@ void normalizeConvolutionProperties(openyourbox::graph::GraphNode &node) {
     return;
 
   auto ensureInt = [&node](const char *key, const char *label, int value,
-                           int minimum, int maximum,
+                           int minimum,
                            PropertyKind kind = PropertyKind::integer,
                            std::vector<std::string> choices = {}) {
     for (auto &property : node.properties) {
-      if (property.key != key)
-        continue;
-      return;
+      if (property.key == key) {
+        property.minimum = minimum;
+        property.maximum = unlimitedPropertyMaximum;
+        return;
+      }
     }
-    node.properties.push_back(NodeProperty{key, label, value, minimum, maximum,
-                                           kind, std::move(choices)});
+    node.properties.push_back(NodeProperty{key, label, value, minimum,
+                                           unlimitedPropertyMaximum, kind,
+                                           std::move(choices)});
   };
-  ensureInt("channels", "Channels", 2, 1, 512);
-  ensureInt("kernel_size", "Kernel Size", 3, 2, 65);
-  ensureInt("dilation", "Dilation", 1, 1, 64);
-  ensureInt("stride", "Stride", 1, 1, 16);
+  ensureInt("channels", "Channels", 2, minimumPositiveProperty);
+  ensureInt("kernel_size", "Kernel Size", 3, minimumPositiveProperty);
+  ensureInt("dilation", "Dilation", 1, minimumPositiveProperty);
+  ensureInt("stride", "Stride", 1, minimumPositiveProperty);
+  for (auto &property : node.properties)
+    widenIntegerPropertyBounds(property);
   updateConv1dDetail(node);
 }
 
@@ -1410,9 +1436,9 @@ openyourbox::graph::GraphNode nodeFromTree(const juce::ValueTree &tree) {
   node.armedForTraining =
       static_cast<bool>(tree.getProperty("armedForTraining", true));
   node.residual = static_cast<bool>(tree.getProperty("residual", false));
-  node.dilationGrowth = std::clamp(
+  node.dilationGrowth = std::max(
       static_cast<int>(tree.getProperty("dilationGrowth", defaultDilationGrowth)),
-      minimumDilationGrowth, maximumDilationGrowth);
+      minimumDilationGrowth);
   node.weightsProvenance =
       tree.getProperty("weightsProvenance", "random").toString() == "file"
           ? WeightsProvenance::file
@@ -1501,6 +1527,7 @@ openyourbox::graph::GraphNode nodeFromTree(const juce::ValueTree &tree) {
   normalizeConditioningPins(node);
   normalizePhase3Node(node);
   normalizeConvolutionProperties(node);
+  normalizePropertyBounds(node);
   normalizeHostIoProperties(node);
   return node;
 }
@@ -1546,9 +1573,8 @@ openyourbox::graph::GraphGroup groupFromTree(const juce::ValueTree &tree) {
     group.parentGroupId =
         static_cast<std::int32_t>(tree.getProperty("parentGroupId"));
   group.collapsed = static_cast<bool>(tree.getProperty("collapsed", false));
-  group.copies = std::clamp(static_cast<int>(tree.getProperty(
-                                "copies", openyourbox::graph::defaultGroupCopies)),
-                            1, openyourbox::graph::maximumGroupCopies);
+  group.copies = std::max(1, static_cast<int>(tree.getProperty(
+                                   "copies", openyourbox::graph::defaultGroupCopies)));
   group.position = {static_cast<float>(tree.getProperty("x", 0.0f)),
                     static_cast<float>(tree.getProperty("y", 0.0f))};
   group.size = {static_cast<float>(tree.getProperty("width", 320.0f)),
@@ -2661,8 +2687,6 @@ GroupActionResult NodeGraph::setGroupCopies(std::int32_t groupId, int copies) {
     return {false, "Group no longer exists", 0};
   if (copies < 1)
     copies = 1;
-  if (copies > maximumGroupCopies)
-    return {false, "Copies is limited to 32", 0};
   if (copies == group->copies)
     return {true, {}, groupId};
   if (copies > 1) {
@@ -3088,13 +3112,12 @@ bool NodeGraph::setProperty(std::int32_t nodeId, const std::string &key,
     node->residual = property->value != 0;
   } else if (key == "dilation_growth" && node->type == NodeType::tcn) {
     node->dilationGrowth =
-        std::clamp(property->value, minimumDilationGrowth, maximumDilationGrowth);
+        std::max(minimumDilationGrowth, property->value);
     property->value = node->dilationGrowth;
   } else if (key == "n_band" &&
              (node->type == NodeType::pqmfAnalysis ||
               node->type == NodeType::pqmfSynthesis)) {
-    const auto nBand = std::clamp(property->value, minimumPqmfBands, maximumPqmfBands);
-    property->value = nBand;
+    property->value = std::max(minimumPqmfBands, property->value);
   } else if (key == "latent_size" &&
              node->type == NodeType::variationalBottleneck) {
     for (auto &pin : node->outputs) {
@@ -3626,8 +3649,28 @@ juce::ValueTree NodeGraph::toValueTree() const {
   return tree;
 }
 
+bool NodeGraph::documentIsRestorable(const juce::ValueTree &tree,
+                                     juce::String &error) {
+  error.clear();
+  if (!tree.hasType("GraphDocument")) {
+    error = "Preset graph document is missing or corrupt";
+    return false;
+  }
+  for (const auto child : tree) {
+    if (!child.hasType("Node"))
+      continue;
+    const auto typeName = child["type"].toString();
+    if (!isKnownPersistedNodeType(typeName)) {
+      error = "Preset uses unknown element type '" + typeName + "'";
+      return false;
+    }
+  }
+  return true;
+}
+
 bool NodeGraph::restoreFromValueTree(const juce::ValueTree &tree) {
-  if (!tree.hasType("GraphDocument"))
+  juce::String error;
+  if (!documentIsRestorable(tree, error))
     return false;
 
   std::vector<GraphNode> restoredNodes;
@@ -4010,7 +4053,9 @@ GraphNode NodeGraph::makeNode(NodeType type, juce::Point<float> position) {
     addOutput();
     node.inputs.front().shape = flexibleTensorShape();
     node.outputs.front().shape = flexibleTensorShape();
-    node.properties.push_back(property("features", "Features", 2, 1, 512));
+    node.properties.push_back(property("features", "Features", 2,
+                                       minimumPositiveProperty,
+                                       unlimitedPropertyMaximum));
     break;
   case NodeType::convolution:
   case NodeType::rateConv:
@@ -4022,10 +4067,18 @@ GraphNode NodeGraph::makeNode(NodeType type, juce::Point<float> position) {
     addOutput();
     node.inputs.front().shape = flexibleTensorShape();
     node.outputs.front().shape = flexibleTensorShape();
-    node.properties.push_back(property("channels", "Channels", 2, 1, 512));
-    node.properties.push_back(property("kernel_size", "Kernel Size", 3, 2, 65));
-    node.properties.push_back(property("dilation", "Dilation", 1, 1, 64));
-    node.properties.push_back(property("stride", "Stride", 1, 1, 16));
+    node.properties.push_back(property("channels", "Channels", 2,
+                                       minimumPositiveProperty,
+                                       unlimitedPropertyMaximum));
+    node.properties.push_back(property("kernel_size", "Kernel Size", 3,
+                                       minimumPositiveProperty,
+                                       unlimitedPropertyMaximum));
+    node.properties.push_back(property("dilation", "Dilation", 1,
+                                       minimumPositiveProperty,
+                                       unlimitedPropertyMaximum));
+    node.properties.push_back(property("stride", "Stride", 1,
+                                       minimumPositiveProperty,
+                                       unlimitedPropertyMaximum));
     break;
   case NodeType::convTranspose:
     node.label = "ConvTranspose1d";
@@ -4036,10 +4089,18 @@ GraphNode NodeGraph::makeNode(NodeType type, juce::Point<float> position) {
     addOutput();
     node.inputs.front().shape = flexibleTensorShape();
     node.outputs.front().shape = flexibleTensorShape();
-    node.properties.push_back(property("channels", "Channels", 2, 1, 512));
-    node.properties.push_back(property("kernel_size", "Kernel Size", 3, 2, 65));
-    node.properties.push_back(property("dilation", "Dilation", 1, 1, 64));
-    node.properties.push_back(property("stride", "Stride", 1, 1, 16));
+    node.properties.push_back(property("channels", "Channels", 2,
+                                       minimumPositiveProperty,
+                                       unlimitedPropertyMaximum));
+    node.properties.push_back(property("kernel_size", "Kernel Size", 3,
+                                       minimumPositiveProperty,
+                                       unlimitedPropertyMaximum));
+    node.properties.push_back(property("dilation", "Dilation", 1,
+                                       minimumPositiveProperty,
+                                       unlimitedPropertyMaximum));
+    node.properties.push_back(property("stride", "Stride", 1,
+                                       minimumPositiveProperty,
+                                       unlimitedPropertyMaximum));
     break;
   case NodeType::batchNorm:
     node.label = "BatchNorm1d";
@@ -4075,13 +4136,18 @@ GraphNode NodeGraph::makeNode(NodeType type, juce::Point<float> position) {
     node.inputs.front().shape = flexibleTensorShape();
     node.inputs.back().shape = flexibleTensorShape();
     node.outputs.front().shape = flexibleTensorShape();
-    node.properties.push_back(property("depth", "Depth", 4, 1, 30));
-    node.properties.push_back(property("kernel_size", "Kernel Size", 3, 2, 65));
-    node.properties.push_back(property("channels", "Channels", 16, 1, 512));
+    node.properties.push_back(property("depth", "Depth", 4, minimumPositiveProperty,
+                                       unlimitedPropertyMaximum));
+    node.properties.push_back(property("kernel_size", "Kernel Size", 3,
+                                       minimumPositiveProperty,
+                                       unlimitedPropertyMaximum));
+    node.properties.push_back(property("channels", "Channels", 16,
+                                       minimumPositiveProperty,
+                                       unlimitedPropertyMaximum));
     node.properties.push_back(property("dilation_growth", "Dilation growth",
                                        defaultDilationGrowth,
                                        minimumDilationGrowth,
-                                       maximumDilationGrowth));
+                                       unlimitedPropertyMaximum));
     node.properties.push_back(property("residual", "Residual", 0, 0, 1));
     node.properties.push_back(
         property("activation", "Activation", 0, 0, 4, PropertyKind::choice,
@@ -4096,7 +4162,8 @@ GraphNode NodeGraph::makeNode(NodeType type, juce::Point<float> position) {
     node.properties.push_back(
         property("mode", "Mode", 0, 0, 2, PropertyKind::choice,
                  {"Add", "Multiply", "Concatenate"}));
-    node.properties.push_back(property("inputs", "Inputs", 2, 2, 8));
+    node.properties.push_back(property("inputs", "Inputs", 2, 2,
+                                       unlimitedPropertyMaximum));
     setMixerInputCount(node, 2);
     break;
   case NodeType::knobInput:
@@ -4130,7 +4197,8 @@ GraphNode NodeGraph::makeNode(NodeType type, juce::Point<float> position) {
     node.outputs.front().shape.temporalRate = defaultPqmfBands;
     node.outputs.front().shape.nBand = defaultPqmfBands;
     node.properties.push_back(property("n_band", "nBand", defaultPqmfBands,
-                                       minimumPqmfBands, maximumPqmfBands));
+                                       minimumPqmfBands,
+                                       unlimitedPropertyMaximum));
     break;
   case NodeType::pqmfSynthesis:
     node.label = "PQMF Synthesis";
@@ -4140,7 +4208,8 @@ GraphNode NodeGraph::makeNode(NodeType type, juce::Point<float> position) {
     node.inputs.front().shape.temporalRate = defaultPqmfBands;
     node.inputs.front().shape.nBand = defaultPqmfBands;
     node.properties.push_back(property("n_band", "nBand", defaultPqmfBands,
-                                       minimumPqmfBands, maximumPqmfBands));
+                                       minimumPqmfBands,
+                                       unlimitedPropertyMaximum));
     break;
   case NodeType::variationalBottleneck:
     node.label = "Variational Bottleneck";
@@ -4153,7 +4222,8 @@ GraphNode NodeGraph::makeNode(NodeType type, juce::Point<float> position) {
     node.inputs.front().shape = flexibleTensorShape();
     node.outputs.front().shape.temporalRate = 0;
     node.properties.push_back(property("latent_size", "Latent", defaultLatentSize,
-                                       1, 512));
+                                       minimumPositiveProperty,
+                                       unlimitedPropertyMaximum));
     node.properties.push_back(fidelityProperty());
     break;
   case NodeType::noiseSynthesizer:
@@ -4166,14 +4236,15 @@ GraphNode NodeGraph::makeNode(NodeType type, juce::Point<float> position) {
     node.inputs.front().shape = flexibleTensorShape();
     node.outputs.front().shape = flexibleTensorShape();
     node.properties.push_back(
-        property("noise_bands", "Noise bands", defaultNoiseBands, 1, 16));
+        property("noise_bands", "Noise bands", defaultNoiseBands,
+                 minimumPositiveProperty, unlimitedPropertyMaximum));
     break;
   }
   return node;
 }
 
 void NodeGraph::setMixerInputCount(GraphNode &node, int inputCount) {
-  const auto count = std::clamp(inputCount, 2, 8);
+  const auto count = std::max(inputCount, 2);
   while (static_cast<int>(node.inputs.size()) > count) {
     const auto pinId = node.inputs.back().id;
     links.erase(std::remove_if(links.begin(), links.end(),

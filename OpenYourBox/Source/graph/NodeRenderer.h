@@ -46,11 +46,17 @@ struct NodeRendererCallbacks {
   std::function<void(std::int32_t, bool)> armChanged;
   /** @brief Invoked when the user browses a weight file for a node. */
   std::function<void(std::int32_t)> browseWeights;
-  /**
-   * @brief Invoked after a box is placed from the user box library.
+  /** @brief Invoked after a box is placed from the user box library.
    * @param rootId New node or group identifier.
    */
   std::function<void(std::int32_t)> boxPlaced;
+  /**
+   * @brief Invoked when a continuous patch gesture starts (knob, XY, layout drag).
+   * @param label User-facing history step name.
+   */
+  std::function<void(const char *)> beginPatchGesture;
+  /** @brief Invoked when a continuous patch gesture ends. */
+  std::function<void()> endPatchGesture;
 };
 
 /**
@@ -230,6 +236,12 @@ private:
   bool layoutMutatedThisFrame = false;
   /** @brief Whether this frame's mutation requires an audio recompile. */
   bool recompileThisFrame = false;
+  /** @brief True while a coalesced patch gesture is open. */
+  bool patchGestureOpen = false;
+  /** @brief True when a knob, pad, property drag, or layout drag is held. */
+  bool patchGestureHeldThisFrame = false;
+  /** @brief History label for the open patch gesture. */
+  const char *patchGestureLabel = "Parameter edit";
   /** @brief Whether persisted canvas navigation still needs restoring. */
   bool restoreViewPending = true;
   /** @brief Last known canvas-space centre used when spawning from the palette. */

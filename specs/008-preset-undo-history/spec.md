@@ -15,7 +15,6 @@
 - Q: When saving a preset, should the stored patch include current model weights and Gold (frozen) artifacts for identical sound, or only structure/parameters? → A: Full sonic recall — graph + parameters + weights and Gold artifacts needed for identical sound
 - Q: After loading a named preset and then editing, how should current-preset identity work? → A: Keep loaded name with dirty indicator; Save overwrites that entry, Save As creates another
 - Q: Should weight randomization (and similar one-shot sonic actions) be undoable as a single history step? → A: Yes — randomization and similar one-shot sonic actions are one undo/redo step
-- Q: When importing a preset under a name that already exists in the catalog, what should happen? → A: Prompt to overwrite; cancel leaves the catalog unchanged
 - Q: Should Undo/Redo include view-only editor changes (canvas pan, zoom, selection), or only patch-affecting edits? → A: Patch-affecting edits only (structure, params, weights, box layout positions); exclude pan/zoom/selection
 
 ## User Scenarios & Testing *(mandatory)*
@@ -36,7 +35,7 @@ A sound designer finishes a useful plugin setup (graph layout, connections, para
 4. **Given** any current patch, **When** the user chooses Save As with a new unique name, **Then** a new catalog entry is created and becomes the current preset (not dirty)
 5. **Given** Save As (or first save) targeting an existing catalog name that is not the current preset’s name, **When** the user confirms overwrite, **Then** that entry is replaced; if they cancel, the catalog and current association remain unchanged
 6. **Given** audio is playing, **When** the user loads a preset, **Then** the new state applies without stopping the host transport and without audible dropouts beyond a brief, seamless transition
-7. **Given** a preset saved in one project/session, **When** the user opens another project or a fresh plugin instance, **Then** they can load that same named preset without re-importing
+7. **Given** a preset saved in one project/session, **When** the user opens another project or a fresh plugin instance, **Then** they can load that same named preset from the catalog
 
 ---
 
@@ -78,23 +77,6 @@ While editing, the designer makes a sequence of changes (add/remove/move boxes, 
 
 ---
 
-### User Story 4 - Export and Import Presets for Sharing (Priority: P2)
-
-The designer exports a preset to a portable file to share with a collaborator or back up outside the plugin. Another user (or the same user on another machine) imports that file into their catalog and can load it like any other named preset.
-
-**Why this priority**: Sharing and backup extend the preset library beyond one machine; core save/load (Stories 1–2) already deliver local recall.
-
-**Independent Test**: Export a named preset to a file, remove or ignore the local entry, import the file under a chosen name, and load it successfully.
-
-**Acceptance Scenarios**:
-
-1. **Given** a named preset, **When** the user exports it, **Then** they obtain a single portable file representing that full sonic patch
-2. **Given** a valid preset file that embeds a full sonic patch and a unique import name, **When** the user imports it with that name, **Then** a catalog entry appears and loading it restores the same sonic patch
-3. **Given** a valid preset file and an import name that already exists in the catalog, **When** the user confirms overwrite, **Then** that entry is replaced; if they cancel, the catalog is unchanged
-4. **Given** an invalid or incompatible preset file, **When** the user attempts import, **Then** the action is refused with a clear message and the catalog is unchanged
-
----
-
 ### User Story 5 - Preset Load Interacts Predictably with Undo History (Priority: P2)
 
 After editing with an active undo stack, the designer loads a preset. They can undo that load as one step to return to the pre-load state, then continue editing with a coherent history.
@@ -120,7 +102,7 @@ After editing with an active undo stack, the designer loads a preset. They can u
 - Extremely large patches still save/load and undo/redo without freezing the UI beyond a brief busy indication
 - Host/DAW project save and restore continue to work independently of the named preset catalog
 - Preset management does not replace the user box library: boxes remain reusable components; presets remain full plugin patches
-- Concurrent overwrite: if the user confirms overwrite of an existing name (Save As / first save to a colliding name / import to a colliding name), only that entry is replaced
+- Concurrent overwrite: if the user confirms overwrite of an existing name (Save As / first save to a colliding name), only that entry is replaced
 - After load, any undoable edit that changes the patch marks the current preset dirty; successfully Saving the current entry or Save As to a new name clears dirty
 - Undoing back to the exact post-load (or post-save) patch state clears the dirty indicator again
 - History depth is finite; when the limit is reached, the oldest undo steps drop off and cannot be recovered
@@ -146,20 +128,18 @@ After editing with an active undo stack, the designer loads a preset. They can u
 - **FR-009**: Performing a new edit after Undo MUST clear the redo chain
 - **FR-010**: Undo and Redo MUST be available via both standard keyboard shortcuts and explicit UI actions
 - **FR-011**: Applying a preset load MUST be recorded as a single undoable history step so the previous patch can be restored with one Undo
-- **FR-012**: Users MUST be able to export a named preset to a portable file and import a valid preset file into the catalog; exported files MUST include the same full sonic payload as catalog presets
-- **FR-012a**: Importing under an existing catalog name MUST require explicit overwrite confirmation; cancel MUST leave the catalog unchanged
-- **FR-013**: Invalid save names, failed loads (including inability to restore embedded weights/Gold artifacts), and invalid imports MUST be refused with clear user-facing messages and MUST leave the current patch and catalog consistent
-- **FR-014**: Named preset management MUST be distinct from DAW/host project state save/restore (both MUST continue to work)
-- **FR-015**: Named preset management MUST be distinct from the user box library (component reuse vs full-patch recall)
-- **FR-016**: Undo history MUST have a documented finite depth; when exceeded, oldest steps are discarded
-- **FR-017**: The UI MUST indicate when Undo and Redo are unavailable (nothing to undo/redo)
-- **FR-018**: The UI MUST display the current preset name (when set) and whether it is dirty
+- **FR-012**: Invalid save names and failed loads (including inability to restore embedded weights/Gold artifacts) MUST be refused with clear user-facing messages and MUST leave the current patch and catalog consistent
+- **FR-013**: Named preset management MUST be distinct from DAW/host project state save/restore (both MUST continue to work)
+- **FR-014**: Named preset management MUST be distinct from the user box library (component reuse vs full-patch recall)
+- **FR-015**: Undo history MUST have a documented finite depth; when exceeded, oldest steps are discarded
+- **FR-016**: The UI MUST indicate when Undo and Redo are unavailable (nothing to undo/redo)
+- **FR-017**: The UI MUST display the current preset name (when set) and whether it is dirty
 
 ### Key Entities
 
-- **Preset**: A named, user-managed snapshot of a full sonic plugin patch suitable for later recall and sharing. Attributes: name, saved patch contents (graph, parameters, weights, Gold artifacts), optional metadata such as last-modified time
+- **Preset**: A named, user-managed snapshot of a full sonic plugin patch suitable for later recall. Attributes: name, saved patch contents (graph, parameters, weights, Gold artifacts), optional metadata such as last-modified time
 - **Current Preset**: Session association of the active plugin instance to a catalog name, plus a dirty flag indicating whether the live patch differs from the last loaded/saved contents for that name
-- **Preset Catalog**: The user’s collection of named presets available for browse, load, rename, delete, export, and import
+- **Preset Catalog**: The user’s collection of named presets available for browse, load, rename, and delete
 - **Edit History**: An ordered session sequence of undoable patch states (or equivalent reverse/forward steps) supporting Undo and Redo
 - **History Step**: One logical user change (or coalesced gesture, one-shot sonic action such as weight randomization, or preset load) that can be undone or redone as a unit
 - **Plugin Patch**: The complete editable and sonic configuration of one plugin instance (graph + parameters + weights + Gold/frozen artifacts needed for identical recall)
@@ -176,14 +156,11 @@ After editing with an active undo stack, the designer loads a preset. They can u
 - **SC-005**: Preset load and undo/redo complete their user-visible state update within 1 second for typical patches (under a few hundred boxes) without requiring a plugin restart
 - **SC-006**: At least 90% of first-time testers can load a preset, see it as current, edit until dirty, Save to overwrite, and Save As a second name without assistance
 - **SC-007**: Host project save/load still restores the session patch correctly after users have also used the named preset catalog in that session
-- **SC-008**: Export then import of a preset on a clean catalog yields a loadable entry whose sonic recall matches the original patch
 
 ## Assumptions
 
 - “Preset” means a full sonic plugin patch (graph + parameters + weights + Gold artifacts), not a partial parameter bank and not a single box; the existing user box library remains the mechanism for reusable components
-- Preset export/import carries the same full sonic payload so shared files recall identically when compatible
 - After load or save, the UI tracks a current preset name and a dirty flag; Save overwrites the current entry, Save As creates or overwrites another name with confirmation when colliding
-- Import into an existing catalog name uses the same overwrite-confirmation rule as Save As name collisions
 - In-plugin user preset catalog is in scope; a curated factory preset bank and MIDI program-change banks are out of scope for this feature
 - DAW/host session state persistence already exists and remains the source of truth for project recall; named presets are an additional user-facing catalog
 - Undo/redo is per plugin instance and session-scoped (not persisted across plugin close), except that loading a preset remains undoable within the session as one step
@@ -191,5 +168,4 @@ After editing with an active undo stack, the designer loads a preset. They can u
 - Training runs and other long-running background jobs are not mid-flight “scrubbed” by undo; when such a job finishes and applies a patch change (for example replacing part of the graph with a finished trained result), that applied change MUST be recorded as a normal single history step (same class as weight randomization)
 - Weight randomization and similar one-shot sonic actions are undoable as one history step each
 - Undo/redo covers patch-affecting edits only (including box layout positions); canvas pan, zoom, and selection are excluded from history
-- Export/import uses a single-file portable representation suitable for sharing between users of this product and MUST carry the same full sonic payload (graph, parameters, weights, Gold artifacts)
 - Keyboard shortcuts follow platform conventions (for example Undo / Redo on the host OS)

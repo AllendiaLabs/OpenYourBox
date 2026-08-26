@@ -1808,10 +1808,9 @@ LiveGraphEngine::compile(const graph::NodeGraph &graphDocument,
       }
       case NodeType::linear: {
         int features = 0;
-        if (!readProperty(node, "features", features) || features < 1 ||
-            features > 512)
+        if (!readProperty(node, "features", features) || features < 1)
           return failure(LiveGraphErrorCode::invalidProperty, node.id,
-                         "Linear requires Features in the range 1..512");
+                         "Linear requires Features >= 1");
         element.outputChannels = features;
         element.randomizable = true;
         element.parameterCount = saturatedMultiply(
@@ -1824,14 +1823,13 @@ LiveGraphEngine::compile(const graph::NodeGraph &graphDocument,
       case NodeType::rateConv: {
         int channels = 0;
         if (!readProperty(node, "channels", channels) || channels < 1 ||
-            channels > 512 ||
             !readProperty(node, "kernel_size", element.kernelSize) ||
-            element.kernelSize < 1 || element.kernelSize > 65 ||
+            element.kernelSize < 1 ||
             !readProperty(node, "dilation", element.dilation) ||
-            element.dilation < 1 || element.dilation > 64)
+            element.dilation < 1)
           return failure(LiveGraphErrorCode::invalidProperty, node.id,
-                         "Conv1D requires Channels 1..512, Kernel Size 1..65, "
-                         "and Dilation 1..64");
+                         "Conv1D requires Channels, Kernel Size, and Dilation "
+                         ">= 1");
         element.stride = 1;
         readProperty(node, "stride", element.stride);
         if (element.stride < 1)
@@ -1860,14 +1858,13 @@ LiveGraphEngine::compile(const graph::NodeGraph &graphDocument,
       case NodeType::convTranspose: {
         int channels = 0;
         if (!readProperty(node, "channels", channels) || channels < 1 ||
-            channels > 512 ||
             !readProperty(node, "kernel_size", element.kernelSize) ||
-            element.kernelSize < 1 || element.kernelSize > 65 ||
+            element.kernelSize < 1 ||
             !readProperty(node, "dilation", element.dilation) ||
-            element.dilation < 1 || element.dilation > 64)
+            element.dilation < 1)
           return failure(LiveGraphErrorCode::invalidProperty, node.id,
-                         "ConvTranspose1d requires Channels 1..512, Kernel "
-                         "Size 1..65, and Dilation 1..64");
+                         "ConvTranspose1d requires Channels, Kernel Size, and "
+                         "Dilation >= 1");
         element.stride = 1;
         readProperty(node, "stride", element.stride);
         if (element.stride < 1)
@@ -1891,9 +1888,9 @@ LiveGraphEngine::compile(const graph::NodeGraph &graphDocument,
       }
       case NodeType::batchNorm: {
         element.outputChannels = element.inputChannels;
-        if (element.inputChannels < 1 || element.inputChannels > 512)
+        if (element.inputChannels < 1)
           return failure(LiveGraphErrorCode::invalidProperty, node.id,
-                         "BatchNorm1d requires 1..512 input channels");
+                         "BatchNorm1d requires at least one input channel");
         element.receptiveField = 1;
         element.randomizable = true;
         element.parameterCount =
@@ -1926,17 +1923,15 @@ LiveGraphEngine::compile(const graph::NodeGraph &graphDocument,
                          "TCN is missing one or more required properties");
         readProperty(node, "dilation_growth", growth);
         readProperty(node, "residual", residual);
-        element.dilationGrowth = std::clamp(growth, graph::minimumDilationGrowth,
-                                            graph::maximumDilationGrowth);
+        element.dilationGrowth =
+            std::max(growth, graph::minimumDilationGrowth);
         element.residual = residual != 0;
 
         const auto dilationRepresentable =
-            element.depth >= 1 && element.depth <= 30 &&
-            element.dilationGrowth >= 1;
-        if (!dilationRepresentable || element.kernelSize < 2 ||
-            element.kernelSize > 65 || element.hiddenChannels < 1 ||
-            element.hiddenChannels > 512 || element.inputChannels < 1 ||
-            element.inputChannels > 512 || activation < 0 ||
+            element.depth >= 1 && element.dilationGrowth >= 1;
+        if (!dilationRepresentable || element.kernelSize < 1 ||
+            element.hiddenChannels < 1 || element.inputChannels < 1 ||
+            activation < 0 ||
             activation > openyourbox::dsp::maximumActivationIndex)
           return failure(LiveGraphErrorCode::invalidProperty, node.id,
                          "TCN configuration is outside supported bounds");
@@ -2054,9 +2049,9 @@ LiveGraphEngine::compile(const graph::NodeGraph &graphDocument,
         }
         if (connectedCount == 0)
           width = 1;
-        if (width < 1 || width > 512)
+        if (width < 1)
           return failure(LiveGraphErrorCode::invalidShape, node.id,
-                         "Merge output channels must stay in 1..512");
+                         "Merge output channels must be positive");
         element.outputChannels = width;
         break;
       }
@@ -2098,8 +2093,7 @@ LiveGraphEngine::compile(const graph::NodeGraph &graphDocument,
           }
         }
         if (!element.blackBoxFactory ||
-            element.blackBoxFactory->getOutputChannels() < 1 ||
-            element.blackBoxFactory->getOutputChannels() > 512)
+            element.blackBoxFactory->getOutputChannels() < 1)
           return failure(LiveGraphErrorCode::invalidBlackBox, node.id,
                          "Frozen hook metadata is absent or shape-incompatible");
         // FiLM Control injects bias, so hooked freeze cannot keep digital
@@ -2128,7 +2122,7 @@ LiveGraphEngine::compile(const graph::NodeGraph &graphDocument,
       case NodeType::pqmfAnalysis: {
         int nBand = graph::defaultPqmfBands;
         readProperty(node, "n_band", nBand);
-        nBand = std::clamp(nBand, graph::minimumPqmfBands, graph::maximumPqmfBands);
+        nBand = std::max(nBand, graph::minimumPqmfBands);
         element.nBand = nBand;
         element.pqmf = std::make_shared<PqmfBank>(nBand);
         element.outputChannels = std::max(1, element.inputChannels) * nBand;
@@ -2138,7 +2132,7 @@ LiveGraphEngine::compile(const graph::NodeGraph &graphDocument,
       case NodeType::pqmfSynthesis: {
         int nBand = graph::defaultPqmfBands;
         readProperty(node, "n_band", nBand);
-        nBand = std::clamp(nBand, graph::minimumPqmfBands, graph::maximumPqmfBands);
+        nBand = std::max(nBand, graph::minimumPqmfBands);
         element.nBand = nBand;
         element.pqmf = std::make_shared<PqmfBank>(nBand);
         element.outputChannels = std::max(1, element.inputChannels / std::max(1, nBand));

@@ -201,6 +201,10 @@ inline constexpr int defaultDilationGrowth = 2;
 inline constexpr int minimumDilationGrowth = 1;
 /** @brief Inclusive upper bound for TCN dilation growth. */
 inline constexpr int maximumDilationGrowth = 16;
+/** @brief No practical upper bound for free-form integer graph properties. */
+inline constexpr int unlimitedPropertyMaximum = std::numeric_limits<int>::max();
+/** @brief Inclusive minimum for positive integer graph properties. */
+inline constexpr int minimumPositiveProperty = 1;
 /** @brief Default Train optimization steps (steerable NAfx recipe). */
 inline constexpr int defaultTrainSteps = 2500;
 /** @brief Default RF-aware train crop length in samples. */
@@ -673,6 +677,24 @@ struct NodeProperty {
 };
 
 /**
+ * @brief Returns true when a property keeps fixed choice or boolean bounds.
+ * @param property Node property to inspect.
+ */
+inline bool propertyKeepsFixedBounds(const NodeProperty &property) noexcept {
+  return property.kind == PropertyKind::choice || property.key == "residual";
+}
+
+/**
+ * @brief Removes artificial upper bounds on free-form integer properties.
+ * @param property Node property to widen.
+ */
+inline void widenIntegerPropertyBounds(NodeProperty &property) noexcept {
+  if (property.kind == PropertyKind::real || propertyKeepsFixedBounds(property))
+    return;
+  property.maximum = unlimitedPropertyMaximum;
+}
+
+/**
  * @brief Outcome of parsing a comma-separated per-copy property list.
  */
 struct PropertyCopyListParse {
@@ -1098,7 +1120,8 @@ inline float floatValueForCopy(const NodeProperty &property, int slot) noexcept 
 /**
  * @brief Grows or shrinks a property's per-copy list to @p count.
  * @param property Property to resize.
- * @param count Required slot count (≥ 1). New slots clone the previous last value.
+ * @param count Required slot count (≥ 1). New slots clone the previous last
+ *        value. An empty list is initialized from the primary field.
  */
 inline void ensurePropertyCopyCount(NodeProperty &property, int count) {
   if (!propertySupportsCopyValueList(property))
@@ -1111,7 +1134,6 @@ inline void ensurePropertyCopyCount(NodeProperty &property, int count) {
       property.copyFloatValues.push_back(property.copyFloatValues.back());
     if (static_cast<int>(property.copyFloatValues.size()) > target)
       property.copyFloatValues.resize(static_cast<std::size_t>(target));
-    property.floatValue = property.copyFloatValues.front();
     return;
   }
   if (property.copyIntValues.empty())
@@ -1120,7 +1142,6 @@ inline void ensurePropertyCopyCount(NodeProperty &property, int count) {
     property.copyIntValues.push_back(property.copyIntValues.back());
   if (static_cast<int>(property.copyIntValues.size()) > target)
     property.copyIntValues.resize(static_cast<std::size_t>(target));
-  property.value = property.copyIntValues.front();
 }
 
 /**

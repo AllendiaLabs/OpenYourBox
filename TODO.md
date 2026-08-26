@@ -19,7 +19,7 @@
 - [ ] read steinmetz frontiers: Differentiable black-box and gray-box modeling of nonlinear audio effects
 
 - [ ] in addition to the graph editor view, add a performance view where users can choose to display parameters or controls, change their size, layout, etc
-- [ ] implement preset management
+- [x] implement preset management and session undo/redo (`specs/008-preset-undo-history/`)
 
 - [ ] 1) when property/parameter, knob or xy trackpad (or a macro) is selected, delete key should reset to default value
 2) if in a group, right click on them should allow the user to create a macro and assign to it (adds control to group box), or all similar parameters/controls in the group (not subgroups), or assign to existing macro
@@ -28,3 +28,8 @@
 
 
 - [ ] check rf same as in rave paper
+- [ ] update pin shapes with list when multiple copies in group
+- [ ] oyb should reproduce acids-ircam rave code more faithfully:
+  - [ ] add softplus to vae and perform exactly the same parameterization/sampling
+  - [ ] kernel size of variational convs should be 5 (but add as bottleneck parameter for flexibility). and instead of 2 convs that see all input channels, use grouped head: Conv 1024→256, k=5, groups=2 (or equivalent channel split)
+  - [ ] PCA on μ in eval mode over a validation pass, use linear singular-value cumulative sum for r_f, and load compactness buffers onto the live bottleneck after Unfreeze.

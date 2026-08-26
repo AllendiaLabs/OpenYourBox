@@ -45,9 +45,12 @@ OpenYourBoxAudioProcessorEditor::OpenYourBoxAudioProcessorEditor(
   addAndMakeVisible(imguiHost);
   setSize(1100, 680);
   trainPanel.objective = audioProcessor.getLastTrainObjective();
+  audioProcessor.onPatchApplied = [this] { reloadLiveGraphFromProcessor(); };
 }
 
-OpenYourBoxAudioProcessorEditor::~OpenYourBoxAudioProcessorEditor() = default;
+OpenYourBoxAudioProcessorEditor::~OpenYourBoxAudioProcessorEditor() {
+  audioProcessor.onPatchApplied = nullptr;
+}
 
 void OpenYourBoxAudioProcessorEditor::paint(juce::Graphics &graphics) {
   graphics.fillAll(juce::Colour(20, 23, 30));
@@ -95,6 +98,38 @@ void OpenYourBoxAudioProcessorEditor::renderFrame() {
   ImGui::Begin("OpenYourBox", nullptr, flags);
 
   ImGui::TextColored(ImVec4(0.39f, 0.70f, 1.0f, 1.0f), "OpenYourBox");
+  ImGui::SameLine();
+  const auto &currentPreset = audioProcessor.getCurrentPreset();
+  if (currentPreset.isAssociated())
+    ImGui::TextDisabled("%s%s", currentPreset.name.toRawUTF8(),
+                        currentPreset.dirty ? " *" : "");
+  else
+    ImGui::TextDisabled("No preset");
+  ImGui::SameLine();
+  {
+    auto &history = audioProcessor.getEditHistory();
+    ImGui::BeginDisabled(!history.canUndo());
+    if (ImGui::SmallButton("Undo"))
+      performUndo();
+    ImGui::EndDisabled();
+    ImGui::SameLine();
+    ImGui::BeginDisabled(!history.canRedo());
+    if (ImGui::SmallButton("Redo"))
+      performRedo();
+    ImGui::EndDisabled();
+  }
+  const auto &io = ImGui::GetIO();
+  const auto undoMod = io.KeySuper || io.KeyCtrl;
+  if (undoMod && !io.WantTextInput) {
+    if (ImGui::IsKeyPressed(ImGuiKey_Z, false)) {
+      if (io.KeyShift)
+        performRedo();
+      else
+        performUndo();
+    } else if (!io.KeySuper && ImGui::IsKeyPressed(ImGuiKey_Y, false)) {
+      performRedo();
+    }
+  }
   ImGui::SameLine();
   const auto sampleRate = audioProcessor.getCurrentSampleRate();
   const auto receptiveField = audioProcessor.getReceptiveFieldSamples();
@@ -158,7 +193,11 @@ void OpenYourBoxAudioProcessorEditor::renderFrame() {
     showGraphMessage(message);
   };
   callbacks.documentChanged = [this](bool recompile, bool refreshAnalysis) {
-    persistGraph(recompile);
+    auto &history = audioProcessor.getEditHistory();
+    if (history.isGestureOpen())
+      persistGraph(false, false);
+    else
+      persistGraph(recompile, true);
     if (refreshAnalysis)
       invalidateAnalysis();
     else
@@ -180,6 +219,10 @@ void OpenYourBoxAudioProcessorEditor::renderFrame() {
   callbacks.browseWeights = [this](std::int32_t nodeId) {
     handleBrowseWeights(nodeId);
   };
+  callbacks.beginPatchGesture = [this](const char *label) {
+    beginHistoryGesture(label);
+  };
+  callbacks.endPatchGesture = [this] { endHistoryGesture(); };
   nodeRenderer.render(nodeGraph, callbacks, imguiHost.takeMagnification(),
                       &boxLibrary);
   ImGui::EndChild();
@@ -210,6 +253,10 @@ void OpenYourBoxAudioProcessorEditor::renderFrame() {
       sidePanelTab = 3;
       ImGui::EndTabItem();
     }
+    if (ImGui::BeginTabItem("Presets", nullptr, tabFlags(4))) {
+      sidePanelTab = 4;
+      ImGui::EndTabItem();
+    }
     pendingSidePanelTab = -1;
     ImGui::EndTabBar();
   }
@@ -225,6 +272,7 @@ void OpenYourBoxAudioProcessorEditor::renderFrame() {
         ImGui::SliderFloat("##dryWet", &mixPercent, 0.0f, 100.0f, "%.0f%%");
     if (ImGui::IsItemActive()) {
       if (!dryWetGestureActive) {
+        beginHistoryGesture("Dry/Wet");
         dryWetParameter->beginChangeGesture();
         dryWetGestureActive = true;
       }
@@ -235,6 +283,7 @@ void OpenYourBoxAudioProcessorEditor::renderFrame() {
     if (dryWetGestureActive && ImGui::IsItemDeactivated()) {
       dryWetParameter->endChangeGesture();
       dryWetGestureActive = false;
+      endHistoryGesture();
     }
   }
   ImGui::Separator();
@@ -253,7 +302,7 @@ void OpenYourBoxAudioProcessorEditor::renderFrame() {
       [this](openyourbox::graph::AnalysisView view) {
         if (analysisNodeId != 0)
           nodeGraph.setSelectedAnalysisView(analysisNodeId, view);
-        persistGraph(false);
+        persistGraph(false, false);
         invalidateAnalysis();
       },
       [this, runtimeError] { showError(runtimeError, true); });
@@ -364,6 +413,27 @@ void OpenYourBoxAudioProcessorEditor::renderFrame() {
       showError(detail, true);
     };
     trainPanel.render(trainCoordinator, gates, trainCallbacks);
+  } else if (sidePanelTab == 4) {
+    openyourbox::ui::UserPresetPanel::Callbacks presetCallbacks;
+    presetCallbacks.save = [this] { handlePresetSave(); };
+    presetCallbacks.saveAs = [this](const juce::String &name, bool overwrite) {
+      handlePresetSaveAs(name, overwrite);
+    };
+    presetCallbacks.load = [this](const juce::String &id) {
+      handlePresetLoad(id);
+    };
+    presetCallbacks.rename = [this](const juce::String &id,
+                                    const juce::String &name) {
+      handlePresetRename(id, name);
+    };
+    presetCallbacks.remove = [this](const juce::String &id) {
+      handlePresetDelete(id);
+    };
+    presetCallbacks.showMessage = [this](const std::string &message) {
+      showGraphMessage(message);
+    };
+    presetPanel.render(presetLibrary, audioProcessor.getCurrentPreset(),
+                       presetCallbacks);
   }
   copyrightModal.render(copyrightAcknowledgment, copyrightModalVisible,
                         [this] { copyrightModalVisible = false; });
@@ -383,7 +453,8 @@ void OpenYourBoxAudioProcessorEditor::updateGraphIfNeeded() {
       nodeGraph.rebuildFromModel(requested);
     displayedConfiguration = requested;
     graphInitialized = true;
-    persistGraph();
+    persistGraph(true, false);
+    captureHistoryBaseline();
     return;
   }
 
@@ -400,14 +471,21 @@ void OpenYourBoxAudioProcessorEditor::updateGraphIfNeeded() {
       nodeGraph.setProperty(tcn->id, "channels", requested.channels);
       nodeGraph.setProperty(tcn->id, "activation",
                             static_cast<int>(requested.activation));
-      persistGraph();
+      persistGraph(true, false);
     }
   }
 }
 
-void OpenYourBoxAudioProcessorEditor::persistGraph(bool compileRuntime) {
+void OpenYourBoxAudioProcessorEditor::persistGraph(bool compileRuntime,
+                                                   bool recordHistory) {
   audioProcessor.setGraphState(nodeGraph.toValueTree(), compileRuntime);
   publishRuntimeControls();
+  if (!recordHistory)
+    return;
+  auto &history = audioProcessor.getEditHistory();
+  if (history.isSuppressed() || history.isGestureOpen())
+    return;
+  commitHistoryFromBaseline("Graph edit");
 }
 
 void OpenYourBoxAudioProcessorEditor::publishRuntimeControls() {
@@ -538,7 +616,8 @@ void OpenYourBoxAudioProcessorEditor::handleRandomize(std::int32_t nodeId,
                                                      std::int32_t seed) {
   nodeGraph.clearWeightsToSeed(nodeId, seed);
   audioProcessor.randomizeGraphElement(nodeId, seed);
-  persistGraph();
+  persistGraph(true, false);
+  commitHistoryFromBaseline("Randomize");
 }
 
 void OpenYourBoxAudioProcessorEditor::handleFreeze(
@@ -615,7 +694,8 @@ void OpenYourBoxAudioProcessorEditor::handleUnfreeze(std::int32_t nodeId) {
     if (!keepTrained)
       audioProcessor.releaseFrozenArtifact(artifactPath);
     showGraphMessage("Selection restored to Live Blue");
-    persistGraph();
+    persistGraph(true, false);
+    commitHistoryFromBaseline("Unfreeze");
   }
 }
 
@@ -656,7 +736,8 @@ void OpenYourBoxAudioProcessorEditor::applyCompletedFreeze() {
     return;
   }
 
-  persistGraph();
+  persistGraph(true, false);
+  commitHistoryFromBaseline("Freeze");
   if (!pendingFreezeChains.empty() && startNextFreezeChain()) {
     showGraphMessage("Freeze succeeded: compiling the next frozen chain");
     return;
@@ -864,14 +945,14 @@ void OpenYourBoxAudioProcessorEditor::applyCompletedTrain() {
   lastTrainPreviewPath.clear();
   if (result->status == "stopped") {
     showGraphMessage("Training stopped; prior model unchanged");
-    persistGraph();
+    persistGraph(true, false);
     return;
   }
   if (result->status != "success") {
     if (!result->artifactPath.empty())
       retryTrainResult = result;
     showError("Training failed: " + juce::String(result->errorMessage));
-    persistGraph();
+    persistGraph(true, false);
     return;
   }
   retryTrainResult.reset();
@@ -879,11 +960,12 @@ void OpenYourBoxAudioProcessorEditor::applyCompletedTrain() {
   if (!absorbed.has_value()) {
     retryTrainResult = result;
     showError("Trained artifact is ready but the graph could not swap");
-    persistGraph();
+    persistGraph(true, false);
     return;
   }
-  persistGraph();
-  showGraphMessage("Training succeeded: armed chain is Gold");
+    persistGraph(true, false);
+    commitHistoryFromBaseline("Train");
+    showGraphMessage("Training succeeded: armed chain is Gold");
 }
 
 void OpenYourBoxAudioProcessorEditor::focusLibraryTab() {
@@ -988,7 +1070,8 @@ void OpenYourBoxAudioProcessorEditor::handleBrowseWeights(std::int32_t nodeId) {
               *target, file,
               [this](std::int32_t id, const std::string &path) {
                 nodeGraph.setWeightsPath(id, path);
-                persistGraph();
+                persistGraph(true, false);
+                commitHistoryFromBaseline("Load weights");
                 showGraphMessage("Loaded weights from file");
               },
               [this](std::int32_t, const std::string &error) {
@@ -996,4 +1079,189 @@ void OpenYourBoxAudioProcessorEditor::handleBrowseWeights(std::int32_t nodeId) {
               });
         });
   });
+}
+
+openyourbox::state::PatchSnapshot
+OpenYourBoxAudioProcessorEditor::captureLiveSnapshot() {
+  persistGraph(false, false);
+  return audioProcessor.capturePatchSnapshot();
+}
+
+void OpenYourBoxAudioProcessorEditor::captureHistoryBaseline() {
+  lastCommittedSnapshot = captureLiveSnapshot();
+  lastCommittedCurrent = audioProcessor.getCurrentPreset();
+}
+
+void OpenYourBoxAudioProcessorEditor::commitHistoryFromBaseline(
+    const juce::String &label) {
+  auto after = captureLiveSnapshot();
+  auto afterCurrent = audioProcessor.getCurrentPreset();
+  if (afterCurrent.isAssociated())
+    afterCurrent.dirty = true;
+  audioProcessor.getEditHistory().pushStep(
+      label, lastCommittedSnapshot, after, lastCommittedCurrent, afterCurrent);
+  lastCommittedSnapshot = after;
+  lastCommittedCurrent = afterCurrent;
+  audioProcessor.refreshPresetDirtyFromFingerprint(after.sonicFingerprint());
+  lastCommittedCurrent = audioProcessor.getCurrentPreset();
+}
+
+void OpenYourBoxAudioProcessorEditor::beginHistoryGesture(
+    const juce::String &label) {
+  audioProcessor.getEditHistory().beginGesture(label, lastCommittedSnapshot,
+                                               lastCommittedCurrent);
+}
+
+void OpenYourBoxAudioProcessorEditor::endHistoryGesture() {
+  persistGraph(true, false);
+  auto after = captureLiveSnapshot();
+  auto afterCurrent = audioProcessor.getCurrentPreset();
+  if (afterCurrent.isAssociated())
+    afterCurrent.dirty = true;
+  audioProcessor.getEditHistory().endGesture(after, afterCurrent);
+  lastCommittedSnapshot = after;
+  lastCommittedCurrent = audioProcessor.getCurrentPreset();
+  audioProcessor.refreshPresetDirtyFromFingerprint(after.sonicFingerprint());
+  lastCommittedCurrent = audioProcessor.getCurrentPreset();
+}
+
+void OpenYourBoxAudioProcessorEditor::reloadLiveGraphFromProcessor() {
+  const auto restored = audioProcessor.getGraphState();
+  if (restored.isValid())
+    nodeGraph.restoreFromValueTree(restored);
+  displayedConfiguration = audioProcessor.getRequestedConfiguration();
+  graphInitialized = true;
+  publishRuntimeControls();
+  invalidateAnalysis();
+  lastCommittedSnapshot = audioProcessor.capturePatchSnapshot();
+  lastCommittedCurrent = audioProcessor.getCurrentPreset();
+  updateDirtyFromLivePatch();
+}
+
+void OpenYourBoxAudioProcessorEditor::performUndo() {
+  const auto view = nodeGraph.getViewport();
+  if (!audioProcessor.getEditHistory().undo())
+    return;
+  nodeGraph.getViewport() = view;
+  persistGraph(false, false);
+  updateDirtyFromLivePatch();
+}
+
+void OpenYourBoxAudioProcessorEditor::performRedo() {
+  const auto view = nodeGraph.getViewport();
+  if (!audioProcessor.getEditHistory().redo())
+    return;
+  nodeGraph.getViewport() = view;
+  persistGraph(false, false);
+  updateDirtyFromLivePatch();
+}
+
+void OpenYourBoxAudioProcessorEditor::associateCurrentPreset(
+    const openyourbox::library::UserPresetEntry &entry) {
+  openyourbox::state::CurrentPresetState current;
+  current.entryId = entry.id;
+  current.name = entry.name;
+  current.dirty = false;
+  current.baselineFingerprint = captureLiveSnapshot().sonicFingerprint();
+  audioProcessor.setCurrentPreset(std::move(current));
+  lastCommittedCurrent = audioProcessor.getCurrentPreset();
+}
+
+void OpenYourBoxAudioProcessorEditor::updateDirtyFromLivePatch() {
+  audioProcessor.refreshPresetDirtyFromFingerprint(
+      audioProcessor.capturePatchSnapshot().sonicFingerprint());
+  lastCommittedCurrent = audioProcessor.getCurrentPreset();
+}
+
+void OpenYourBoxAudioProcessorEditor::handlePresetSave() {
+  const auto current = audioProcessor.getCurrentPreset();
+  if (!current.isAssociated()) {
+    showGraphMessage("Save As a name first");
+    return;
+  }
+  juce::String error;
+  const auto saved = presetLibrary.saveOverwrite(current.entryId,
+                                                 captureLiveSnapshot(), error);
+  if (!saved.has_value()) {
+    showError(error);
+    return;
+  }
+  associateCurrentPreset(*saved);
+  showGraphMessage("Saved preset " + saved->name.toStdString());
+}
+
+void OpenYourBoxAudioProcessorEditor::handlePresetSaveAs(const juce::String &name,
+                                                        bool overwrite) {
+  juce::String error;
+  const auto saved =
+      presetLibrary.saveAs(captureLiveSnapshot(), name, overwrite, error);
+  if (!saved.has_value()) {
+    if (error.containsIgnoreCase("already exists") && !overwrite) {
+      presetPanel.requestSaveAsOverwrite();
+      return;
+    }
+    showError(error.isNotEmpty() ? error : juce::String("Could not save preset"));
+    return;
+  }
+  presetPanel.closeSaveAsPopup();
+  associateCurrentPreset(*saved);
+  showGraphMessage("Saved preset " + saved->name.toStdString());
+}
+
+void OpenYourBoxAudioProcessorEditor::handlePresetLoad(const juce::String &id) {
+  juce::String error;
+  const auto snapshot = presetLibrary.loadSnapshot(id, error);
+  if (!snapshot.has_value()) {
+    showError(error);
+    return;
+  }
+  const auto *entry = presetLibrary.findEntry(id);
+  if (entry == nullptr) {
+    showError("Preset catalog entry no longer exists");
+    return;
+  }
+  const auto before = captureLiveSnapshot();
+  const auto beforeCurrent = audioProcessor.getCurrentPreset();
+  openyourbox::state::ApplyOptions options;
+  options.weightPolicy =
+      openyourbox::state::ApplyOptions::WeightPolicy::failClosed;
+  if (!audioProcessor.applyPatchSnapshot(*snapshot, options, error)) {
+    showError(error);
+    return;
+  }
+  associateCurrentPreset(*entry);
+  const auto after = audioProcessor.capturePatchSnapshot();
+  const auto afterCurrent = audioProcessor.getCurrentPreset();
+  audioProcessor.getEditHistory().pushStep("Load preset " + entry->name, before,
+                                           after, beforeCurrent, afterCurrent);
+  lastCommittedSnapshot = after;
+  lastCommittedCurrent = afterCurrent;
+  showGraphMessage("Loaded preset " + entry->name.toStdString());
+}
+
+void OpenYourBoxAudioProcessorEditor::handlePresetRename(
+    const juce::String &id, const juce::String &name) {
+  juce::String error;
+  if (!presetLibrary.rename(id, name, error)) {
+    showError(error);
+    return;
+  }
+  auto current = audioProcessor.getCurrentPreset();
+  if (current.entryId == id) {
+    current.name = name.trim();
+    audioProcessor.setCurrentPreset(current);
+    lastCommittedCurrent = current;
+  }
+}
+
+void OpenYourBoxAudioProcessorEditor::handlePresetDelete(const juce::String &id) {
+  const auto wasCurrent = audioProcessor.getCurrentPreset().entryId == id;
+  if (!presetLibrary.removeEntry(id)) {
+    showError("Could not delete preset");
+    return;
+  }
+  if (wasCurrent) {
+    audioProcessor.setCurrentPreset({});
+    lastCommittedCurrent = {};
+  }
 }

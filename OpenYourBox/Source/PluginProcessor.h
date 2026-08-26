@@ -10,9 +10,12 @@
 #include "capture/CapturePairing.h"
 #include "capture/CaptureRecorder.h"
 #include "library/TrainingLibrary.h"
+#include "state/EditHistory.h"
+#include "state/PatchSnapshot.h"
 
 #include <array>
 #include <atomic>
+#include <functional>
 #include <memory>
 #include <string>
 #include <unordered_map>
@@ -80,6 +83,63 @@ public:
   void getStateInformation(juce::MemoryBlock &destData) override;
   /** @brief Restores parameters and exact model weights when compatible. */
   void setStateInformation(const void *data, int sizeInBytes) override;
+
+  /**
+   * @brief Captures the live patch as a shared snapshot (graph + params + weights).
+   */
+  [[nodiscard]] openyourbox::state::PatchSnapshot capturePatchSnapshot();
+
+  /**
+   * @brief Applies a snapshot on the message thread with atomic runtime publish.
+   * @param snapshot Patch to restore.
+   * @param options Weight policy and viewport handling.
+   * @param error Receives a user-facing failure.
+   * @return True when the live patch was replaced.
+   */
+  bool applyPatchSnapshot(const openyourbox::state::PatchSnapshot &snapshot,
+                          const openyourbox::state::ApplyOptions &options,
+                          juce::String &error);
+
+  /** @brief Returns the session undo/redo controller. */
+  [[nodiscard]] openyourbox::state::EditHistory &getEditHistory() noexcept;
+
+  /** @brief Returns the session undo/redo controller. */
+  [[nodiscard]] const openyourbox::state::EditHistory &
+  getEditHistory() const noexcept;
+
+  /** @brief Returns the current named-preset association. */
+  [[nodiscard]] openyourbox::state::CurrentPresetState &
+  getCurrentPreset() noexcept;
+
+  /** @brief Returns the current named-preset association. */
+  [[nodiscard]] const openyourbox::state::CurrentPresetState &
+  getCurrentPreset() const noexcept;
+
+  /**
+   * @brief Replaces the current-preset association.
+   * @param next Association to store.
+   */
+  void setCurrentPreset(openyourbox::state::CurrentPresetState next);
+
+  /**
+   * @brief Marks the current preset dirty when one is associated.
+   */
+  void markPresetDirty();
+
+  /**
+   * @brief Clears dirty and refreshes the baseline fingerprint.
+   * @param fingerprint Sonic fingerprint of the just-saved or loaded patch.
+   */
+  void clearPresetDirty(const juce::String &fingerprint);
+
+  /**
+   * @brief Sets dirty from whether @p fingerprint differs from the baseline.
+   * @param fingerprint Live patch fingerprint.
+   */
+  void refreshPresetDirtyFromFingerprint(const juce::String &fingerprint);
+
+  /** @brief Optional GUI callback invoked after a successful snapshot apply. */
+  std::function<void()> onPatchApplied;
 
   /** @brief Returns mutable APVTS access for editor controls and attachments.
    */
@@ -434,6 +494,15 @@ private:
    */
   void setCaptureStatusMessage(const juce::String &message);
 
+  /**
+   * @brief Applies a history snapshot and restores current-preset state.
+   * @param snapshot Patch to restore.
+   * @param association Current-preset to restore.
+   */
+  bool applyHistorySnapshot(
+      const openyourbox::state::PatchSnapshot &snapshot,
+      const openyourbox::state::CurrentPresetState &association);
+
   juce::AudioProcessorValueTreeState parameters;
   openyourbox::dsp::WeightRandomizer modelBuilder;
   /** @brief Atomically published immutable frozen artifact registry. */
@@ -468,6 +537,8 @@ private:
   std::atomic<bool> randomizePending{false};
   std::atomic<bool> midiRandomizePending{false};
   std::atomic<bool> restoringState{false};
+  /** @brief True while applyPatchSnapshot is nested (rollback). */
+  bool applyingSnapshot = false;
   std::atomic<bool> lastRandomizeValue{false};
   std::atomic<std::uint64_t> randomizationCounter{0};
   int crossfadeSamplesRemaining = 0;
@@ -554,6 +625,10 @@ private:
   std::string trainingPreviewPath;
   /** @brief Armed node identifiers included in the training preview. */
   std::vector<std::int32_t> trainingPreviewNodeIds;
+  /** @brief Session association to a named catalog entry. */
+  openyourbox::state::CurrentPresetState currentPreset;
+  /** @brief Session undo/redo stack owned by this plugin instance. */
+  openyourbox::state::EditHistory editHistory;
 
   JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(OpenYourBoxAudioProcessor)
 };

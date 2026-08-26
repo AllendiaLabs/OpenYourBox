@@ -6,6 +6,9 @@
 #include "graph/NodeRenderer.h"
 #include "library/CopyrightAcknowledgment.h"
 #include "library/UserBoxLibrary.h"
+#include "library/UserPresetLibrary.h"
+#include "state/EditHistory.h"
+#include "state/PatchSnapshot.h"
 #include "train/TrainCoordinator.h"
 #include "ui/CaptureSamplesPanel.h"
 #include "ui/CopyrightModal.h"
@@ -14,6 +17,7 @@
 #include "ui/InfoPanel.h"
 #include "ui/TrainPanel.h"
 #include "ui/TrainingLibraryPanel.h"
+#include "ui/UserPresetPanel.h"
 #include <JuceHeader.h>
 
 #include <memory>
@@ -43,8 +47,9 @@ private:
   void updateGraphIfNeeded();
   /** @brief Publishes the current graph document to processor state.
    *  @param compileRuntime Whether the live audio graph should be rebuilt.
+   *  @param recordHistory Whether this persist should push an undo step.
    */
-  void persistGraph(bool compileRuntime = true);
+  void persistGraph(bool compileRuntime = true, bool recordHistory = true);
   /**
    * @brief Publishes Knob/XY/Gain values without rebuilding the audio graph.
    */
@@ -160,6 +165,59 @@ private:
    * @brief Opens the error dialog when the live graph reports a new failure.
    */
   void pollModelError();
+  /** @brief Captures the live patch after syncing the processor graph. */
+  [[nodiscard]] openyourbox::state::PatchSnapshot captureLiveSnapshot();
+  /** @brief Stores the current snapshot as the committed history baseline. */
+  void captureHistoryBaseline();
+  /**
+   * @brief Pushes one history step from the stored baseline to the live patch.
+   * @param label User-facing step name.
+   */
+  void commitHistoryFromBaseline(const juce::String &label);
+  /**
+   * @brief Begins a coalesced history gesture from the last committed snapshot.
+   * @param label User-facing step name.
+   */
+  void beginHistoryGesture(const juce::String &label);
+  /** @brief Ends a coalesced history gesture and pushes one step if needed. */
+  void endHistoryGesture();
+  /** @brief Reloads the editor graph from the processor after snapshot apply. */
+  void reloadLiveGraphFromProcessor();
+  /** @brief Invokes undo and preserves canvas pan/zoom. */
+  void performUndo();
+  /** @brief Invokes redo and preserves canvas pan/zoom. */
+  void performRedo();
+  /** @brief Saves over the current catalog entry. */
+  void handlePresetSave();
+  /**
+   * @brief Saves the live patch under @p name.
+   * @param name Requested catalog name.
+   * @param overwrite True after overwrite confirmation.
+   */
+  void handlePresetSaveAs(const juce::String &name, bool overwrite);
+  /**
+   * @brief Loads a catalog entry as one undoable step.
+   * @param id Catalog UUID.
+   */
+  void handlePresetLoad(const juce::String &id);
+  /**
+   * @brief Renames a catalog entry and updates current-preset chrome.
+   * @param id Catalog UUID.
+   * @param name New unique display name.
+   */
+  void handlePresetRename(const juce::String &id, const juce::String &name);
+  /**
+   * @brief Deletes a catalog entry after confirmation.
+   * @param id Catalog UUID.
+   */
+  void handlePresetDelete(const juce::String &id);
+  /**
+   * @brief Associates the live instance with a catalog entry and clears dirty.
+   * @param entry Catalog row.
+   */
+  void associateCurrentPreset(const openyourbox::library::UserPresetEntry &entry);
+  /** @brief Recomputes dirty from the live sonic fingerprint. */
+  void updateDirtyFromLivePatch();
 
   OpenYourBoxAudioProcessor &audioProcessor;
   /** @brief Owns detached freeze worker execution. */
@@ -170,14 +228,16 @@ private:
   openyourbox::ui::ImGuiHost imguiHost;
   openyourbox::graph::NodeRenderer nodeRenderer;
   openyourbox::library::UserBoxLibrary boxLibrary;
+  openyourbox::library::UserPresetLibrary presetLibrary;
   openyourbox::library::CopyrightAcknowledgment copyrightAcknowledgment;
   openyourbox::ui::TrainingLibraryPanel libraryPanel;
+  openyourbox::ui::UserPresetPanel presetPanel;
   openyourbox::ui::CaptureSamplesPanel capturePanel;
   openyourbox::ui::TrainPanel trainPanel;
   openyourbox::ui::CopyrightModal copyrightModal;
   /** @brief Copyable error dialog for plugin, train, freeze, and model failures. */
   openyourbox::ui::ErrorModal errorModal;
-  /** @brief Side-panel tab: 0 info, 1 library, 2 capture, 3 train. */
+  /** @brief Side-panel tab: 0 info, 1 library, 2 capture, 3 train, 4 presets. */
   int sidePanelTab = 0;
   /** @brief Tab index to select on the next frame, or -1. */
   int pendingSidePanelTab = -1;
@@ -223,6 +283,10 @@ private:
   std::shared_ptr<juce::FileChooser> fileChooser;
   /** @brief Clean file chosen before the processed-file dialog. */
   juce::File pendingImportClean;
+  /** @brief Last committed patch used as the undo "before" snapshot. */
+  openyourbox::state::PatchSnapshot lastCommittedSnapshot;
+  /** @brief Last committed current-preset association. */
+  openyourbox::state::CurrentPresetState lastCommittedCurrent;
 
   JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(OpenYourBoxAudioProcessorEditor)
 };

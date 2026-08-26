@@ -5,7 +5,7 @@
 Defines the shared **full plugin patch** document used by:
 
 1. DAW/host `getStateInformation` / `setStateInformation`
-2. Named user presets (Save / Save As / load / export / import)
+2. Named user presets (Save / Save As / load)
 3. Undo/redo history steps
 
 ## Logical contents

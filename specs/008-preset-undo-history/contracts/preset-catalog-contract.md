@@ -11,8 +11,8 @@ In-plugin **Presets** catalog for named full-patch recall, distinct from:
 ## Placement
 
 - Dedicated ImGui section/tab labeled **Presets** in the plugin window
-- Primary actions: **Save**, **Save As**, Load selected, Rename, Delete, Export, Import
-- Chrome shows **current preset name** and **dirty** indicator when associated (FR-018)
+- Primary actions: **Save**, **Save As**, Load selected, Rename, Delete
+- Chrome shows **current preset name** and **dirty** indicator when associated (FR-017)
 - Must not share storage or list rows with Boxes or Training Library
 
 ## Entry (UI-visible)
@@ -45,9 +45,7 @@ Internal: id, payload path, schema version.
 4. **Load** — apply snapshot to the live instance; record **one** undo step; set current name clean; refuse corrupt payloads with toast; leave live patch unchanged on failure
 5. **Rename** — unique name; conflict → block or confirm per box-library UX consistency
 6. **Delete** — confirm; remove index row + payload folder
-7. **Export** — write portable package file for one entry (full sonic payload)
-8. **Import** — read package → new/overwrite catalog entry; **name collision requires overwrite confirm**; refuse invalid packages (catalog unchanged)
-9. **Empty state** — prompt user to save the current patch as a preset
+7. **Empty state** — prompt user to save the current patch as a preset
 
 ## Persistence
 
@@ -67,8 +65,7 @@ Loading a preset must restore graph structure, parameters, and sound-relevant st
 |------|----------|
 | Empty name | Refuse save |
 | Corrupt/missing payload or unrestorable weights/Gold | Refuse load; live patch unchanged |
-| Invalid import package | Refuse; catalog unchanged |
-| Name collision (Save As / import) | Confirm overwrite or cancel |
+| Name collision (Save As) | Confirm overwrite or cancel |
 | Audio playing during load | Allowed; seamless apply via shared snapshot path |
 
 ## Non-Goals

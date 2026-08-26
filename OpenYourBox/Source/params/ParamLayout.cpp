@@ -11,10 +11,12 @@ juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout() {
       makeID(depth), "Depth", 1, 999, defaultDepth,
       juce::AudioParameterIntAttributes().withLabel("layers")));
   layout.add(std::make_unique<juce::AudioParameterInt>(
-      makeID(kernelSize), "Kernel Size", 2, 65, defaultKernelSize,
+      makeID(kernelSize), "Kernel Size", 2,
+      std::numeric_limits<int>::max(), defaultKernelSize,
       juce::AudioParameterIntAttributes().withLabel("samples")));
   layout.add(std::make_unique<juce::AudioParameterInt>(
-      makeID(channels), "Channels", 1, 512, defaultChannels));
+      makeID(channels), "Channels", 1, std::numeric_limits<int>::max(),
+      defaultChannels));
   layout.add(std::make_unique<juce::AudioParameterChoice>(
       makeID(activation), "Activation",
       juce::StringArray{"ReLU", "Sigmoid", "Tanh", "LeakyReLU", "PReLU"}, 0));

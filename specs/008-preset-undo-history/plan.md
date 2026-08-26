@@ -6,7 +6,7 @@
 
 ## Summary
 
-Add an in-plugin **named preset catalog** for full sonic patches (graph + APVTS parameters + weights/Gold artifacts), with browse, **Save / Save As**, load, rename, delete, and portable export/import—distinct from DAW project state and from the user box library. Track **current preset name + dirty** after load/edit. Add **session undo/redo** for patch-affecting edits only (exclude pan/zoom/selection), with gesture coalescing, one-shot sonic actions (e.g. randomize) as single steps, and preset load as one undoable step. Extract a shared **`PatchSnapshot`** path used by host state, presets, and history so recall fidelity stays consistent; apply on the GUI thread with atomic runtime publish so audio continues without a plugin restart.
+Add an in-plugin **named preset catalog** for full sonic patches (graph + APVTS parameters + weights/Gold artifacts), with browse, **Save / Save As**, load, rename, and delete—distinct from DAW project state and from the user box library. Track **current preset name + dirty** after load/edit. Add **session undo/redo** for patch-affecting edits only (exclude pan/zoom/selection), with gesture coalescing, one-shot sonic actions (e.g. randomize) as single steps, and preset load as one undoable step. Extract a shared **`PatchSnapshot`** path used by host state, presets, and history so recall fidelity stays consistent; apply on the GUI thread with atomic runtime publish so audio continues without a plugin restart.
 
 ## Technical Context
 
@@ -67,7 +67,7 @@ OpenYourBox/
 │   ├── PluginEditor.cpp / .h        # Preset panel, Undo/Redo UI + shortcuts, gesture begin/end, current/dirty chrome
 │   ├── library/
 │   │   ├── UserDataPaths.h          # Add presetsDirectory() → userDataRoot()/UserPresets
-│   │   ├── UserPresetLibrary.h/.cpp # NEW: catalog CRUD, export/import, Save/Save As payloads
+│   │   ├── UserPresetLibrary.h/.cpp # NEW: catalog CRUD, Save/Save As payloads
 │   │   └── UserBoxLibrary.*         # Unchanged; keep boxes ≠ presets
 │   ├── state/                       # NEW: shared patch + history helpers
 │   │   ├── PatchSnapshot.h/.cpp     # Serialize/apply full patch (graph + APVTS + weights bytes)
@@ -75,7 +75,7 @@ OpenYourBox/
 │   ├── graph/
 │   │   └── NodeGraph.*              # Ensure toValueTree/fromValueTree sufficient for full restore
 │   └── ui/
-│       └── UserPresetPanel.h/.cpp   # NEW: ImGui preset browser (Save/Save As/load/rename/delete/import/export)
+│       └── UserPresetPanel.h/.cpp   # NEW: ImGui preset browser (Save/Save As/load/rename/delete)
 Tests/
 ├── UserPresetLibraryTests.cpp       # NEW
 ├── PatchSnapshotTests.cpp           # NEW

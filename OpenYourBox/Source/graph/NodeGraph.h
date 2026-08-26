@@ -571,6 +571,19 @@ public:
   [[nodiscard]] juce::ValueTree toValueTree() const;
 
   /**
+   * @brief Returns true when @p tree is a GraphDocument this build can restore.
+   *
+   * Rejects unknown element types so apply can fail closed without a partial
+   * graph. Groups, layout positions, and Gold artifact paths are accepted when
+   * well-formed.
+   *
+   * @param tree Candidate graph document.
+   * @param error Receives a user-facing refusal.
+   */
+  static bool documentIsRestorable(const juce::ValueTree &tree,
+                                   juce::String &error);
+
+  /**
    * @brief Restores a graph from a JUCE value tree.
    * @param tree Persisted graph state.
    * @return True when the tree was recognized and restored.

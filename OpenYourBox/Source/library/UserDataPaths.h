@@ -74,4 +74,14 @@ inline juce::File samplesDirectory() {
 inline juce::File boxesDirectory() {
   return ensureDirectory(userDataRoot().getChildFile("Boxes"));
 }
+
+/**
+ * @brief Directory where named full-patch user presets are stored.
+ *
+ * Distinct from @ref boxesDirectory (reusable components) and from the DAW
+ * project state owned by the host.
+ */
+inline juce::File presetsDirectory() {
+  return ensureDirectory(userDataRoot().getChildFile("UserPresets"));
+}
 } // namespace openyourbox::library

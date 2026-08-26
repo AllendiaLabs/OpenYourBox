@@ -37,7 +37,7 @@ One named catalog row.
 | artifacts/ | optional files | Copied weight/BlackBox files referenced by graph; paths rewritten relative |
 
 **Validation**:
-- Name unique; overwrite only after confirm (Save As / import / colliding first save)
+- Name unique; overwrite only after confirm (Save As / colliding first save)
 - Delete removes index row + payload folder
 - Corrupt payload → load refused; catalog row may remain until user deletes
 
@@ -107,18 +107,6 @@ Session undo/redo controller (per plugin instance).
 4. Redo: apply `after` + `afterCurrentPreset`
 5. New PushStep after Undo: clear redo
 6. Processor destroy: history discarded
-
-## Entity: PortablePresetPackage
-
-Export/import file.
-
-| Field | Type | Notes |
-|-------|------|--------|
-| manifest | JSON | name hint, schemaVersion, artifact list |
-| patch | PatchSnapshot file | Required |
-| artifacts | files | Optional accompanying binaries |
-
-**Validation**: Missing/invalid manifest or patch → import refused; catalog unchanged. Name collision → overwrite confirm.
 
 ## Relationship summary
 

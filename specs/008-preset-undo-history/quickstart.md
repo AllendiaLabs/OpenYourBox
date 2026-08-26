@@ -29,7 +29,7 @@ Manual / integration validation for `008-preset-undo-history`. Prefer a Debug/Re
 
 ## 3. Overwrite confirm
 
-1. Save As current state as `PatchB2` again (or import under that name).
+1. Save As current state as `PatchB2` again.
 2. **Expect**: overwrite confirmation; cancel leaves previous payload; confirm replaces it.
 
 ## 4. Undo / redo edits
@@ -65,31 +65,24 @@ Manual / integration validation for `008-preset-undo-history`. Prefer a Debug/Re
 3. Undo once.
 4. **Expect**: pre-load patch restored **including** prior current-preset name and dirty; Redo restores the loaded preset (Story 5, FR-011).
 
-## 9. Export / import
-
-1. Export `PatchB2` to a portable file.
-2. Delete `PatchB2` from the catalog (confirm).
-3. Import the file (name `PatchB2` or new name; test overwrite confirm if colliding).
-4. Load it.
-5. **Expect**: patch matches original (SC-008, FR-012).
-
-## 10. Host state still works
+## 9. Host state still works
 
 1. With a loaded/edited patch, save the DAW project; reload the project/session.
-2. **Expect**: session patch restores correctly even after using the Presets catalog (SC-007, FR-014).
+2. **Expect**: session patch restores correctly even after using the Presets catalog (SC-007, FR-013).
 
-## 11. Empty / failure paths
+## 10. Empty / failure paths
 
 1. Open Presets with empty catalog → empty-state message.
 2. Attempt save with blank name → refused.
-3. (Optional) Point import at a garbage file → refused; catalog unchanged.
 
 ## Automated hooks (when implemented)
 
-- Unit: `UserPresetLibrary` index CRUD, overwrite, delete payload cleanup, import collision confirm path.
-- Unit: `PatchSnapshot` round-trip equality for graph + parameters + weights when present.
-- Unit: `EditHistory` depth cap, redo clear, gesture coalesce, randomize one step, preset-load single step, pan/zoom ignored.
-- Integration: apply while “playing” does not allocate on the simulated audio path (existing RT discipline tests if applicable).
+- Unit: `UserPresetLibrary` index CRUD, overwrite, delete payload cleanup — `Tests/UserPresetLibraryTests.cpp`
+- Unit: `PatchSnapshot` round-trip equality for graph + parameters + weights when present — `Tests/PatchSnapshotTests.cpp`
+- Unit: `EditHistory` depth cap, redo clear, gesture coalesce, randomize one step, preset-load single step, pan/zoom ignored — `Tests/EditHistoryTests.cpp`
+- Integration: `Tests/ProcessorIntegrationTests.cpp` covers `PatchSnapshot`-based `getStateInformation` / `setStateInformation`
+
+Manual host walkthrough (Save/Load chrome, shortcuts, freeze/train history, Ableton project recall) still required after installing the built VST3/AU.
 
 ## References
 

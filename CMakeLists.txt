@@ -146,7 +146,10 @@ target_sources(OpenYourBox PRIVATE
     OpenYourBox/Source/library/CopyrightAcknowledgment.cpp
     OpenYourBox/Source/library/TrainingLibrary.cpp
     OpenYourBox/Source/library/UserBoxLibrary.cpp
+    OpenYourBox/Source/library/UserPresetLibrary.cpp
     OpenYourBox/Source/params/ParamLayout.cpp
+    OpenYourBox/Source/state/EditHistory.cpp
+    OpenYourBox/Source/state/PatchSnapshot.cpp
     OpenYourBox/Source/train/TrainCoordinator.cpp
     OpenYourBox/Source/ui/CaptureSamplesPanel.cpp
     OpenYourBox/Source/ui/CopyrightModal.cpp
@@ -156,7 +159,8 @@ target_sources(OpenYourBox PRIVATE
     OpenYourBox/Source/ui/RandomizeButton.cpp
     OpenYourBox/Source/ui/TrainPanel.cpp
     OpenYourBox/Source/ui/TrainingLibraryPanel.cpp
-    OpenYourBox/Source/ui/UserBoxLibraryPanel.cpp)
+    OpenYourBox/Source/ui/UserBoxLibraryPanel.cpp
+    OpenYourBox/Source/ui/UserPresetPanel.cpp)
 
 target_include_directories(OpenYourBox PRIVATE
     OpenYourBox/Source
@@ -284,6 +288,54 @@ if(BUILD_TESTING)
         juce::juce_recommended_config_flags
         juce::juce_recommended_warning_flags)
     add_test(NAME OpenYourBoxLibrary COMMAND OpenYourBoxLibraryTests)
+
+    juce_add_console_app(OpenYourBoxPatchSnapshotTests PRODUCT_NAME "OpenYourBox Patch Snapshot Tests")
+    target_sources(OpenYourBoxPatchSnapshotTests PRIVATE Tests/PatchSnapshotTests.cpp)
+    target_include_directories(OpenYourBoxPatchSnapshotTests BEFORE PRIVATE
+        "${CMAKE_CURRENT_BINARY_DIR}/OpenYourBox_artefacts/JuceLibraryCode"
+        OpenYourBox/Source
+        "${TORCH_INCLUDE_DIRS}")
+    target_link_libraries(OpenYourBoxPatchSnapshotTests PRIVATE
+        OpenYourBox
+        OpenYourBoxResources
+        juce::juce_audio_utils
+        juce::juce_dsp
+        juce::juce_opengl
+        juce::juce_recommended_config_flags
+        juce::juce_recommended_warning_flags)
+    add_test(NAME OpenYourBoxPatchSnapshot COMMAND OpenYourBoxPatchSnapshotTests)
+
+    juce_add_console_app(OpenYourBoxPresetLibraryTests PRODUCT_NAME "OpenYourBox Preset Library Tests")
+    target_sources(OpenYourBoxPresetLibraryTests PRIVATE Tests/UserPresetLibraryTests.cpp)
+    target_include_directories(OpenYourBoxPresetLibraryTests BEFORE PRIVATE
+        "${CMAKE_CURRENT_BINARY_DIR}/OpenYourBox_artefacts/JuceLibraryCode"
+        OpenYourBox/Source
+        "${TORCH_INCLUDE_DIRS}")
+    target_link_libraries(OpenYourBoxPresetLibraryTests PRIVATE
+        OpenYourBox
+        OpenYourBoxResources
+        juce::juce_audio_utils
+        juce::juce_dsp
+        juce::juce_opengl
+        juce::juce_recommended_config_flags
+        juce::juce_recommended_warning_flags)
+    add_test(NAME OpenYourBoxPresetLibrary COMMAND OpenYourBoxPresetLibraryTests)
+
+    juce_add_console_app(OpenYourBoxEditHistoryTests PRODUCT_NAME "OpenYourBox Edit History Tests")
+    target_sources(OpenYourBoxEditHistoryTests PRIVATE Tests/EditHistoryTests.cpp)
+    target_include_directories(OpenYourBoxEditHistoryTests BEFORE PRIVATE
+        "${CMAKE_CURRENT_BINARY_DIR}/OpenYourBox_artefacts/JuceLibraryCode"
+        OpenYourBox/Source
+        "${TORCH_INCLUDE_DIRS}")
+    target_link_libraries(OpenYourBoxEditHistoryTests PRIVATE
+        OpenYourBox
+        OpenYourBoxResources
+        juce::juce_audio_utils
+        juce::juce_dsp
+        juce::juce_opengl
+        juce::juce_recommended_config_flags
+        juce::juce_recommended_warning_flags)
+    add_test(NAME OpenYourBoxEditHistory COMMAND OpenYourBoxEditHistoryTests)
 
     add_test(NAME OpenYourBoxFreezeWorker
         COMMAND "${Python3_EXECUTABLE}"

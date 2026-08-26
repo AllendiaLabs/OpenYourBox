@@ -31,6 +31,6 @@
 
 ## Notes
 
-- Clarification session 2026-08-26 resolved five decisions: full sonic preset payload; current name + dirty with Save/Save As; undoable one-shot sonic actions; import overwrite confirmation; undo excludes pan/zoom/selection.
+- Clarification session 2026-08-26 resolved four decisions: full sonic preset payload; current name + dirty with Save/Save As; undoable one-shot sonic actions; undo excludes pan/zoom/selection.
 - Spec Quality Checklist: 16/16 → 16/16 items passing (no marker changes).
 - Ready for `/speckit-plan`.

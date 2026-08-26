@@ -1,5 +1,6 @@
 #include "PluginProcessor.h"
 #include "graph/NodeGraph.h"
+#include "state/PatchSnapshot.h"
 
 #include <JuceHeader.h>
 
@@ -328,6 +329,27 @@ int main() {
     passed &= expect(activationProcessor.getRequestedConfiguration().activation ==
                          openyourbox::dsp::ActivationType::prelu,
                      "PReLU must persist through the host activation parameter");
+  }
+
+  {
+    OpenYourBoxAudioProcessor snapshotSource;
+    snapshotSource.setGraphState(graph.toValueTree());
+    snapshotSource.prepareToPlay(sampleRate, blockSize);
+    passed &= expect(waitForGraphRuntime(snapshotSource, 3),
+                     "snapshot source graph must compile");
+    const auto snapshot = snapshotSource.capturePatchSnapshot();
+    juce::MemoryBlock encoded;
+    snapshotSource.getStateInformation(encoded);
+    OpenYourBoxAudioProcessor snapshotRestored;
+    snapshotRestored.setStateInformation(encoded.getData(),
+                                         static_cast<int>(encoded.getSize()));
+    juce::String applyError;
+    openyourbox::state::ApplyOptions options;
+    OpenYourBoxAudioProcessor applied;
+    passed &= expect(applied.applyPatchSnapshot(snapshot, options, applyError),
+                     "PatchSnapshot apply must restore host-equivalent state");
+    passed &= expect(snapshotRestored.capturePatchSnapshot().graphDocument.isValid(),
+                     "get/setStateInformation must use PatchSnapshot round-trip");
   }
 
   if (passed)

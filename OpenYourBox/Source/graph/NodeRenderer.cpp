@@ -269,6 +269,7 @@ void NodeRenderer::render(NodeGraph &graph,
   mutatedThisFrame = false;
   layoutMutatedThisFrame = false;
   recompileThisFrame = false;
+  patchGestureHeldThisFrame = false;
   activeBoxLibrary = boxLibrary;
   if (context == nullptr) {
     ed::Config configuration;
@@ -377,6 +378,7 @@ void NodeRenderer::render(NodeGraph &graph,
   dropTargetGroupId = 0;
   const auto dragging =
       ImGui::IsMouseDragging(ImGuiMouseButton_Left, 3.0f);
+  const auto hadLayoutDrag = draggingNodeId != 0 || draggingGroupId != 0;
   const auto hoveredNode = ed::GetHoveredNode();
   std::int32_t hoveredGroupOnCanvas = 0;
   if (hoveredNode) {
@@ -413,6 +415,10 @@ void NodeRenderer::render(NodeGraph &graph,
     }
     draggingNodeId = 0;
     draggingGroupId = 0;
+    if (hadLayoutDrag) {
+      patchGestureHeldThisFrame = true;
+      patchGestureLabel = "Move box";
+    }
   } else if (draggingNodeId == 0 && draggingGroupId == 0 && dragging) {
     if (hoveredNode && !ed::GetHoveredPin() && !ed::GetHoveredLink()) {
       const auto id = static_cast<std::int32_t>(hoveredNode.Get());
@@ -423,8 +429,11 @@ void NodeRenderer::render(NodeGraph &graph,
     }
   }
 
-  if (draggingNodeId != 0 || draggingGroupId != 0)
+  if (draggingNodeId != 0 || draggingGroupId != 0) {
     dropTargetGroupId = hoveredGroupOnCanvas;
+    patchGestureHeldThisFrame = true;
+    patchGestureLabel = "Move box";
+  }
 
   syncEditorTransforms(graph);
 
@@ -661,10 +670,20 @@ void NodeRenderer::render(NodeGraph &graph,
   ed::SetCurrentEditor(nullptr);
   ImGui::EndChild();
   ImGui::EndChild();
+  if (patchGestureHeldThisFrame && !patchGestureOpen) {
+    patchGestureOpen = true;
+    if (callbacks.beginPatchGesture)
+      callbacks.beginPatchGesture(patchGestureLabel);
+  }
   if (mutatedThisFrame && callbacks.documentChanged)
     callbacks.documentChanged(recompileThisFrame, true);
   else if (layoutMutatedThisFrame && callbacks.documentChanged)
     callbacks.documentChanged(false, false);
+  if (patchGestureOpen && !patchGestureHeldThisFrame) {
+    patchGestureOpen = false;
+    if (callbacks.endPatchGesture)
+      callbacks.endPatchGesture();
+  }
 }
 
 std::int32_t NodeRenderer::getPrimarySelectedNodeId() const noexcept {
@@ -871,6 +890,10 @@ void NodeRenderer::renderNode(NodeGraph &graph, GraphNode &node,
           ImGui::GetColorU32(ImGuiCol_FrameBg), ImGui::GetStyle().FrameRounding);
 
       dragSteps = propertyDragSteps("##drag", ImVec2(handleWidth, fieldHeight));
+      if (ImGui::IsItemActive()) {
+        patchGestureHeldThisFrame = true;
+        patchGestureLabel = "Parameter edit";
+      }
       if (dragSteps != 0) {
         ensurePropertyCopyCount(property, copyCount);
         if (property.kind == PropertyKind::real) {
@@ -976,6 +999,10 @@ void NodeRenderer::renderNode(NodeGraph &graph, GraphNode &node,
 
       auto floatValue = property.floatValue;
       dragSteps = propertyDragSteps("##drag", ImVec2(handleWidth, fieldHeight));
+      if (ImGui::IsItemActive()) {
+        patchGestureHeldThisFrame = true;
+        patchGestureLabel = "Parameter edit";
+      }
       if (dragSteps != 0) {
         const auto span = property.floatMaximum - property.floatMinimum;
         const auto stepPerTick =
@@ -1026,6 +1053,10 @@ void NodeRenderer::renderNode(NodeGraph &graph, GraphNode &node,
           ImGui::GetColorU32(ImGuiCol_FrameBg), ImGui::GetStyle().FrameRounding);
 
       dragSteps = propertyDragSteps("##drag", ImVec2(handleWidth, fieldHeight));
+      if (ImGui::IsItemActive()) {
+        patchGestureHeldThisFrame = true;
+        patchGestureLabel = "Parameter edit";
+      }
       if (dragSteps != 0)
         value += dragSteps;
       ImGui::SameLine(0.0f, 0.0f);
@@ -1244,6 +1275,10 @@ void NodeRenderer::renderKnobControl(NodeGraph &graph, GraphNode &node,
     if (callbacks.knobChanged)
       callbacks.knobChanged(node.id, node.conditioningValue);
   }
+  if (ImGui::IsItemActive()) {
+    patchGestureHeldThisFrame = true;
+    patchGestureLabel = "Parameter edit";
+  }
   ImGui::SameLine();
   ImGui::Text("%.2f", static_cast<double>(node.conditioningValue));
 }
@@ -1281,6 +1316,10 @@ void NodeRenderer::renderXyPad(NodeGraph &graph, GraphNode &node,
     if (callbacks.xyChanged)
       callbacks.xyChanged(node.id, node.conditioningX, node.conditioningY);
     handle = ImVec2(origin.x + nx * padSize.x, origin.y + (1.0f - ny) * padSize.y);
+  }
+  if (active) {
+    patchGestureHeldThisFrame = true;
+    patchGestureLabel = "Parameter edit";
   }
   draw->AddCircleFilled(handle, 5.0f, ImGui::GetColorU32(ImGuiCol_SliderGrabActive));
   ImGui::Text("X %.2f  Y %.2f", static_cast<double>(node.conditioningX),

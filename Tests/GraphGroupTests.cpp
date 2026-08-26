@@ -64,6 +64,23 @@ int main() {
                        .accepted,
                    "conv B to output");
 
+  passed &= expect(graph.setProperty(convA, "kernel_size", 5),
+                   "scalar kernel size can be written once");
+  passed &= expect(graph.setProperty(convA, "kernel_size", 9),
+                   "a later scalar write is accepted");
+  {
+    const auto *node = graph.findNode(convA);
+    const openyourbox::graph::NodeProperty *kernel = nullptr;
+    if (node != nullptr) {
+      for (const auto &property : node->properties) {
+        if (property.key == "kernel_size")
+          kernel = &property;
+      }
+    }
+    passed &= expect(kernel != nullptr && kernel->value == 9,
+                     "repeated scalar property writes keep the latest value");
+  }
+
   const auto ioGroup = graph.createGroup({input, convA});
   passed &= expect(!ioGroup.accepted, "audio I/O must refuse grouping");
 
