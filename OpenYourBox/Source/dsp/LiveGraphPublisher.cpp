@@ -88,7 +88,8 @@ void LiveGraphPublisher::compileLatest() {
          "Serialized graph state could not be restored for compilation"});
     return;
   }
-  const auto result = LiveGraphEngine::compile(graph, options, resolver);
+  auto compileGraph = graph.withInvisibleCopiesMaterialized();
+  const auto result = LiveGraphEngine::compile(compileGraph, options, resolver);
   if (!result.succeeded()) {
     if (result.error.code == LiveGraphErrorCode::incompletePath)
       publishIdle();

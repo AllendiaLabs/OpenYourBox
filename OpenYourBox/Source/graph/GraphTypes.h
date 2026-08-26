@@ -86,6 +86,45 @@ inline constexpr float gainMinimum = 0.1f;
 inline constexpr float gainMaximum = 10.0f;
 /** @brief Neutral Gain value that leaves nonlinearity slope unchanged. */
 inline constexpr float gainDefault = 1.0f;
+/** @brief Default copies parameter N for a new group. */
+inline constexpr int defaultGroupCopies = 1;
+/** @brief Inclusive upper bound for a group's copies parameter. */
+inline constexpr int maximumGroupCopies = 32;
+/** @brief Supported nesting depth for groups and subgroups. */
+inline constexpr int maximumGroupNestingDepth = 8;
+/** @brief Bit flag applied to member pin ids drawn as group I/O pins. */
+inline constexpr std::int32_t collapsedPinFlag = 0x20000000;
+/** @brief Group chrome colour for expanded imgui-node-editor frames. */
+inline const juce::Colour groupFrameColour{70, 130, 190};
+/** @brief Highlight colour when an element will be added to a group. */
+inline const juce::Colour groupDropHighlightColour{120, 210, 255};
+
+/**
+ * @brief Returns true when @p pinId is a collapsed-group virtual pin.
+ * @param pinId Candidate pin identifier.
+ */
+inline bool isCollapsedGroupPin(std::int32_t pinId) noexcept {
+  return (static_cast<std::uint32_t>(pinId) &
+          static_cast<std::uint32_t>(collapsedPinFlag)) != 0;
+}
+
+/**
+ * @brief Maps a collapsed-group virtual pin back to the member pin.
+ * @param pinId Virtual or real pin identifier.
+ */
+inline std::int32_t resolveCollapsedPin(std::int32_t pinId) noexcept {
+  return static_cast<std::int32_t>(static_cast<std::uint32_t>(pinId) &
+                                   ~static_cast<std::uint32_t>(collapsedPinFlag));
+}
+
+/**
+ * @brief Builds a collapsed-group virtual pin id for a member pin.
+ * @param memberPinId Underlying member pin identifier.
+ */
+inline std::int32_t collapsedGroupPinId(std::int32_t memberPinId) noexcept {
+  return static_cast<std::int32_t>(static_cast<std::uint32_t>(memberPinId) |
+                                   static_cast<std::uint32_t>(collapsedPinFlag));
+}
 
 /** @brief Returns true for the undeletable host audio boundary nodes. */
 inline bool isFixedIoType(NodeType type) noexcept {
@@ -625,6 +664,72 @@ struct NodeMetrics {
   double inferenceTimeMilliseconds = 0.0;
 };
 
+/**
+ * @brief Independent weight/artifact identity for one invisible group copy.
+ *
+ * Visible graph elements stay unique. DSP unrolls copies using these slots so
+ * live/freeze seeds stay independent across copies. Training does not load
+ * these seeds; it initializes with PyTorch defaults.
+ */
+struct CopyWeightSlot {
+  /** @brief Randomization seed used when provenance is random. */
+  std::int32_t seed = 42;
+  /** @brief Whether this copy loads a file or a seed. */
+  WeightsProvenance provenance = WeightsProvenance::random;
+  /** @brief Filesystem path of trained or browsed weights. */
+  std::string weightsPath;
+  /** @brief Optional frozen artifact used by this copy. */
+  std::string artifactPath;
+};
+
+/** @brief Named hierarchical container on the canvas. */
+struct GraphGroup {
+  /** @brief Stable identifier unique among nodes and groups. */
+  std::int32_t id = 0;
+  /** @brief User-visible group title. */
+  std::string name = "Group";
+  /** @brief Parent group, or empty at the canvas root. */
+  std::optional<std::int32_t> parentGroupId;
+  /** @brief Child node ids and nested group ids. */
+  std::vector<std::int32_t> memberIds;
+  /** @brief Presentation-only collapse flag (library insert still forces true). */
+  bool collapsed = false;
+  /** @brief Independent serial copy count (DSP-only; UI stays unique). */
+  int copies = defaultGroupCopies;
+  /** @brief Group box origin in parent-canvas or parent-group space. */
+  juce::Point<float> position;
+  /** @brief Group box size in parent-canvas or parent-group space. */
+  juce::Point<float> size{220.0f, 140.0f};
+  /** @brief Camera origin used when this group is the focused canvas. */
+  juce::Point<float> viewPan;
+  /** @brief Camera zoom used when this group is the focused canvas. */
+  float viewZoom = 1.0f;
+};
+
+/** @brief Outcome of a group create/membership/copies mutation. */
+struct GroupActionResult {
+  /** @brief True when the graph was mutated. */
+  bool accepted = false;
+  /** @brief User-facing reason when the action was refused. */
+  std::string message;
+  /** @brief Created or targeted group id when accepted. */
+  std::int32_t groupId = 0;
+};
+
+/** @brief Boundary-crossing port used by group I/O pins and copy chaining. */
+struct GroupBoundaryPort {
+  /** @brief Member pin that the group pin mediates. */
+  std::int32_t memberPinId = 0;
+  /** @brief Node that owns the member pin. */
+  std::int32_t memberNodeId = 0;
+  /** @brief Direction of the port on the group boundary. */
+  PinKind kind = PinKind::input;
+  /** @brief Shape copied from the member pin. */
+  ShapeSignature shape;
+  /** @brief Label shown on the group pin. */
+  std::string label;
+};
+
 /** @brief Editable visual and processing description of one operation. */
 struct GraphNode {
   /** @brief Stable graph-wide node identifier. */
@@ -691,6 +796,15 @@ struct GraphNode {
   float fidelityPercent = defaultFidelityPercent;
   /** @brief True when compactness PCA buffers are present on the artifact. */
   bool compactnessReady = false;
+  /** @brief Owning group, or empty when the node is on the root canvas. */
+  std::optional<std::int32_t> parentGroupId;
+  /**
+   * @brief Per-copy weights for enclosing groups with N&gt;1.
+   *
+   * Slot 0 mirrors `seed` / `weightsPath` / `artifactPath`. Extra slots hold
+   * independent copies that the UI never draws.
+   */
+  std::vector<CopyWeightSlot> copySlots;
 };
 
 /** @brief Directed connection between two graph pins. */
@@ -711,6 +825,10 @@ struct ViewportState {
   float zoom = 1.0f;
   /** @brief Whether the clickable overview map is visible. */
   bool mapVisible = true;
+  /**
+   * @brief Group whose interior is the current canvas, or empty at the graph root.
+   */
+  std::optional<std::int32_t> focusedGroupId;
 };
 
 /** @brief Outcome returned when an interactive connection is validated. */
@@ -819,6 +937,27 @@ inline std::int32_t clampSeed(std::int32_t seed) noexcept {
   return std::clamp(seed, minimumSeed, maximumSeed);
 }
 
+/**
+ * @brief Derives a per-copy randomization seed from a visible base seed.
+ * @param baseSeed Seed shown on the editable template element (slot 0).
+ * @param copyIndex Zero-based materialized copy index.
+ * @return `baseSeed + copyIndex` wrapped into `[minimumSeed, maximumSeed]`.
+ *
+ * Live audition and freeze use these seeds. Training builds fresh PyTorch
+ * modules with framework default initialization and does not consume them.
+ */
+inline std::int32_t seedForCopySlot(std::int32_t baseSeed,
+                                   std::size_t copyIndex) noexcept {
+  constexpr auto span =
+      static_cast<std::int64_t>(maximumSeed) - minimumSeed + 1;
+  const auto mixed =
+      (static_cast<std::int64_t>(clampSeed(baseSeed)) -
+       minimumSeed + static_cast<std::int64_t>(copyIndex)) %
+      span;
+  return static_cast<std::int32_t>(minimumSeed +
+                                  (mixed < 0 ? mixed + span : mixed));
+}
+
 /** @brief Minimum supported node-editor zoom level. */
 inline constexpr float minimumZoom = 0.25f;
 /** @brief Maximum supported node-editor zoom level. */
@@ -827,4 +966,69 @@ inline constexpr float maximumZoom = 2.0f;
 inline constexpr float mapWidth = 190.0f;
 /** @brief Default minimap height in Dear ImGui pixels. */
 inline constexpr float mapHeight = 125.0f;
+/** @brief Padding around members when a group is created or fitted. */
+inline constexpr float groupFitPadding = 28.0f;
+/** @brief Extra top padding reserved for the group header and copies control. */
+inline constexpr float groupHeaderHeight = 52.0f;
+/** @brief Inset from a group box origin used when mapping member coordinates. */
+inline constexpr float groupContentPad = 8.0f;
+
+/**
+ * @brief Offset from a group box origin used when mapping member coordinates.
+ */
+inline juce::Point<float> groupContentOffset() noexcept {
+  return {groupContentPad, groupHeaderHeight};
+}
+
+/**
+ * @brief Captures a node's primary weight fields into a copy slot.
+ * @param node Source element.
+ */
+inline CopyWeightSlot copySlotFromNode(const GraphNode &node) {
+  CopyWeightSlot slot;
+  slot.seed = node.seed;
+  slot.provenance = node.weightsProvenance;
+  slot.weightsPath = node.weightsPath;
+  slot.artifactPath = node.artifactPath;
+  return slot;
+}
+
+/**
+ * @brief Writes one copy slot onto a node's primary weight fields.
+ * @param node Destination element.
+ * @param slot Independent copy identity to apply.
+ */
+inline void applyCopySlot(GraphNode &node, const CopyWeightSlot &slot) {
+  node.seed = slot.seed;
+  node.weightsProvenance = slot.provenance;
+  node.weightsPath = slot.weightsPath;
+  if (!slot.artifactPath.empty())
+    node.artifactPath = slot.artifactPath;
+}
+
+/**
+ * @brief Ensures @p node has @p count copy slots, deriving or cloning on growth.
+ * @param node Element whose enclosing groups changed copy count.
+ * @param count Required slot count (≥ 1).
+ *
+ * Random-provenance slots use `seedForCopySlot` so raising N does not leave
+ * identical live weights. File-provenance slots still clone the previous last
+ * path (FR-017c).
+ */
+inline void ensureCopySlotCount(GraphNode &node, int count) {
+  const auto target = std::max(1, count);
+  if (node.copySlots.empty())
+    node.copySlots.push_back(copySlotFromNode(node));
+  node.copySlots.front() = copySlotFromNode(node);
+  while (static_cast<int>(node.copySlots.size()) < target) {
+    CopyWeightSlot slot = node.copySlots.back();
+    const auto index = node.copySlots.size();
+    if (slot.provenance == WeightsProvenance::random)
+      slot.seed = seedForCopySlot(node.seed, index);
+    node.copySlots.push_back(std::move(slot));
+  }
+  if (static_cast<int>(node.copySlots.size()) > target)
+    node.copySlots.resize(static_cast<std::size_t>(target));
+  applyCopySlot(node, node.copySlots.front());
+}
 } // namespace openyourbox::graph

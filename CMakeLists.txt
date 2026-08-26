@@ -145,6 +145,7 @@ target_sources(OpenYourBox PRIVATE
     OpenYourBox/Source/graph/RaveLayouts.cpp
     OpenYourBox/Source/library/CopyrightAcknowledgment.cpp
     OpenYourBox/Source/library/TrainingLibrary.cpp
+    OpenYourBox/Source/library/UserBoxLibrary.cpp
     OpenYourBox/Source/params/ParamLayout.cpp
     OpenYourBox/Source/train/TrainCoordinator.cpp
     OpenYourBox/Source/ui/CaptureSamplesPanel.cpp
@@ -154,7 +155,8 @@ target_sources(OpenYourBox PRIVATE
     OpenYourBox/Source/ui/InfoPanel.cpp
     OpenYourBox/Source/ui/RandomizeButton.cpp
     OpenYourBox/Source/ui/TrainPanel.cpp
-    OpenYourBox/Source/ui/TrainingLibraryPanel.cpp)
+    OpenYourBox/Source/ui/TrainingLibraryPanel.cpp
+    OpenYourBox/Source/ui/UserBoxLibraryPanel.cpp)
 
 target_include_directories(OpenYourBox PRIVATE
     OpenYourBox/Source
@@ -250,6 +252,38 @@ if(BUILD_TESTING)
         juce::juce_recommended_config_flags
         juce::juce_recommended_warning_flags)
     add_test(NAME OpenYourBoxLiveGraph COMMAND OpenYourBoxLiveGraphTests)
+
+    juce_add_console_app(OpenYourBoxGroupTests PRODUCT_NAME "OpenYourBox Group Tests")
+    target_sources(OpenYourBoxGroupTests PRIVATE Tests/GraphGroupTests.cpp)
+    target_include_directories(OpenYourBoxGroupTests BEFORE PRIVATE
+        "${CMAKE_CURRENT_BINARY_DIR}/OpenYourBox_artefacts/JuceLibraryCode"
+        OpenYourBox/Source
+        "${TORCH_INCLUDE_DIRS}")
+    target_link_libraries(OpenYourBoxGroupTests PRIVATE
+        OpenYourBox
+        OpenYourBoxResources
+        juce::juce_audio_utils
+        juce::juce_dsp
+        juce::juce_opengl
+        juce::juce_recommended_config_flags
+        juce::juce_recommended_warning_flags)
+    add_test(NAME OpenYourBoxGroups COMMAND OpenYourBoxGroupTests)
+
+    juce_add_console_app(OpenYourBoxLibraryTests PRODUCT_NAME "OpenYourBox Library Tests")
+    target_sources(OpenYourBoxLibraryTests PRIVATE Tests/UserBoxLibraryTests.cpp)
+    target_include_directories(OpenYourBoxLibraryTests BEFORE PRIVATE
+        "${CMAKE_CURRENT_BINARY_DIR}/OpenYourBox_artefacts/JuceLibraryCode"
+        OpenYourBox/Source
+        "${TORCH_INCLUDE_DIRS}")
+    target_link_libraries(OpenYourBoxLibraryTests PRIVATE
+        OpenYourBox
+        OpenYourBoxResources
+        juce::juce_audio_utils
+        juce::juce_dsp
+        juce::juce_opengl
+        juce::juce_recommended_config_flags
+        juce::juce_recommended_warning_flags)
+    add_test(NAME OpenYourBoxLibrary COMMAND OpenYourBoxLibraryTests)
 
     add_test(NAME OpenYourBoxFreezeWorker
         COMMAND "${Python3_EXECUTABLE}"

@@ -25,3 +25,6 @@
 2) if in a group, right click on them should allow the user to create a macro and assign to it (adds control to group box), or all similar parameters/controls in the group (not subgroups), or assign to existing macro
 3) when assigned to macro, disable it so that users cannot desync values
 4) add necessary parameters to group box, including trackpad and knobs, to control values from the group box
+
+
+- [ ] check rf same as in rave paper

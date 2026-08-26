@@ -5,6 +5,7 @@
 #include "graph/NodeGraph.h"
 #include "graph/NodeRenderer.h"
 #include "library/CopyrightAcknowledgment.h"
+#include "library/UserBoxLibrary.h"
 #include "train/TrainCoordinator.h"
 #include "ui/CaptureSamplesPanel.h"
 #include "ui/CopyrightModal.h"
@@ -168,6 +169,7 @@ private:
   openyourbox::graph::NodeGraph nodeGraph;
   openyourbox::ui::ImGuiHost imguiHost;
   openyourbox::graph::NodeRenderer nodeRenderer;
+  openyourbox::library::UserBoxLibrary boxLibrary;
   openyourbox::library::CopyrightAcknowledgment copyrightAcknowledgment;
   openyourbox::ui::TrainingLibraryPanel libraryPanel;
   openyourbox::ui::CaptureSamplesPanel capturePanel;

@@ -1,12 +1,15 @@
 #pragma once
 
 #include "NodeGraph.h"
+#include "../library/UserBoxLibrary.h"
+#include "../ui/UserBoxLibraryPanel.h"
 
 #include <imgui.h>
 #include <imgui_node_editor.h>
 
 #include <array>
 #include <functional>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -43,6 +46,11 @@ struct NodeRendererCallbacks {
   std::function<void(std::int32_t, bool)> armChanged;
   /** @brief Invoked when the user browses a weight file for a node. */
   std::function<void(std::int32_t)> browseWeights;
+  /**
+   * @brief Invoked after a box is placed from the user box library.
+   * @param rootId New node or group identifier.
+   */
+  std::function<void(std::int32_t)> boxPlaced;
 };
 
 /**
@@ -64,15 +72,20 @@ public:
    * @param pinchMagnification Relative trackpad pinch scale for this frame.
    */
   void render(NodeGraph &graph, const NodeRendererCallbacks &callbacks,
-              float pinchMagnification = 1.0f);
+              float pinchMagnification = 1.0f,
+              openyourbox::library::UserBoxLibrary *boxLibrary = nullptr);
 
   /** @brief Returns the first selected node identifier, or zero. */
   [[nodiscard]] std::int32_t getPrimarySelectedNodeId() const noexcept;
 
 private:
-  /** @brief Draws the ML Forge-style element palette. */
-  void renderPalette(NodeGraph &graph);
-  /** @brief Draws one node and its inline controls. */
+  /**
+   * @brief Draws the unified Library palette with Factory and User Library roots.
+   * @param graph Message-thread graph document.
+   * @param boxLibrary User box catalog, or null when the library is unavailable.
+   */
+  void renderPalette(NodeGraph &graph,
+                     openyourbox::library::UserBoxLibrary *boxLibrary);
   /**
    * @brief Draws one node and its inline controls.
    * @param graph Message-thread graph document.
@@ -81,6 +94,34 @@ private:
    */
   void renderNode(NodeGraph &graph, GraphNode &node,
                   const NodeRendererCallbacks &callbacks);
+  /**
+   * @brief Draws a compact group box with mediating I/O pins.
+   * @param graph Message-thread graph document.
+   * @param group Group being rendered.
+   * @param callbacks Runtime actions owned by the plug-in editor.
+   */
+  void renderGroup(NodeGraph &graph, GraphGroup &group,
+                   const NodeRendererCallbacks &callbacks);
+  /**
+   * @brief Draws Graph > group breadcrumb navigation above the canvas.
+   * @param graph Message-thread graph document.
+   */
+  void renderScopeBreadcrumb(NodeGraph &graph);
+  /**
+   * @brief Opens a group as the focused canvas, or returns to the graph root.
+   * @param graph Message-thread graph document.
+   * @param groupId Group to open, or empty for the root canvas.
+   */
+  void setCanvasFocus(NodeGraph &graph, std::optional<std::int32_t> groupId);
+  /**
+   * @brief Parents a newly created box to the focused group when legal.
+   * @param graph Message-thread graph document.
+   * @param boxId New node or group identifier.
+   * @param canvasPosition Position in the current canvas coordinates.
+   * @param dropGroupId Group box under the pointer, or zero.
+   */
+  void adoptNewBox(NodeGraph &graph, std::int32_t boxId, ImVec2 canvasPosition,
+                   std::int32_t dropGroupId);
   /**
    * @brief Draws Knob Input rotary control and numeric readout.
    * @param graph Message-thread graph document.
@@ -118,14 +159,14 @@ private:
    */
   void applyPendingContextActions(NodeGraph &graph);
   /**
-   * @brief Draws the overview map as an ImGui overlay inside the editor.
+   * @brief Draws the canvas overview map in the bottom-right of the editor.
    * @param graph Message-thread graph document.
    * @param canvasOrigin Screen-space origin of the editor canvas.
    * @param canvasSize Screen-space size of the editor canvas.
    */
   void renderMap(NodeGraph &graph, ImVec2 canvasOrigin, ImVec2 canvasSize);
   /** @brief Mirrors node-editor selection into stable graph identifiers. */
-  void synchronizeSelection();
+  void synchronizeSelection(NodeGraph &graph);
   /**
    * @brief Pans or zooms the editor canvas without moving nodes.
    * @param panDelta Screen-space pan in pixels at the current zoom.
@@ -133,6 +174,11 @@ private:
    * @param pivotScreen Pointer position in screen space.
    */
   void navigateCanvas(ImVec2 panDelta, float zoomFactor, ImVec2 pivotScreen);
+  /**
+   * @brief Applies stored graph layout to imgui-node-editor node transforms.
+   * @param graph Message-thread graph document.
+   */
+  void syncEditorTransforms(NodeGraph &graph);
   /**
    * @brief Centres the canvas view on a canvas-space point without changing zoom.
    * @param canvasPoint Target point in editor canvas coordinates.
@@ -149,10 +195,24 @@ private:
   std::int32_t contextPinId = 0;
   /** @brief Stable identifiers selected in the editor. */
   std::vector<std::int32_t> selectedNodeIds;
+  /** @brief Selected group identifiers. */
+  std::vector<std::int32_t> selectedGroupIds;
   /** @brief Stable selected connection identifiers. */
   std::vector<std::int32_t> selectedLinkIds;
   /** @brief Nodes whose persisted positions were applied to the editor. */
   std::unordered_set<std::int32_t> positionedNodeIds;
+  /** @brief Groups whose persisted bounds were applied to the editor. */
+  std::unordered_set<std::int32_t> positionedGroupIds;
+  /** @brief Group highlighted as a drop target while dragging an element. */
+  std::int32_t dropTargetGroupId = 0;
+  /** @brief Node currently being dragged, or zero. */
+  std::int32_t draggingNodeId = 0;
+  /** @brief Group currently being dragged, or zero. */
+  std::int32_t draggingGroupId = 0;
+  /** @brief Editable group name buffers. */
+  std::unordered_map<std::int32_t, std::array<char, 48>> groupNameBuffers;
+  /** @brief Group targeted by the current context menu. */
+  std::int32_t contextGroupId = 0;
   /** @brief Editable signed seed text retained independently for each node. */
   std::unordered_map<std::int32_t, std::array<char, 16>> seedBuffers;
   /** @brief Current transient connection validation message. */
@@ -171,6 +231,18 @@ private:
   ImVec2 lastCanvasCentre{250.0f, 140.0f};
   /** @brief True when the overview map captured the pointer on the previous frame. */
   bool mapHoveredLastFrame = false;
+  /** @brief User Library tree drawn in the left palette. */
+  openyourbox::ui::UserBoxLibraryPanel boxLibraryPanel;
+  /** @brief Node or group targeted by the save-to-library dialog. */
+  std::int32_t pendingSaveBoxId = 0;
+  /** @brief True to open the save-to-library popup this frame. */
+  bool requestSaveBoxPopup = false;
+  /** @brief Editable name for the save-to-library dialog. */
+  std::array<char, 96> saveBoxNameBuffer{};
+  /** @brief True when the save dialog is replacing an existing name. */
+  bool saveBoxOverwrite = false;
+  /** @brief Box library bound for the current render frame, or null. */
+  openyourbox::library::UserBoxLibrary *activeBoxLibrary = nullptr;
   /** @brief Active choice-property combobox rendered outside canvas coordinates. */
   struct ActivePropertyCombo {
     /** @brief Node that owns the edited property. */

@@ -1,10 +1,15 @@
 #include "NodeGraph.h"
 
 #include <algorithm>
+#include <array>
+#include <cmath>
+#include <limits>
+#include <optional>
 #include <queue>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
 
 namespace {
 void migrateLegacyMixerNode(openyourbox::graph::GraphNode &node,
@@ -13,6 +18,208 @@ void migrateLegacyMixerNode(openyourbox::graph::GraphNode &node,
 void normalizeMergeNodeProperties(openyourbox::graph::GraphNode &node);
 
 void refreshPropagatedPinShapes(openyourbox::graph::NodeGraph &graph);
+
+/**
+ * @brief Returns true when @p id is a member of @p group, including nested groups.
+ * @param graph Graph owning groups and nodes.
+ * @param groupId Ancestor group.
+ * @param id Node or nested group identifier.
+ */
+bool groupOwnsId(const openyourbox::graph::NodeGraph &graph, std::int32_t groupId,
+                 std::int32_t id) {
+  const auto *group = graph.findGroup(groupId);
+  if (group == nullptr)
+    return false;
+  for (const auto member : group->memberIds) {
+    if (member == id)
+      return true;
+    if (graph.findGroup(member) != nullptr && groupOwnsId(graph, member, id))
+      return true;
+  }
+  return false;
+}
+
+/**
+ * @brief Walks parent groups from @p groupId toward the canvas root.
+ * @param graph Graph owning groups.
+ * @param groupId Starting group.
+ * @return Depth 1 for a root group.
+ */
+int groupDepth(const openyourbox::graph::NodeGraph &graph, std::int32_t groupId) {
+  int depth = 0;
+  auto current = groupId;
+  std::unordered_set<std::int32_t> visiting;
+  while (const auto *group = graph.findGroup(current)) {
+    if (!visiting.insert(current).second)
+      break;
+    ++depth;
+    if (!group->parentGroupId.has_value())
+      break;
+    current = *group->parentGroupId;
+  }
+  return depth;
+}
+
+/**
+ * @brief Collects leaf node ids owned by @p groupId into @p out.
+ * @param graph Graph owning groups and nodes.
+ * @param groupId Ancestor group.
+ * @param out Destination list.
+ */
+void collectLeaves(const openyourbox::graph::NodeGraph &graph, std::int32_t groupId,
+                   std::vector<std::int32_t> &out) {
+  const auto *group = graph.findGroup(groupId);
+  if (group == nullptr)
+    return;
+  for (const auto member : group->memberIds) {
+    if (graph.findNode(member) != nullptr)
+      out.push_back(member);
+    else
+      collectLeaves(graph, member, out);
+  }
+}
+
+/**
+ * @brief Collects every node and nested group owned by @p groupId.
+ * @param graph Graph owning membership.
+ * @param groupId Ancestor group.
+ * @param nodeIds Destination node identifiers.
+ * @param groupIds Destination group identifiers, including @p groupId.
+ */
+void collectGroupSubtree(const openyourbox::graph::NodeGraph &graph,
+                         std::int32_t groupId,
+                         std::unordered_set<std::int32_t> &nodeIds,
+                         std::unordered_set<std::int32_t> &groupIds) {
+  if (!groupIds.insert(groupId).second)
+    return;
+  const auto *group = graph.findGroup(groupId);
+  if (group == nullptr)
+    return;
+  for (const auto member : group->memberIds) {
+    if (graph.findNode(member) != nullptr)
+      nodeIds.insert(member);
+    else
+      collectGroupSubtree(graph, member, nodeIds, groupIds);
+  }
+}
+
+/**
+ * @brief Signal I/O used to stack independent group copies in series.
+ *
+ * Uses the group's interface pins (unconnected internally) rather than
+ * currently attached external cables, and omits TCN/BlackBox control inputs
+ * so optional conditioning does not block a legal audio through-path.
+ * @param graph Graph owning membership and pins.
+ * @param groupId Target group.
+ * @param inputs Destination list of chainable external inputs.
+ * @param outputs Destination list of chainable external outputs.
+ */
+void appendSerialChainPorts(
+    const openyourbox::graph::NodeGraph &graph, std::int32_t groupId,
+    std::vector<openyourbox::graph::GroupBoundaryPort> &inputs,
+    std::vector<openyourbox::graph::GroupBoundaryPort> &outputs) {
+  using openyourbox::graph::PinKind;
+  using openyourbox::graph::isControlInputPin;
+  for (const auto &port : graph.groupInterfacePorts(groupId)) {
+    const auto *pin = graph.findPin(port.memberPinId);
+    if (pin != nullptr && isControlInputPin(*pin))
+      continue;
+    if (port.kind == PinKind::input)
+      inputs.push_back(port);
+    else
+      outputs.push_back(port);
+  }
+}
+
+/**
+ * @brief User-facing reason when copies cannot form a serial stack.
+ * @param inputs Chainable external inputs.
+ * @param outputs Chainable external outputs.
+ * @return Empty when pairing is legal.
+ */
+std::string serialChainRefusal(
+    const std::vector<openyourbox::graph::GroupBoundaryPort> &inputs,
+    const std::vector<openyourbox::graph::GroupBoundaryPort> &outputs) {
+  if (inputs.empty() || outputs.empty() || inputs.size() != outputs.size())
+    return "Copies requires matching external inputs and outputs that can "
+           "chain in series";
+  for (std::size_t index = 0; index < inputs.size(); ++index) {
+    if (!outputs[index].shape.isCompatibleWith(inputs[index].shape))
+      return "Copies cannot chain: group outputs are not compatible with "
+             "group inputs";
+  }
+  return {};
+}
+
+/**
+ * @brief Returns the parent group of a node or nested group.
+ * @param graph Graph owning membership.
+ * @param memberId Node or group identifier.
+ */
+std::optional<std::int32_t>
+parentGroupOf(const openyourbox::graph::NodeGraph &graph, std::int32_t memberId) {
+  if (const auto *node = graph.findNode(memberId))
+    return node->parentGroupId;
+  if (const auto *group = graph.findGroup(memberId))
+    return group->parentGroupId;
+  return std::nullopt;
+}
+
+/**
+ * @brief Axis-aligned bounds of a node or nested group.
+ * @param graph Graph owning layout.
+ * @param memberId Node or group identifier.
+ */
+std::optional<std::pair<juce::Point<float>, juce::Point<float>>>
+memberBounds(const openyourbox::graph::NodeGraph &graph, std::int32_t memberId) {
+  if (const auto *node = graph.findNode(memberId))
+    return std::make_pair(node->position, node->size);
+  if (const auto *group = graph.findGroup(memberId))
+    return std::make_pair(group->position, group->size);
+  return std::nullopt;
+}
+
+/**
+ * @brief Writes the stored position of a node or nested group.
+ * @param graph Graph to mutate.
+ * @param memberId Node or group identifier.
+ * @param position New stored position.
+ */
+void setItemStoredPosition(openyourbox::graph::NodeGraph &graph,
+                           std::int32_t memberId, juce::Point<float> position) {
+  if (auto *node = graph.findNode(memberId))
+    node->position = position;
+  else if (auto *group = graph.findGroup(memberId))
+    group->position = position;
+}
+
+/**
+ * @brief Canvas-space origin of a node or nested group.
+ * @param graph Graph owning layout.
+ * @param memberId Node or group identifier.
+ */
+juce::Point<float> itemWorldPosition(const openyourbox::graph::NodeGraph &graph,
+                                     std::int32_t memberId) {
+  if (graph.findNode(memberId) != nullptr)
+    return graph.worldPositionOfNode(memberId);
+  return graph.worldPositionOfGroup(memberId);
+}
+
+/**
+ * @brief Writes a canvas-space origin into the item's current parent space.
+ * @param graph Graph to mutate.
+ * @param memberId Node or group identifier.
+ * @param worldPoint Canvas-space origin.
+ * @param parent Group that currently owns the item, or empty at the root.
+ */
+void storeWorldPosition(openyourbox::graph::NodeGraph &graph,
+                        std::int32_t memberId, juce::Point<float> worldPoint,
+                        std::optional<std::int32_t> parent) {
+  const auto stored =
+      parent.has_value() ? graph.worldToGroupLocal(*parent, worldPoint)
+                         : worldPoint;
+  setItemStoredPosition(graph, memberId, stored);
+}
 
 /**
  * @brief Ensures Activation and TCN nodes expose a validated Gain property.
@@ -1018,6 +1225,39 @@ openyourbox::graph::NodeType nodeTypeFromName(const juce::String &name) {
   return NodeType::tcn;
 }
 
+/**
+ * @brief Returns true when @p name is a persisted element type this build knows.
+ * @param name ValueTree `type` token.
+ */
+bool isKnownPersistedNodeType(const juce::String &name) {
+  static const std::array<const char *, 20> known{
+      "audio_input",
+      "audio_output",
+      "linear",
+      "activation",
+      "sum",
+      "multiply",
+      "concatenate",
+      "merge",
+      "blackbox",
+      "knob_input",
+      "xy_trackpad",
+      "pqmf_analysis",
+      "pqmf_synthesis",
+      "rate_conv",
+      "conv1d",
+      "conv_transpose1d",
+      "batch_norm",
+      "variational_bottleneck",
+      "noise_synthesizer",
+      "tcn"};
+  for (const auto *token : known) {
+    if (name == token)
+      return true;
+  }
+  return false;
+}
+
 juce::ValueTree nodeToTree(const openyourbox::graph::GraphNode &node) {
   juce::ValueTree tree{"Node"};
   tree.setProperty("id", node.id, nullptr);
@@ -1063,6 +1303,22 @@ juce::ValueTree nodeToTree(const openyourbox::graph::GraphNode &node) {
                    nullptr);
   tree.setProperty("fidelityPercent", node.fidelityPercent, nullptr);
   tree.setProperty("compactnessReady", node.compactnessReady, nullptr);
+  if (node.parentGroupId.has_value())
+    tree.setProperty("parentGroupId", *node.parentGroupId, nullptr);
+
+  for (const auto &slot : node.copySlots) {
+    juce::ValueTree child{"CopySlot"};
+    child.setProperty("seed", slot.seed, nullptr);
+    child.setProperty("weightsProvenance",
+                      slot.provenance ==
+                              openyourbox::graph::WeightsProvenance::file
+                          ? "file"
+                          : "random",
+                      nullptr);
+    child.setProperty("weightsPath", juce::String(slot.weightsPath), nullptr);
+    child.setProperty("artifactPath", juce::String(slot.artifactPath), nullptr);
+    tree.appendChild(child, nullptr);
+  }
 
   if (node.metrics.has_value()) {
     tree.setProperty("compileMs", node.metrics->compileTimeMilliseconds,
@@ -1159,6 +1415,9 @@ openyourbox::graph::GraphNode nodeFromTree(const juce::ValueTree &tree) {
       tree.getProperty("fidelityPercent", defaultFidelityPercent)));
   node.compactnessReady =
       static_cast<bool>(tree.getProperty("compactnessReady", false));
+  if (tree.hasProperty("parentGroupId"))
+    node.parentGroupId =
+        static_cast<std::int32_t>(tree.getProperty("parentGroupId"));
 
   if (tree.hasProperty("inferenceMs")) {
     node.metrics =
@@ -1179,6 +1438,17 @@ openyourbox::graph::GraphNode nodeFromTree(const juce::ValueTree &tree) {
       pin.shape.nBand = static_cast<int>(child.getProperty("nBand", 0));
       (pin.kind == PinKind::input ? node.inputs : node.outputs)
           .push_back(std::move(pin));
+    } else if (child.hasType("CopySlot")) {
+      CopyWeightSlot slot;
+      slot.seed = openyourbox::graph::clampSeed(
+          static_cast<std::int32_t>(child.getProperty("seed", 42)));
+      slot.provenance =
+          child.getProperty("weightsProvenance", "random").toString() == "file"
+              ? WeightsProvenance::file
+              : WeightsProvenance::random;
+      slot.weightsPath = child["weightsPath"].toString().toStdString();
+      slot.artifactPath = child["artifactPath"].toString().toStdString();
+      node.copySlots.push_back(std::move(slot));
     } else if (child.hasType("Property")) {
       NodeProperty property;
       property.key = child["key"].toString().toStdString();
@@ -1209,6 +1479,140 @@ openyourbox::graph::GraphNode nodeFromTree(const juce::ValueTree &tree) {
   normalizeConvolutionProperties(node);
   normalizeHostIoProperties(node);
   return node;
+}
+
+/**
+ * @brief Serializes one group container into a value tree.
+ * @param group Group to persist.
+ */
+juce::ValueTree groupToTree(const openyourbox::graph::GraphGroup &group) {
+  juce::ValueTree tree{"Group"};
+  tree.setProperty("id", group.id, nullptr);
+  tree.setProperty("name", juce::String(group.name), nullptr);
+  if (group.parentGroupId.has_value())
+    tree.setProperty("parentGroupId", *group.parentGroupId, nullptr);
+  tree.setProperty("collapsed", group.collapsed, nullptr);
+  tree.setProperty("copies", group.copies, nullptr);
+  tree.setProperty("x", group.position.x, nullptr);
+  tree.setProperty("y", group.position.y, nullptr);
+  tree.setProperty("width", group.size.x, nullptr);
+  tree.setProperty("height", group.size.y, nullptr);
+  tree.setProperty("viewPanX", group.viewPan.x, nullptr);
+  tree.setProperty("viewPanY", group.viewPan.y, nullptr);
+  tree.setProperty("viewZoom", group.viewZoom, nullptr);
+  for (const auto member : group.memberIds) {
+    juce::ValueTree child{"Member"};
+    child.setProperty("id", member, nullptr);
+    tree.appendChild(child, nullptr);
+  }
+  return tree;
+}
+
+/**
+ * @brief Restores one group container from a value tree.
+ * @param tree Serialized group.
+ */
+openyourbox::graph::GraphGroup groupFromTree(const juce::ValueTree &tree) {
+  openyourbox::graph::GraphGroup group;
+  group.id = static_cast<std::int32_t>(tree["id"]);
+  group.name = tree.getProperty("name", "Group").toString().toStdString();
+  if (group.name.empty())
+    group.name = "Group";
+  if (tree.hasProperty("parentGroupId"))
+    group.parentGroupId =
+        static_cast<std::int32_t>(tree.getProperty("parentGroupId"));
+  group.collapsed = static_cast<bool>(tree.getProperty("collapsed", false));
+  group.copies = std::clamp(static_cast<int>(tree.getProperty(
+                                "copies", openyourbox::graph::defaultGroupCopies)),
+                            1, openyourbox::graph::maximumGroupCopies);
+  group.position = {static_cast<float>(tree.getProperty("x", 0.0f)),
+                    static_cast<float>(tree.getProperty("y", 0.0f))};
+  group.size = {static_cast<float>(tree.getProperty("width", 320.0f)),
+                static_cast<float>(tree.getProperty("height", 220.0f))};
+  group.viewPan = {static_cast<float>(tree.getProperty("viewPanX", 0.0f)),
+                   static_cast<float>(tree.getProperty("viewPanY", 0.0f))};
+  group.viewZoom = std::clamp(
+      static_cast<float>(tree.getProperty("viewZoom", 1.0f)),
+      openyourbox::graph::minimumZoom, openyourbox::graph::maximumZoom);
+  for (const auto child : tree) {
+    if (!child.hasType("Member"))
+      continue;
+    group.memberIds.push_back(static_cast<std::int32_t>(child["id"]));
+  }
+  return group;
+}
+
+/**
+ * @brief Detaches @p memberId from every group's member list.
+ * @param groups Group collection to mutate.
+ * @param memberId Node or nested group identifier.
+ */
+void eraseMemberFromParents(std::vector<openyourbox::graph::GraphGroup> &groups,
+                            std::int32_t memberId) {
+  for (auto &group : groups) {
+    group.memberIds.erase(std::remove(group.memberIds.begin(),
+                                      group.memberIds.end(), memberId),
+                          group.memberIds.end());
+  }
+}
+
+/**
+ * @brief Writes parentGroupId onto a node or nested group.
+ * @param graph Graph to mutate.
+ * @param memberId Node or nested group identifier.
+ * @param parent New parent, or empty for the canvas root.
+ */
+void assignParent(openyourbox::graph::NodeGraph &graph, std::int32_t memberId,
+                  std::optional<std::int32_t> parent) {
+  if (auto *node = graph.findNode(memberId))
+    node->parentGroupId = parent;
+  else if (auto *group = graph.findGroup(memberId))
+    group->parentGroupId = parent;
+}
+
+/**
+ * @brief Resizes copy slots for every leaf of @p groupId.
+ * @param graph Graph to mutate.
+ * @param groupId Group whose descendants need slot updates.
+ */
+void refreshCopySlotsForGroup(openyourbox::graph::NodeGraph &graph,
+                              std::int32_t groupId) {
+  for (const auto nodeId : graph.collectLeafNodeIds(groupId)) {
+    if (auto *node = graph.findNode(nodeId))
+      openyourbox::graph::ensureCopySlotCount(*node,
+                                              graph.effectiveCopyCount(nodeId));
+  }
+}
+
+/**
+ * @brief Writes a randomization seed onto a node and its copy slots.
+ * @param node Weighted live element to update.
+ * @param primarySeed Seed applied to the visible element (slot 0).
+ * @param independentExtraSlots True to derive `primarySeed + i` per copy slot.
+ */
+void writeRandomizedWeightSlots(openyourbox::graph::GraphNode &node,
+                                std::int32_t primarySeed,
+                                bool independentExtraSlots) {
+  using openyourbox::graph::WeightsProvenance;
+  using openyourbox::graph::clampSeed;
+  using openyourbox::graph::copySlotFromNode;
+  using openyourbox::graph::seedForCopySlot;
+  node.seed = clampSeed(primarySeed);
+  node.weightsProvenance = WeightsProvenance::random;
+  node.weightsPath.clear();
+  node.artifactPath.clear();
+  if (node.copySlots.empty())
+    node.copySlots.push_back(copySlotFromNode(node));
+  else
+    node.copySlots.front() = copySlotFromNode(node);
+  for (std::size_t index = 0; index < node.copySlots.size(); ++index) {
+    auto &slot = node.copySlots[index];
+    slot.seed = independentExtraSlots ? seedForCopySlot(node.seed, index)
+                                      : node.seed;
+    slot.provenance = WeightsProvenance::random;
+    slot.weightsPath.clear();
+    slot.artifactPath.clear();
+  }
 }
 
 /**
@@ -1322,10 +1726,25 @@ void NodeGraph::rebuildFromModel(const dsp::TCNConfiguration &configuration) {
   ensureFixedHostIo();
 }
 
-std::int32_t NodeGraph::addNode(NodeType type, juce::Point<float> position) {
+std::int32_t NodeGraph::addNode(NodeType type, juce::Point<float> position,
+                                std::optional<std::int32_t> parentGroupId) {
   auto node = makeNode(type, position);
+  if (isFixedIoType(type))
+    parentGroupId.reset();
+  if (parentGroupId.has_value() && findGroup(*parentGroupId) == nullptr)
+    parentGroupId.reset();
+  node.parentGroupId = parentGroupId;
   const auto id = node.id;
   nodes.push_back(std::move(node));
+  if (parentGroupId.has_value()) {
+    if (auto *group = findGroup(*parentGroupId)) {
+      if (std::find(group->memberIds.begin(), group->memberIds.end(), id) ==
+          group->memberIds.end())
+        group->memberIds.push_back(id);
+    }
+    if (auto *created = findNode(id))
+      ensureCopySlotCount(*created, effectiveCopyCount(id));
+  }
   return id;
 }
 
@@ -1364,7 +1783,19 @@ NodeGraph::insertNodeOnLink(std::int32_t linkId, NodeType type,
   if (!removeLink(linkId))
     return std::nullopt;
 
-  const auto nodeId = addNode(type, position);
+  const auto sourceOwner = findNodeForPin(sourcePinId);
+  const auto destOwner = findNodeForPin(destinationPinId);
+  std::optional<std::int32_t> parent;
+  const auto *sourceNode =
+      sourceOwner.has_value() ? findNode(*sourceOwner) : nullptr;
+  const auto *destNode =
+      destOwner.has_value() ? findNode(*destOwner) : nullptr;
+  if (sourceNode != nullptr)
+    parent = sourceNode->parentGroupId;
+  if (destNode != nullptr && parent != destNode->parentGroupId)
+    parent = viewport.focusedGroupId;
+
+  const auto nodeId = addNode(type, position, parent);
   auto *node = findNode(nodeId);
   if (node == nullptr || node->inputs.empty() || node->outputs.empty()) {
     connect(sourcePinId, destinationPinId);
@@ -1387,11 +1818,21 @@ NodeGraph::attachNodeToPin(std::int32_t pinId, NodeType type,
                            juce::Point<float> position) {
   if (isFixedIoType(type) || type == NodeType::blackBox)
     return std::nullopt;
-  const auto *pin = findPin(pinId);
-  if (pin == nullptr || isPinConnected(pinId))
+  const auto resolvedPinId = resolveCollapsedPin(pinId);
+  const auto *pin = findPin(resolvedPinId);
+  if (pin == nullptr || isPinConnected(resolvedPinId))
     return std::nullopt;
 
-  const auto nodeId = addNode(type, position);
+  std::optional<std::int32_t> parent = viewport.focusedGroupId;
+  if (!isCollapsedGroupPin(pinId)) {
+    if (const auto ownerId = findNodeForPin(resolvedPinId);
+        ownerId.has_value()) {
+      if (const auto *owner = findNode(*ownerId))
+        parent = owner->parentGroupId;
+    }
+  }
+
+  const auto nodeId = addNode(type, position, parent);
   auto *node = findNode(nodeId);
   if (node == nullptr)
     return std::nullopt;
@@ -1407,8 +1848,8 @@ NodeGraph::attachNodeToPin(std::int32_t pinId, NodeType type,
 
   const auto result =
       pin->kind == PinKind::output
-          ? connect(pinId, node->inputs.front().id)
-          : connect(node->outputs.front().id, pinId);
+          ? connect(resolvedPinId, node->inputs.front().id)
+          : connect(node->outputs.front().id, resolvedPinId);
   if (!result.accepted) {
     removeNode(nodeId);
     return std::nullopt;
@@ -1439,6 +1880,7 @@ bool NodeGraph::removeNode(std::int32_t nodeId) {
                                return candidate.id == nodeId;
                              }),
               nodes.end());
+  eraseMemberFromParents(groups, nodeId);
   return true;
 }
 
@@ -1447,8 +1889,961 @@ void NodeGraph::moveNode(std::int32_t nodeId, juce::Point<float> position) {
     node->position = position;
 }
 
+const std::vector<GraphGroup> &NodeGraph::getGroups() const noexcept {
+  return groups;
+}
+
+std::vector<GraphGroup> &NodeGraph::getGroups() noexcept { return groups; }
+
+GraphGroup *NodeGraph::findGroup(std::int32_t groupId) noexcept {
+  const auto found = std::find_if(
+      groups.begin(), groups.end(),
+      [groupId](const GraphGroup &group) { return group.id == groupId; });
+  return found != groups.end() ? &*found : nullptr;
+}
+
+const GraphGroup *NodeGraph::findGroup(std::int32_t groupId) const noexcept {
+  const auto found = std::find_if(
+      groups.begin(), groups.end(),
+      [groupId](const GraphGroup &group) { return group.id == groupId; });
+  return found != groups.end() ? &*found : nullptr;
+}
+
+juce::Point<float>
+NodeGraph::groupLocalToWorld(std::int32_t groupId,
+                             juce::Point<float> localPoint) const {
+  auto point = localPoint;
+  auto current = std::optional<std::int32_t>(groupId);
+  std::unordered_set<std::int32_t> visiting;
+  while (current.has_value()) {
+    if (!visiting.insert(*current).second)
+      break;
+    const auto *group = findGroup(*current);
+    if (group == nullptr)
+      break;
+    point = group->position + groupContentOffset() +
+            (point - group->viewPan) * group->viewZoom;
+    current = group->parentGroupId;
+  }
+  return point;
+}
+
+juce::Point<float>
+NodeGraph::worldToGroupLocal(std::int32_t groupId,
+                             juce::Point<float> worldPoint) const {
+  std::vector<const GraphGroup *> chain;
+  auto current = std::optional<std::int32_t>(groupId);
+  std::unordered_set<std::int32_t> visiting;
+  while (current.has_value()) {
+    if (!visiting.insert(*current).second)
+      break;
+    const auto *group = findGroup(*current);
+    if (group == nullptr)
+      break;
+    chain.push_back(group);
+    current = group->parentGroupId;
+  }
+  auto point = worldPoint;
+  for (auto it = chain.rbegin(); it != chain.rend(); ++it) {
+    const auto *group = *it;
+    const auto zoom = std::max(0.01f, group->viewZoom);
+    const auto origin = group->position + groupContentOffset();
+    point = group->viewPan + (point - origin) / zoom;
+  }
+  return point;
+}
+
+juce::Point<float>
+NodeGraph::worldPositionOfGroup(std::int32_t groupId) const {
+  const auto *group = findGroup(groupId);
+  if (group == nullptr)
+    return {};
+  if (!group->parentGroupId.has_value())
+    return group->position;
+  return groupLocalToWorld(*group->parentGroupId, group->position);
+}
+
+juce::Point<float> NodeGraph::worldPositionOfNode(std::int32_t nodeId) const {
+  const auto *node = findNode(nodeId);
+  if (node == nullptr)
+    return {};
+  if (!node->parentGroupId.has_value())
+    return node->position;
+  return groupLocalToWorld(*node->parentGroupId, node->position);
+}
+
+float NodeGraph::groupContentToCanvasScale(std::int32_t groupId) const {
+  float scale = 1.0f;
+  auto current = std::optional<std::int32_t>(groupId);
+  std::unordered_set<std::int32_t> visiting;
+  while (current.has_value()) {
+    if (!visiting.insert(*current).second)
+      break;
+    const auto *group = findGroup(*current);
+    if (group == nullptr)
+      break;
+    scale *= std::max(0.01f, group->viewZoom);
+    current = group->parentGroupId;
+  }
+  return scale;
+}
+
+void NodeGraph::setGroupView(std::int32_t groupId, juce::Point<float> pan,
+                             float zoom) {
+  auto *group = findGroup(groupId);
+  if (group == nullptr)
+    return;
+  group->viewPan = pan;
+  group->viewZoom =
+      std::clamp(zoom, minimumZoom, maximumZoom);
+}
+
+std::vector<std::int32_t>
+NodeGraph::collectLeafNodeIds(std::int32_t groupId) const {
+  std::vector<std::int32_t> leaves;
+  collectLeaves(*this, groupId, leaves);
+  return leaves;
+}
+
+int NodeGraph::effectiveCopyCount(std::int32_t nodeId) const {
+  const auto *node = findNode(nodeId);
+  if (node == nullptr)
+    return 1;
+  int count = 1;
+  auto parent = node->parentGroupId;
+  std::unordered_set<std::int32_t> visiting;
+  while (parent.has_value()) {
+    if (!visiting.insert(*parent).second)
+      break;
+    const auto *group = findGroup(*parent);
+    if (group == nullptr)
+      break;
+    count *= std::max(1, group->copies);
+    parent = group->parentGroupId;
+  }
+  return std::max(1, count);
+}
+
+bool NodeGraph::isNodeHiddenByCollapse(std::int32_t nodeId) const {
+  const auto *node = findNode(nodeId);
+  if (node == nullptr || !node->parentGroupId.has_value())
+    return false;
+  auto parent = node->parentGroupId;
+  std::unordered_set<std::int32_t> visiting;
+  while (parent.has_value()) {
+    if (!visiting.insert(*parent).second)
+      break;
+    const auto *group = findGroup(*parent);
+    if (group == nullptr)
+      break;
+    if (group->collapsed)
+      return true;
+    parent = group->parentGroupId;
+  }
+  return false;
+}
+
+bool NodeGraph::isGroupHiddenByCollapse(std::int32_t groupId) const {
+  const auto *group = findGroup(groupId);
+  if (group == nullptr || !group->parentGroupId.has_value())
+    return false;
+  auto parent = group->parentGroupId;
+  std::unordered_set<std::int32_t> visiting;
+  while (parent.has_value()) {
+    if (!visiting.insert(*parent).second)
+      break;
+    const auto *ancestor = findGroup(*parent);
+    if (ancestor == nullptr)
+      break;
+    if (ancestor->collapsed)
+      return true;
+    parent = ancestor->parentGroupId;
+  }
+  return false;
+}
+
+bool NodeGraph::isNodeClippedByGroup(std::int32_t nodeId) const {
+  const auto *node = findNode(nodeId);
+  if (node == nullptr || !node->parentGroupId.has_value())
+    return false;
+  const auto *group = findGroup(*node->parentGroupId);
+  if (group == nullptr || group->collapsed)
+    return false;
+  const auto origin = worldPositionOfGroup(group->id);
+  const auto parentScale =
+      group->parentGroupId.has_value()
+          ? groupContentToCanvasScale(*group->parentGroupId)
+          : 1.0f;
+  const auto contentMinX = origin.x + groupContentPad * parentScale;
+  const auto contentMinY = origin.y + groupHeaderHeight * parentScale;
+  const auto contentMaxX =
+      origin.x + (group->size.x - groupContentPad) * parentScale;
+  const auto contentMaxY =
+      origin.y + (group->size.y - groupContentPad) * parentScale;
+  const auto world = worldPositionOfNode(nodeId);
+  const auto width = std::max(8.0f, node->size.x);
+  const auto height = std::max(8.0f, node->size.y);
+  return world.x + width < contentMinX || world.x > contentMaxX ||
+         world.y + height < contentMinY || world.y > contentMaxY;
+}
+
+bool NodeGraph::isNodeOnFocusedCanvas(
+    std::int32_t nodeId, std::optional<std::int32_t> focusedGroupId) const {
+  const auto *node = findNode(nodeId);
+  return node != nullptr && node->parentGroupId == focusedGroupId;
+}
+
+bool NodeGraph::isGroupOnFocusedCanvas(
+    std::int32_t groupId, std::optional<std::int32_t> focusedGroupId) const {
+  const auto *group = findGroup(groupId);
+  if (group == nullptr || group->id == focusedGroupId)
+    return false;
+  return group->parentGroupId == focusedGroupId;
+}
+
+std::optional<std::int32_t> NodeGraph::focusedCanvasHostGroup(
+    std::int32_t nodeId, std::optional<std::int32_t> focusedGroupId) const {
+  const auto *node = findNode(nodeId);
+  if (node == nullptr || !node->parentGroupId.has_value())
+    return std::nullopt;
+  if (node->parentGroupId == focusedGroupId)
+    return std::nullopt;
+  auto current = node->parentGroupId;
+  std::unordered_set<std::int32_t> visiting;
+  while (current.has_value()) {
+    if (!visiting.insert(*current).second)
+      break;
+    const auto *group = findGroup(*current);
+    if (group == nullptr)
+      break;
+    if (group->parentGroupId == focusedGroupId)
+      return group->id;
+    current = group->parentGroupId;
+  }
+  return std::nullopt;
+}
+
+std::vector<std::int32_t>
+NodeGraph::groupAncestorChain(std::int32_t groupId) const {
+  std::vector<std::int32_t> chain;
+  auto current = std::optional<std::int32_t>(groupId);
+  std::unordered_set<std::int32_t> visiting;
+  while (current.has_value()) {
+    if (!visiting.insert(*current).second)
+      break;
+    const auto *group = findGroup(*current);
+    if (group == nullptr)
+      break;
+    chain.push_back(*current);
+    current = group->parentGroupId;
+  }
+  std::reverse(chain.begin(), chain.end());
+  return chain;
+}
+
+std::optional<std::int32_t>
+NodeGraph::findExpandedGroupAt(juce::Point<float> canvasPoint) const {
+  std::optional<std::int32_t> best;
+  int bestDepth = -1;
+  for (const auto &group : groups) {
+    if (group.collapsed || isGroupHiddenByCollapse(group.id))
+      continue;
+    const auto origin = worldPositionOfGroup(group.id);
+    const auto scale = group.parentGroupId.has_value()
+                           ? groupContentToCanvasScale(*group.parentGroupId)
+                           : 1.0f;
+    const auto size = juce::Point<float>(group.size.x * scale, group.size.y * scale);
+    if (canvasPoint.x < origin.x || canvasPoint.y < origin.y ||
+        canvasPoint.x > origin.x + size.x || canvasPoint.y > origin.y + size.y)
+      continue;
+    const auto depth = groupDepth(*this, group.id);
+    if (depth >= bestDepth) {
+      bestDepth = depth;
+      best = group.id;
+    }
+  }
+  return best;
+}
+
+std::vector<GroupBoundaryPort>
+NodeGraph::groupBoundaryPorts(std::int32_t groupId) const {
+  std::unordered_set<std::int32_t> leaves;
+  for (const auto id : collectLeafNodeIds(groupId))
+    leaves.insert(id);
+  std::vector<GroupBoundaryPort> ports;
+  for (const auto &link : links) {
+    const auto source = findNodeForPin(link.sourcePinId);
+    const auto destination = findNodeForPin(link.destinationPinId);
+    if (!source.has_value() || !destination.has_value())
+      continue;
+    const auto sourceInside = leaves.count(*source) != 0;
+    const auto destInside = leaves.count(*destination) != 0;
+    if (sourceInside == destInside)
+      continue;
+    GroupBoundaryPort port;
+    if (destInside) {
+      const auto *pin = findPin(link.destinationPinId);
+      const auto *node = findNode(*destination);
+      if (pin == nullptr || node == nullptr)
+        continue;
+      port.memberPinId = pin->id;
+      port.memberNodeId = node->id;
+      port.kind = PinKind::input;
+      port.shape = pin->shape;
+      port.label = pin->label;
+    } else {
+      const auto *pin = findPin(link.sourcePinId);
+      const auto *node = findNode(*source);
+      if (pin == nullptr || node == nullptr)
+        continue;
+      port.memberPinId = pin->id;
+      port.memberNodeId = node->id;
+      port.kind = PinKind::output;
+      port.shape = pin->shape;
+      port.label = pin->label;
+    }
+    ports.push_back(std::move(port));
+  }
+  std::sort(ports.begin(), ports.end(),
+            [](const GroupBoundaryPort &left, const GroupBoundaryPort &right) {
+              if (left.kind != right.kind)
+                return left.kind == PinKind::input;
+              if (left.memberNodeId != right.memberNodeId)
+                return left.memberNodeId < right.memberNodeId;
+              return left.memberPinId < right.memberPinId;
+            });
+  return ports;
+}
+
+std::vector<GroupBoundaryPort>
+NodeGraph::groupInterfacePorts(std::int32_t groupId) const {
+  std::unordered_set<std::int32_t> leaves;
+  for (const auto id : collectLeafNodeIds(groupId))
+    leaves.insert(id);
+  std::unordered_set<std::int32_t> internallyFedInputs;
+  std::unordered_set<std::int32_t> internallyUsedOutputs;
+  for (const auto &link : links) {
+    const auto source = findNodeForPin(link.sourcePinId);
+    const auto destination = findNodeForPin(link.destinationPinId);
+    if (!source.has_value() || !destination.has_value())
+      continue;
+    if (leaves.count(*source) == 0 || leaves.count(*destination) == 0)
+      continue;
+    internallyUsedOutputs.insert(link.sourcePinId);
+    internallyFedInputs.insert(link.destinationPinId);
+  }
+  std::vector<GroupBoundaryPort> ports;
+  const auto appendPin = [&](const GraphNode &node, const Pin &pin) {
+    GroupBoundaryPort port;
+    port.memberPinId = pin.id;
+    port.memberNodeId = node.id;
+    port.kind = pin.kind;
+    port.shape = pin.shape;
+    port.label = node.label.empty() ? pin.label : node.label + " " + pin.label;
+    ports.push_back(std::move(port));
+  };
+  for (const auto id : collectLeafNodeIds(groupId)) {
+    const auto *node = findNode(id);
+    if (node == nullptr)
+      continue;
+    for (const auto &pin : node->inputs) {
+      if (internallyFedInputs.count(pin.id) == 0)
+        appendPin(*node, pin);
+    }
+    for (const auto &pin : node->outputs) {
+      if (internallyUsedOutputs.count(pin.id) == 0)
+        appendPin(*node, pin);
+    }
+  }
+  std::sort(ports.begin(), ports.end(),
+            [](const GroupBoundaryPort &left, const GroupBoundaryPort &right) {
+              if (left.kind != right.kind)
+                return left.kind == PinKind::input;
+              if (left.memberNodeId != right.memberNodeId)
+                return left.memberNodeId < right.memberNodeId;
+              return left.memberPinId < right.memberPinId;
+            });
+  return ports;
+}
+
+std::optional<std::int32_t>
+NodeGraph::innermostVisibleGroupOf(std::int32_t nodeId) const {
+  const auto *node = findNode(nodeId);
+  if (node == nullptr || !node->parentGroupId.has_value())
+    return std::nullopt;
+  auto parent = node->parentGroupId;
+  std::unordered_set<std::int32_t> visiting;
+  while (parent.has_value()) {
+    if (!visiting.insert(*parent).second)
+      break;
+    if (!isGroupHiddenByCollapse(*parent))
+      return parent;
+    const auto *group = findGroup(*parent);
+    if (group == nullptr)
+      break;
+    parent = group->parentGroupId;
+  }
+  return std::nullopt;
+}
+
+void NodeGraph::fitGroupToMembers(std::int32_t groupId) {
+  auto *group = findGroup(groupId);
+  if (group == nullptr || group->memberIds.empty())
+    return;
+  const auto oldPosition = group->position;
+  const auto oldPan = group->viewPan;
+  const auto oldZoom = std::max(0.01f, group->viewZoom);
+  auto min = juce::Point<float>(std::numeric_limits<float>::max(),
+                                std::numeric_limits<float>::max());
+  auto max = juce::Point<float>(std::numeric_limits<float>::lowest(),
+                                std::numeric_limits<float>::lowest());
+  bool any = false;
+  struct ParentRect {
+    std::int32_t id = 0;
+    juce::Point<float> position;
+    juce::Point<float> size;
+  };
+  std::vector<ParentRect> parentRects;
+  parentRects.reserve(group->memberIds.size());
+  for (const auto member : group->memberIds) {
+    const auto bounds = memberBounds(*this, member);
+    if (!bounds.has_value())
+      continue;
+    const auto parentPosition =
+        oldPosition + groupContentOffset() +
+        (bounds->first - oldPan) * oldZoom;
+    const auto parentSize =
+        juce::Point<float>(bounds->second.x * oldZoom, bounds->second.y * oldZoom);
+    parentRects.push_back({member, parentPosition, parentSize});
+    any = true;
+    min.x = std::min(min.x, parentPosition.x);
+    min.y = std::min(min.y, parentPosition.y);
+    max.x = std::max(max.x, parentPosition.x + parentSize.x);
+    max.y = std::max(max.y, parentPosition.y + parentSize.y);
+  }
+  if (!any)
+    return;
+  group->position = {min.x - groupFitPadding,
+                     min.y - groupFitPadding - groupHeaderHeight};
+  group->size = {std::max(160.0f, max.x - min.x + groupFitPadding * 2.0f),
+                 std::max(120.0f, max.y - min.y + groupFitPadding * 2.0f +
+                                      groupHeaderHeight)};
+  group->viewPan = {};
+  group->viewZoom = 1.0f;
+  const auto origin = group->position + groupContentOffset();
+  for (const auto &rect : parentRects)
+    setItemStoredPosition(*this, rect.id, rect.position - origin);
+}
+
+void NodeGraph::setGroupBounds(std::int32_t groupId, juce::Point<float> position,
+                               juce::Point<float> size) {
+  auto *group = findGroup(groupId);
+  if (group == nullptr)
+    return;
+  group->position = position;
+  group->size = {std::max(80.0f, size.x), std::max(60.0f, size.y)};
+}
+
+void NodeGraph::moveGroup(std::int32_t groupId, juce::Point<float> position) {
+  auto *group = findGroup(groupId);
+  if (group == nullptr)
+    return;
+  group->position = position;
+}
+
+bool NodeGraph::renameGroup(std::int32_t groupId, const std::string &name) {
+  auto *group = findGroup(groupId);
+  if (group == nullptr)
+    return false;
+  auto trimmed = name;
+  while (!trimmed.empty() &&
+         (trimmed.back() == ' ' || trimmed.back() == '\t'))
+    trimmed.pop_back();
+  if (trimmed.empty())
+    return false;
+  group->name = trimmed;
+  return true;
+}
+
+bool NodeGraph::setGroupCollapsed(std::int32_t groupId, bool collapsed) {
+  auto *group = findGroup(groupId);
+  if (group == nullptr)
+    return false;
+  group->collapsed = collapsed;
+  return true;
+}
+
+bool NodeGraph::toggleGroupCollapsed(std::int32_t groupId) {
+  auto *group = findGroup(groupId);
+  if (group == nullptr)
+    return false;
+  group->collapsed = !group->collapsed;
+  return true;
+}
+
+GroupActionResult
+NodeGraph::createGroup(const std::vector<std::int32_t> &memberIds) {
+  std::vector<std::int32_t> unique;
+  unique.reserve(memberIds.size());
+  std::unordered_set<std::int32_t> seen;
+  std::optional<std::int32_t> sharedParent;
+  bool parentInitialized = false;
+  for (const auto id : memberIds) {
+    if (!seen.insert(id).second)
+      continue;
+    const auto *node = findNode(id);
+    const auto *group = findGroup(id);
+    if (node == nullptr && group == nullptr)
+      return {false, "Selection includes an unknown box", 0};
+    if (node != nullptr && isFixedIoType(node->type))
+      return {false, "Audio Input and Audio Output cannot join a group", 0};
+    const auto parent = parentGroupOf(*this, id);
+    if (!parentInitialized) {
+      sharedParent = parent;
+      parentInitialized = true;
+    } else if (parent != sharedParent) {
+      return {false, "Group members must share the same parent group", 0};
+    }
+    unique.push_back(id);
+  }
+  if (unique.size() < 2)
+    return {false, "Select at least two boxes to create a group", 0};
+
+  const auto parentDepth =
+      sharedParent.has_value() ? groupDepth(*this, *sharedParent) : 0;
+  if (parentDepth + 1 > maximumGroupNestingDepth)
+    return {false, "Group nesting is limited to 8 levels", 0};
+
+  std::vector<juce::Point<float>> memberWorlds;
+  memberWorlds.reserve(unique.size());
+  for (const auto id : unique)
+    memberWorlds.push_back(itemWorldPosition(*this, id));
+
+  GraphGroup group;
+  group.id = nextNodeId++;
+  group.name = "Group";
+  group.parentGroupId = sharedParent;
+  group.memberIds = unique;
+  groups.push_back(group);
+  for (const auto id : unique) {
+    eraseMemberFromParents(groups, id);
+    assignParent(*this, id, group.id);
+  }
+  if (auto *created = findGroup(group.id))
+    created->memberIds = unique;
+  if (sharedParent.has_value()) {
+    if (auto *parent = findGroup(*sharedParent))
+      parent->memberIds.push_back(group.id);
+  }
+
+  auto min = juce::Point<float>(std::numeric_limits<float>::max(),
+                                std::numeric_limits<float>::max());
+  auto max = juce::Point<float>(std::numeric_limits<float>::lowest(),
+                                std::numeric_limits<float>::lowest());
+  bool any = false;
+  for (std::size_t index = 0; index < unique.size(); ++index) {
+    const auto bounds = memberBounds(*this, unique[index]);
+    auto parentSpace = memberWorlds[index];
+    if (sharedParent.has_value())
+      parentSpace = worldToGroupLocal(*sharedParent, memberWorlds[index]);
+    const auto size = bounds.has_value() ? bounds->second
+                                         : juce::Point<float>(8.0f, 8.0f);
+    any = true;
+    min.x = std::min(min.x, parentSpace.x);
+    min.y = std::min(min.y, parentSpace.y);
+    max.x = std::max(max.x, parentSpace.x + size.x);
+    max.y = std::max(max.y, parentSpace.y + size.y);
+  }
+  if (any) {
+    if (auto *created = findGroup(group.id)) {
+      created->position = {min.x - groupFitPadding,
+                           min.y - groupFitPadding - groupHeaderHeight};
+      created->size = {
+          std::max(160.0f, max.x - min.x + groupFitPadding * 2.0f),
+          std::max(120.0f, max.y - min.y + groupFitPadding * 2.0f +
+                               groupHeaderHeight)};
+      created->viewPan = {};
+      created->viewZoom = 1.0f;
+    }
+  }
+  for (std::size_t index = 0; index < unique.size(); ++index)
+    storeWorldPosition(*this, unique[index], memberWorlds[index], group.id);
+  refreshCopySlotsForGroup(*this, group.id);
+  return {true, {}, group.id};
+}
+
+GroupActionResult NodeGraph::ungroup(std::int32_t groupId) {
+  auto *group = findGroup(groupId);
+  if (group == nullptr)
+    return {false, "Group no longer exists", 0};
+  const auto parent = group->parentGroupId;
+  const auto members = group->memberIds;
+  std::vector<juce::Point<float>> memberWorlds;
+  memberWorlds.reserve(members.size());
+  for (const auto member : members)
+    memberWorlds.push_back(itemWorldPosition(*this, member));
+  for (std::size_t index = 0; index < members.size(); ++index) {
+    assignParent(*this, members[index], parent);
+    storeWorldPosition(*this, members[index], memberWorlds[index], parent);
+  }
+  if (parent.has_value()) {
+    if (auto *parentGroup = findGroup(*parent)) {
+      parentGroup->memberIds.erase(std::remove(parentGroup->memberIds.begin(),
+                                               parentGroup->memberIds.end(),
+                                               groupId),
+                                   parentGroup->memberIds.end());
+      parentGroup->memberIds.insert(parentGroup->memberIds.end(),
+                                    members.begin(), members.end());
+    }
+  }
+  groups.erase(std::remove_if(groups.begin(), groups.end(),
+                              [groupId](const GraphGroup &candidate) {
+                                return candidate.id == groupId;
+                              }),
+               groups.end());
+  return {true, {}, groupId};
+}
+
+GroupActionResult NodeGraph::deleteGroup(std::int32_t groupId) {
+  if (findGroup(groupId) == nullptr)
+    return {false, "Group no longer exists", 0};
+  std::unordered_set<std::int32_t> nodeIds;
+  std::unordered_set<std::int32_t> groupIds;
+  collectGroupSubtree(*this, groupId, nodeIds, groupIds);
+  std::unordered_set<std::int32_t> pins;
+  for (const auto nodeId : nodeIds) {
+    const auto *node = findNode(nodeId);
+    if (node == nullptr)
+      continue;
+    for (const auto &pin : node->inputs)
+      pins.insert(pin.id);
+    for (const auto &pin : node->outputs)
+      pins.insert(pin.id);
+  }
+  links.erase(std::remove_if(links.begin(), links.end(),
+                             [&pins](const GraphLink &link) {
+                               return pins.count(link.sourcePinId) != 0 ||
+                                      pins.count(link.destinationPinId) != 0;
+                             }),
+              links.end());
+  nodes.erase(std::remove_if(nodes.begin(), nodes.end(),
+                             [&nodeIds](const GraphNode &candidate) {
+                               return nodeIds.count(candidate.id) != 0;
+                             }),
+              nodes.end());
+  eraseMemberFromParents(groups, groupId);
+  groups.erase(std::remove_if(groups.begin(), groups.end(),
+                              [&groupIds](const GraphGroup &candidate) {
+                                return groupIds.count(candidate.id) != 0;
+                              }),
+               groups.end());
+  return {true, {}, groupId};
+}
+
+GroupActionResult NodeGraph::addToGroup(std::int32_t groupId,
+                                        std::int32_t memberId,
+                                        bool preserveStoredPosition) {
+  auto *group = findGroup(groupId);
+  if (group == nullptr)
+    return {false, "Drop target group no longer exists", 0};
+  if (memberId == groupId)
+    return {false, "A group cannot contain itself", 0};
+  if (const auto *node = findNode(memberId)) {
+    if (isFixedIoType(node->type))
+      return {false, "Audio Input and Audio Output cannot join a group", 0};
+  } else if (findGroup(memberId) == nullptr) {
+    return {false, "Drop source is not a graph box", 0};
+  }
+  if (findGroup(memberId) != nullptr && groupOwnsId(*this, memberId, groupId))
+    return {false, "A group cannot be nested inside one of its descendants", 0};
+  const auto newDepth = groupDepth(*this, groupId) +
+                        (findGroup(memberId) != nullptr
+                             ? groupDepth(*this, memberId)
+                             : 1);
+  if (newDepth > maximumGroupNestingDepth)
+    return {false, "Group nesting is limited to 8 levels", 0};
+  if (std::find(group->memberIds.begin(), group->memberIds.end(), memberId) !=
+      group->memberIds.end())
+    return {true, {}, groupId};
+
+  const auto world = itemWorldPosition(*this, memberId);
+  eraseMemberFromParents(groups, memberId);
+  assignParent(*this, memberId, groupId);
+  group->memberIds.push_back(memberId);
+  if (!preserveStoredPosition)
+    storeWorldPosition(*this, memberId, world, groupId);
+  refreshCopySlotsForGroup(*this, groupId);
+  return {true, {}, groupId};
+}
+
+GroupActionResult NodeGraph::removeFromGroup(std::int32_t memberId) {
+  const auto parent = parentGroupOf(*this, memberId);
+  if (!parent.has_value())
+    return {false, "Box is not inside a group", 0};
+  auto *group = findGroup(*parent);
+  if (group == nullptr)
+    return {false, "Parent group no longer exists", 0};
+  const auto grandparent = group->parentGroupId;
+  const auto world = itemWorldPosition(*this, memberId);
+  eraseMemberFromParents(groups, memberId);
+  assignParent(*this, memberId, grandparent);
+  storeWorldPosition(*this, memberId, world, grandparent);
+  if (grandparent.has_value()) {
+    if (auto *ancestor = findGroup(*grandparent))
+      ancestor->memberIds.push_back(memberId);
+  }
+  if (findNode(memberId) != nullptr)
+    ensureCopySlotCount(*findNode(memberId), effectiveCopyCount(memberId));
+  else if (findGroup(memberId) != nullptr)
+    refreshCopySlotsForGroup(*this, memberId);
+  return {true, {}, *parent};
+}
+
+std::vector<std::int32_t> NodeGraph::expandSelectionToFreezableLeaves(
+    const std::vector<std::int32_t> &selectedIds) const {
+  std::vector<std::int32_t> leaves;
+  std::unordered_set<std::int32_t> seen;
+  const auto appendNode = [&](std::int32_t nodeId) {
+    const auto *node = findNode(nodeId);
+    if (node == nullptr || isFixedIoType(node->type) ||
+        isConditioningSourceType(node->type) ||
+        node->state != NodeState::liveBlue)
+      return;
+    if (seen.insert(nodeId).second)
+      leaves.push_back(nodeId);
+  };
+  for (const auto id : selectedIds) {
+    if (findGroup(id) != nullptr) {
+      for (const auto leaf : collectLeafNodeIds(id))
+        appendNode(leaf);
+    } else {
+      appendNode(id);
+    }
+  }
+  return leaves;
+}
+
+GroupActionResult NodeGraph::setGroupCopies(std::int32_t groupId, int copies) {
+  auto *group = findGroup(groupId);
+  if (group == nullptr)
+    return {false, "Group no longer exists", 0};
+  if (copies < 1)
+    copies = 1;
+  if (copies > maximumGroupCopies)
+    return {false, "Copies is limited to 32", 0};
+  if (copies == group->copies)
+    return {true, {}, groupId};
+  if (copies > 1) {
+    std::vector<GroupBoundaryPort> inputs;
+    std::vector<GroupBoundaryPort> outputs;
+    appendSerialChainPorts(*this, groupId, inputs, outputs);
+    if (const auto message = serialChainRefusal(inputs, outputs);
+        !message.empty())
+      return {false, message, 0};
+  }
+  group->copies = copies;
+  refreshCopySlotsForGroup(*this, groupId);
+  return {true, {}, groupId};
+}
+
+bool NodeGraph::randomizeGroupWeights(std::int32_t groupId) {
+  if (findGroup(groupId) == nullptr)
+    return false;
+  bool any = false;
+  for (const auto nodeId : collectLeafNodeIds(groupId)) {
+    auto *node = findNode(nodeId);
+    if (node == nullptr || !node->hasWeights ||
+        node->state == NodeState::frozenGold)
+      continue;
+    if (node->type == NodeType::batchNorm)
+      writeRandomizedWeightSlots(*node, 0, false);
+    else if (node->useExplicitSeed)
+      writeRandomizedWeightSlots(*node, node->explicitSeed, true);
+    else {
+      const auto seed =
+          juce::Random::getSystemRandom().nextInt(maximumSeed + 1);
+      writeRandomizedWeightSlots(*node, seed, true);
+    }
+    any = true;
+  }
+  return any;
+}
+
+NodeGraph NodeGraph::withInvisibleCopiesMaterialized() const {
+  NodeGraph expanded;
+  expanded.restoreFromValueTree(toValueTree());
+  std::vector<std::int32_t> ordered;
+  ordered.reserve(expanded.groups.size());
+  for (const auto &group : expanded.groups)
+    ordered.push_back(group.id);
+  std::sort(ordered.begin(), ordered.end(),
+            [&expanded](std::int32_t left, std::int32_t right) {
+              return groupDepth(expanded, left) > groupDepth(expanded, right);
+            });
+
+  struct WorkingNode {
+    std::int32_t originalId = 0;
+    int slotIndex = 0;
+  };
+  std::unordered_map<std::int32_t, WorkingNode> working;
+  for (const auto &node : expanded.nodes)
+    working[node.id] = WorkingNode{node.id, 0};
+
+  for (const auto groupId : ordered) {
+    auto *group = expanded.findGroup(groupId);
+    if (group == nullptr || group->copies <= 1)
+      continue;
+    const auto copies = group->copies;
+    const auto templateNodes = expanded.collectLeafNodeIds(groupId);
+    if (templateNodes.empty())
+      continue;
+
+    const auto innerProduct = [&](std::int32_t nodeId) {
+      const auto found = working.find(nodeId);
+      const auto originalId =
+          found != working.end() ? found->second.originalId : nodeId;
+      const auto *original = findNode(originalId);
+      if (original == nullptr)
+        return 1;
+      int product = 1;
+      auto parent = original->parentGroupId;
+      std::unordered_set<std::int32_t> visiting;
+      while (parent.has_value() && *parent != groupId) {
+        if (!visiting.insert(*parent).second)
+          break;
+        const auto *ancestor = findGroup(*parent);
+        if (ancestor == nullptr)
+          break;
+        product *= std::max(1, ancestor->copies);
+        parent = ancestor->parentGroupId;
+      }
+      return std::max(1, product);
+    };
+
+    std::unordered_set<std::int32_t> templateSet(templateNodes.begin(),
+                                                 templateNodes.end());
+    std::vector<GraphLink> internalLinks;
+    for (const auto &link : expanded.links) {
+      const auto source = expanded.findNodeForPin(link.sourcePinId);
+      const auto dest = expanded.findNodeForPin(link.destinationPinId);
+      if (source.has_value() && dest.has_value() &&
+          templateSet.count(*source) != 0 && templateSet.count(*dest) != 0)
+        internalLinks.push_back(link);
+    }
+    std::vector<GroupBoundaryPort> inputs;
+    std::vector<GroupBoundaryPort> outputs;
+    appendSerialChainPorts(expanded, groupId, inputs, outputs);
+
+    struct CopyInstance {
+      std::unordered_map<std::int32_t, std::int32_t> pinMap;
+      std::unordered_map<std::int32_t, std::int32_t> nodeMap;
+    };
+    std::vector<CopyInstance> instances(static_cast<std::size_t>(copies));
+    for (const auto nodeId : templateNodes) {
+      instances[0].nodeMap[nodeId] = nodeId;
+      if (const auto *node = expanded.findNode(nodeId)) {
+        for (const auto &pin : node->inputs)
+          instances[0].pinMap[pin.id] = pin.id;
+        for (const auto &pin : node->outputs)
+          instances[0].pinMap[pin.id] = pin.id;
+      }
+      if (auto *node = expanded.findNode(nodeId)) {
+        const auto slot = working[nodeId].slotIndex;
+        ensureCopySlotCount(*node, std::max(slot + 1, effectiveCopyCount(working[nodeId].originalId)));
+        if (slot < static_cast<int>(node->copySlots.size()))
+          applyCopySlot(*node, node->copySlots[static_cast<std::size_t>(slot)]);
+      }
+    }
+
+    for (int copy = 1; copy < copies; ++copy) {
+      auto &instance = instances[static_cast<std::size_t>(copy)];
+      for (const auto nodeId : templateNodes) {
+        const auto *source = expanded.findNode(nodeId);
+        if (source == nullptr)
+          continue;
+        GraphNode clone = *source;
+        clone.id = expanded.nextNodeId++;
+        clone.parentGroupId = source->parentGroupId;
+        for (auto &pin : clone.inputs) {
+          const auto originalPin = pin.id;
+          pin.id = expanded.nextPinId++;
+          instance.pinMap[originalPin] = pin.id;
+        }
+        for (auto &pin : clone.outputs) {
+          const auto originalPin = pin.id;
+          pin.id = expanded.nextPinId++;
+          instance.pinMap[originalPin] = pin.id;
+        }
+        const auto slot =
+            working[nodeId].slotIndex + copy * innerProduct(nodeId);
+        const auto originalId = working[nodeId].originalId;
+        if (const auto *original = findNode(originalId)) {
+          clone.copySlots = original->copySlots;
+          ensureCopySlotCount(clone, std::max(slot + 1,
+                                              static_cast<int>(original->copySlots.size())));
+          if (slot < static_cast<int>(clone.copySlots.size()))
+            applyCopySlot(clone,
+                          clone.copySlots[static_cast<std::size_t>(slot)]);
+        }
+        instance.nodeMap[nodeId] = clone.id;
+        working[clone.id] = WorkingNode{originalId, slot};
+        expanded.nodes.push_back(std::move(clone));
+      }
+      for (const auto &link : internalLinks) {
+        const auto sourcePin = instance.pinMap.find(link.sourcePinId);
+        const auto destPin = instance.pinMap.find(link.destinationPinId);
+        if (sourcePin == instance.pinMap.end() ||
+            destPin == instance.pinMap.end())
+          continue;
+        GraphLink cloned;
+        cloned.id = expanded.nextLinkId++;
+        cloned.sourcePinId = sourcePin->second;
+        cloned.destinationPinId = destPin->second;
+        expanded.links.push_back(cloned);
+      }
+    }
+
+    // Retarget external outs onto the last copy before serial chain links are
+    // inserted. Doing this afterward would rewrite copy[i]->copy[i+1] edges
+    // onto the last copy and create a directed cycle.
+    const auto &last = instances.back();
+    for (auto &link : expanded.links) {
+      const auto source = expanded.findNodeForPin(link.sourcePinId);
+      if (!source.has_value() || templateSet.count(*source) == 0)
+        continue;
+      const auto dest = expanded.findNodeForPin(link.destinationPinId);
+      if (dest.has_value() && templateSet.count(*dest) != 0)
+        continue;
+      const auto mapped = last.pinMap.find(link.sourcePinId);
+      if (mapped != last.pinMap.end())
+        link.sourcePinId = mapped->second;
+    }
+
+    const auto pairCount = std::min(inputs.size(), outputs.size());
+    for (int copy = 0; copy + 1 < copies; ++copy) {
+      const auto &current = instances[static_cast<std::size_t>(copy)];
+      const auto &next = instances[static_cast<std::size_t>(copy + 1)];
+      for (std::size_t index = 0; index < pairCount; ++index) {
+        const auto outPin = current.pinMap.find(outputs[index].memberPinId);
+        const auto inPin = next.pinMap.find(inputs[index].memberPinId);
+        if (outPin == current.pinMap.end() || inPin == next.pinMap.end())
+          continue;
+        GraphLink chain;
+        chain.id = expanded.nextLinkId++;
+        chain.sourcePinId = outPin->second;
+        chain.destinationPinId = inPin->second;
+        expanded.links.push_back(chain);
+      }
+    }
+    group->copies = 1;
+  }
+  return expanded;
+}
+
 ConnectionResult NodeGraph::connect(std::int32_t firstPinId,
                                     std::int32_t secondPinId) {
+  firstPinId = resolveCollapsedPin(firstPinId);
+  secondPinId = resolveCollapsedPin(secondPinId);
   const auto *first = findPin(firstPinId);
   const auto *second = findPin(secondPinId);
   if (first == nullptr || second == nullptr)
@@ -1729,6 +3124,16 @@ bool NodeGraph::setSeed(std::int32_t nodeId, std::int32_t seed) {
   node->seed = clampSeed(seed);
   if (node->useExplicitSeed)
     node->explicitSeed = node->seed;
+  if (!node->copySlots.empty() &&
+      node->weightsProvenance == WeightsProvenance::random) {
+    for (std::size_t index = 0; index < node->copySlots.size(); ++index) {
+      auto &slot = node->copySlots[index];
+      if (slot.provenance != WeightsProvenance::random)
+        continue;
+      slot.seed = seedForCopySlot(node->seed, index);
+    }
+    node->copySlots.front() = copySlotFromNode(*node);
+  }
   return true;
 }
 
@@ -2028,6 +3433,7 @@ const GraphNode *NodeGraph::findNode(std::int32_t nodeId) const noexcept {
 }
 
 const Pin *NodeGraph::findPin(std::int32_t pinId) const noexcept {
+  pinId = resolveCollapsedPin(pinId);
   for (const auto &node : nodes) {
     const auto input =
         std::find_if(node.inputs.begin(), node.inputs.end(),
@@ -2058,6 +3464,7 @@ bool NodeGraph::isFixedIoNode(std::int32_t nodeId) const noexcept {
 
 std::optional<std::int32_t>
 NodeGraph::findNodeForPin(std::int32_t pinId) const noexcept {
+  pinId = resolveCollapsedPin(pinId);
   for (const auto &node : nodes) {
     const auto owns = [pinId](const Pin &pin) { return pin.id == pinId; };
     if (std::any_of(node.inputs.begin(), node.inputs.end(), owns) ||
@@ -2075,13 +3482,17 @@ const ViewportState &NodeGraph::getViewport() const noexcept {
 
 juce::ValueTree NodeGraph::toValueTree() const {
   juce::ValueTree tree{"GraphDocument"};
-  tree.setProperty("version", 1, nullptr);
+  tree.setProperty("version", 2, nullptr);
   tree.setProperty("panX", viewport.pan.x, nullptr);
   tree.setProperty("panY", viewport.pan.y, nullptr);
   tree.setProperty("zoom", viewport.zoom, nullptr);
   tree.setProperty("mapVisible", viewport.mapVisible, nullptr);
+  if (viewport.focusedGroupId.has_value())
+    tree.setProperty("focusedGroupId", *viewport.focusedGroupId, nullptr);
   for (const auto &node : nodes)
     tree.appendChild(nodeToTree(node), nullptr);
+  for (const auto &group : groups)
+    tree.appendChild(groupToTree(group), nullptr);
   for (const auto &link : links)
     tree.appendChild(linkToTree(link), nullptr);
   return tree;
@@ -2092,6 +3503,7 @@ bool NodeGraph::restoreFromValueTree(const juce::ValueTree &tree) {
     return false;
 
   std::vector<GraphNode> restoredNodes;
+  std::vector<GraphGroup> restoredGroups;
   std::vector<GraphLink> restoredLinks;
   std::int32_t restoredNextNode = 1;
   std::int32_t restoredNextPin = 1001;
@@ -2105,6 +3517,10 @@ bool NodeGraph::restoreFromValueTree(const juce::ValueTree &tree) {
       for (const auto &pin : node.outputs)
         restoredNextPin = std::max(restoredNextPin, pin.id + 1);
       restoredNodes.push_back(std::move(node));
+    } else if (child.hasType("Group")) {
+      auto group = groupFromTree(child);
+      restoredNextNode = std::max(restoredNextNode, group.id + 1);
+      restoredGroups.push_back(std::move(group));
     } else if (child.hasType("Link")) {
       auto link = linkFromTree(child);
       restoredNextLink = std::max(restoredNextLink, link.id + 1);
@@ -2112,6 +3528,7 @@ bool NodeGraph::restoreFromValueTree(const juce::ValueTree &tree) {
     }
   }
   nodes = std::move(restoredNodes);
+  groups = std::move(restoredGroups);
   links = std::move(restoredLinks);
   nextNodeId = restoredNextNode;
   nextPinId = restoredNextPin;
@@ -2121,6 +3538,14 @@ bool NodeGraph::restoreFromValueTree(const juce::ValueTree &tree) {
   viewport.zoom = std::clamp(static_cast<float>(tree.getProperty("zoom", 1.0f)),
                              minimumZoom, maximumZoom);
   viewport.mapVisible = static_cast<bool>(tree.getProperty("mapVisible", true));
+  if (tree.hasProperty("focusedGroupId"))
+    viewport.focusedGroupId =
+        static_cast<std::int32_t>(tree.getProperty("focusedGroupId"));
+  else
+    viewport.focusedGroupId.reset();
+  if (viewport.focusedGroupId.has_value() &&
+      findGroup(*viewport.focusedGroupId) == nullptr)
+    viewport.focusedGroupId.reset();
 
   links.erase(std::remove_if(links.begin(), links.end(),
                              [this](const GraphLink &link) {
@@ -2146,6 +3571,186 @@ bool NodeGraph::restoreFromValueTree(const juce::ValueTree &tree) {
                              flexibleTensorShape()});
   }
   return true;
+}
+
+juce::ValueTree NodeGraph::exportBox(std::int32_t boxId,
+                                     juce::String &error) const {
+  error.clear();
+  juce::ValueTree tree{"BoxSnapshot"};
+  tree.setProperty("version", 1, nullptr);
+  tree.setProperty("rootId", boxId, nullptr);
+  if (const auto *node = findNode(boxId)) {
+    if (isFixedIoType(node->type)) {
+      error = "Audio Input and Audio Output cannot be saved to the box library";
+      return {};
+    }
+    auto cloned = nodeToTree(*node);
+    cloned.removeProperty("parentGroupId", nullptr);
+    tree.setProperty("kind", "element", nullptr);
+    tree.setProperty("rootTypeHint", nodeTypeName(node->type), nullptr);
+    tree.appendChild(cloned, nullptr);
+    return tree;
+  }
+  if (findGroup(boxId) != nullptr) {
+    std::unordered_set<std::int32_t> nodeIds;
+    std::unordered_set<std::int32_t> groupIds;
+    collectGroupSubtree(*this, boxId, nodeIds, groupIds);
+    for (const auto nodeId : nodeIds) {
+      const auto *member = findNode(nodeId);
+      if (member != nullptr && isFixedIoType(member->type)) {
+        error =
+            "Audio Input and Audio Output cannot be saved to the box library";
+        return {};
+      }
+    }
+    tree.setProperty("kind", "group", nullptr);
+    tree.setProperty("rootTypeHint", "group", nullptr);
+    for (const auto nodeId : nodeIds) {
+      if (const auto *member = findNode(nodeId))
+        tree.appendChild(nodeToTree(*member), nullptr);
+    }
+    for (const auto groupId : groupIds) {
+      if (const auto *nested = findGroup(groupId)) {
+        auto cloned = groupToTree(*nested);
+        if (groupId == boxId)
+          cloned.removeProperty("parentGroupId", nullptr);
+        tree.appendChild(cloned, nullptr);
+      }
+    }
+    for (const auto &link : links) {
+      const auto source = findNodeForPin(link.sourcePinId);
+      const auto destination = findNodeForPin(link.destinationPinId);
+      if (!source.has_value() || !destination.has_value())
+        continue;
+      if (nodeIds.count(*source) == 0 || nodeIds.count(*destination) == 0)
+        continue;
+      tree.appendChild(linkToTree(link), nullptr);
+    }
+    return tree;
+  }
+  error = "Save to Box Library applies to one element or one group";
+  return {};
+}
+
+std::optional<std::int32_t>
+NodeGraph::importBox(const juce::ValueTree &snapshot, juce::Point<float> position,
+                     bool collapseGroups, juce::String &error) {
+  error.clear();
+  if (!snapshot.hasType("BoxSnapshot")) {
+    error = "Box library entry is not a valid snapshot";
+    return std::nullopt;
+  }
+  for (const auto child : snapshot) {
+    if (!child.hasType("Node"))
+      continue;
+    const auto typeName = child["type"].toString();
+    if (!isKnownPersistedNodeType(typeName)) {
+      error = "Box uses unknown element type '" + typeName + "'";
+      return std::nullopt;
+    }
+    if (isFixedIoType(nodeTypeFromName(typeName))) {
+      error = "Audio Input and Audio Output cannot be inserted from the library";
+      return std::nullopt;
+    }
+  }
+
+  const auto backup = toValueTree();
+  const auto originalRoot = static_cast<std::int32_t>(snapshot["rootId"]);
+  std::unordered_map<std::int32_t, std::int32_t> idMap;
+  std::unordered_map<std::int32_t, std::int32_t> pinMap;
+  std::vector<GraphNode> importedNodes;
+  std::vector<GraphGroup> importedGroups;
+  std::vector<GraphLink> importedLinks;
+
+  const auto remapId = [this, &idMap](std::int32_t oldId) {
+    const auto found = idMap.find(oldId);
+    if (found != idMap.end())
+      return found->second;
+    const auto fresh = nextNodeId++;
+    idMap.emplace(oldId, fresh);
+    return fresh;
+  };
+
+  for (const auto child : snapshot) {
+    if (child.hasType("Node")) {
+      auto node = nodeFromTree(child);
+      node.id = remapId(node.id);
+      if (node.parentGroupId.has_value())
+        node.parentGroupId = remapId(*node.parentGroupId);
+      for (auto &pin : node.inputs) {
+        const auto fresh = nextPinId++;
+        pinMap.emplace(pin.id, fresh);
+        pin.id = fresh;
+      }
+      for (auto &pin : node.outputs) {
+        const auto fresh = nextPinId++;
+        pinMap.emplace(pin.id, fresh);
+        pin.id = fresh;
+      }
+      importedNodes.push_back(std::move(node));
+    } else if (child.hasType("Group")) {
+      auto group = groupFromTree(child);
+      group.id = remapId(group.id);
+      if (group.parentGroupId.has_value())
+        group.parentGroupId = remapId(*group.parentGroupId);
+      if (collapseGroups)
+        group.collapsed = true;
+      importedGroups.push_back(std::move(group));
+    }
+  }
+
+  for (auto &group : importedGroups) {
+    for (auto &member : group.memberIds) {
+      const auto found = idMap.find(member);
+      if (found == idMap.end()) {
+        error = "Box snapshot has a missing group member";
+        restoreFromValueTree(backup);
+        return std::nullopt;
+      }
+      member = found->second;
+    }
+  }
+
+  for (const auto child : snapshot) {
+    if (!child.hasType("Link"))
+      continue;
+    auto link = linkFromTree(child);
+    const auto source = pinMap.find(link.sourcePinId);
+    const auto destination = pinMap.find(link.destinationPinId);
+    if (source == pinMap.end() || destination == pinMap.end()) {
+      error = "Box snapshot has a connection to a missing pin";
+      restoreFromValueTree(backup);
+      return std::nullopt;
+    }
+    link.id = nextLinkId++;
+    link.sourcePinId = source->second;
+    link.destinationPinId = destination->second;
+    importedLinks.push_back(link);
+  }
+
+  const auto rootFound = idMap.find(originalRoot);
+  if (rootFound == idMap.end()) {
+    error = "Box snapshot is missing its root box";
+    restoreFromValueTree(backup);
+    return std::nullopt;
+  }
+  const auto newRoot = rootFound->second;
+
+  for (auto &node : importedNodes) {
+    if (node.id == newRoot)
+      node.position = position;
+    nodes.push_back(std::move(node));
+  }
+  for (auto &group : importedGroups) {
+    if (group.id == newRoot)
+      group.position = position;
+    groups.push_back(std::move(group));
+  }
+  for (const auto &link : importedLinks)
+    links.push_back(link);
+
+  refreshAllMergeOutputShapes(*this);
+  return newRoot;
 }
 
 std::string NodeGraph::toJson() const {
@@ -2520,6 +4125,7 @@ bool NodeGraph::selectionIsConnected(
 }
 
 bool NodeGraph::isPinConnected(std::int32_t pinId) const noexcept {
+  pinId = resolveCollapsedPin(pinId);
   return std::any_of(links.begin(), links.end(),
                      [pinId](const GraphLink &link) {
                        return link.sourcePinId == pinId ||
@@ -2630,15 +4236,22 @@ bool NodeGraph::clearWeightsToSeed(std::int32_t nodeId, std::int32_t seed) {
   if (node == nullptr || !node->hasWeights ||
       node->state == NodeState::frozenGold)
     return false;
-  node->seed = clampSeed(seed);
-  node->weightsProvenance = WeightsProvenance::random;
-  node->weightsPath.clear();
-  node->artifactPath.clear();
+  ensureCopySlotCount(*node, effectiveCopyCount(nodeId));
+  // BatchNorm keeps a shared identity seed; every other weighted member derives
+  // `seed + i` so materialized copies do not share live audition weights.
+  const bool independentExtraSlots = node->type != NodeType::batchNorm;
+  writeRandomizedWeightSlots(*node, seed, independentExtraSlots);
   node->blackBoxOrigin = BlackBoxOrigin::manualFreeze;
   return true;
 }
 
 std::optional<TrainJobRequest> NodeGraph::createTrainRequest() const {
+  for (const auto &group : groups) {
+    if (group.copies > 1) {
+      auto expanded = withInvisibleCopiesMaterialized();
+      return expanded.createTrainRequest();
+    }
+  }
   const auto armed = getArmedTrainableNodeIds();
   if (armed.empty())
     return std::nullopt;

@@ -27,10 +27,12 @@ public:
   /**
    * @brief Adds one element with its default ports and properties.
    * @param type Element type to create.
-   * @param position Initial canvas position.
+   * @param position Initial position in the destination canvas coordinates.
+   * @param parentGroupId Group that owns the new node, or empty for the root canvas.
    * @return Stable identifier of the new node.
    */
-  std::int32_t addNode(NodeType type, juce::Point<float> position);
+  std::int32_t addNode(NodeType type, juce::Point<float> position,
+                       std::optional<std::int32_t> parentGroupId = std::nullopt);
 
   /**
    * @brief Ensures the graph has exactly one undeletable host input and output.
@@ -73,6 +75,267 @@ public:
    * @param position New canvas position.
    */
   void moveNode(std::int32_t nodeId, juce::Point<float> position);
+
+  /**
+   * @brief Creates a named group from selected nodes and/or nested groups.
+   * @param memberIds Node ids and nested group ids to wrap.
+   * @return Accepted group id, or a refusal reason.
+   */
+  GroupActionResult createGroup(const std::vector<std::int32_t> &memberIds);
+
+  /**
+   * @brief Lifts members to the parent scope and removes the group container.
+   * @param groupId Group to dissolve.
+   */
+  GroupActionResult ungroup(std::int32_t groupId);
+
+  /**
+   * @brief Deletes a group and every descendant node and nested group.
+   * @param groupId Group to remove.
+   */
+  GroupActionResult deleteGroup(std::int32_t groupId);
+
+  /**
+   * @brief Renames an existing group.
+   * @param groupId Target group.
+   * @param name New display name.
+   */
+  bool renameGroup(std::int32_t groupId, const std::string &name);
+
+  /**
+   * @brief Adds a node or nested group to @p groupId when the move is legal.
+   * @param groupId Destination group.
+   * @param memberId Node id or nested group id.
+   * @param preserveStoredPosition True when @p memberId is already in the
+   *        destination group's local coordinates.
+   */
+  GroupActionResult addToGroup(std::int32_t groupId, std::int32_t memberId,
+                               bool preserveStoredPosition = false);
+
+  /**
+   * @brief Removes a node or nested group from its parent group.
+   * @param memberId Node id or nested group id.
+   */
+  GroupActionResult removeFromGroup(std::int32_t memberId);
+
+  /**
+   * @brief Sets presentation-only collapse state.
+   * @param groupId Target group.
+   * @param collapsed True to hide interiors.
+   */
+  bool setGroupCollapsed(std::int32_t groupId, bool collapsed);
+
+  /**
+   * @brief Toggles presentation-only collapse state.
+   * @param groupId Target group.
+   */
+  bool toggleGroupCollapsed(std::int32_t groupId);
+
+  /**
+   * @brief Sets independent serial copy count without drawing extra UI nodes.
+   * @param groupId Target group.
+   * @param copies Requested N ≥ 1.
+   */
+  GroupActionResult setGroupCopies(std::int32_t groupId, int copies);
+
+  /**
+   * @brief Randomizes live weighted leaves of a group, resetting BatchNorm.
+   *
+   * Members with the seed checkbox enabled keep `explicitSeed` as the base.
+   * Other weighted members draw a new base seed. Extra copy slots use
+   * `seed + i`. BatchNorm members are restored to identity affine parameters.
+   * Frozen Gold members are left unchanged. These seeds drive live audition and
+   * freeze only; training uses PyTorch default initialization.
+   * @param groupId Target group.
+   * @return True when at least one live weighted member was updated.
+   */
+  bool randomizeGroupWeights(std::int32_t groupId);
+
+  /**
+   * @brief Stores expanded-frame bounds reported by the editor.
+   * @param groupId Target group.
+   * @param position New origin.
+   * @param size New size.
+   */
+  void setGroupBounds(std::int32_t groupId, juce::Point<float> position,
+                      juce::Point<float> size);
+
+  /**
+   * @brief Moves a group's frame in its parent space.
+   *
+   * Member coordinates stay group-local; their canvas positions follow the
+   * group's transform.
+   * @param groupId Target group.
+   * @param position New origin in parent-canvas or parent-group space.
+   */
+  void moveGroup(std::int32_t groupId, juce::Point<float> position);
+
+  /**
+   * @brief Sizes the group frame so every current member is visible.
+   * @param groupId Target group.
+   */
+  void fitGroupToMembers(std::int32_t groupId);
+
+  /**
+   * @brief Sets a group's inner-canvas camera.
+   * @param groupId Target group.
+   * @param pan Camera origin in group-local content space.
+   * @param zoom Camera zoom, clamped to the editor zoom range.
+   */
+  void setGroupView(std::int32_t groupId, juce::Point<float> pan, float zoom);
+
+  /**
+   * @brief Canvas-space origin of a group's frame.
+   * @param groupId Target group.
+   */
+  [[nodiscard]] juce::Point<float>
+  worldPositionOfGroup(std::int32_t groupId) const;
+
+  /**
+   * @brief Canvas-space origin of a node, applying ancestor group cameras.
+   * @param nodeId Target node.
+   */
+  [[nodiscard]] juce::Point<float>
+  worldPositionOfNode(std::int32_t nodeId) const;
+
+  /**
+   * @brief Converts a canvas point into group-local content coordinates.
+   * @param groupId Target group.
+   * @param worldPoint Point in editor canvas space.
+   */
+  [[nodiscard]] juce::Point<float>
+  worldToGroupLocal(std::int32_t groupId, juce::Point<float> worldPoint) const;
+
+  /**
+   * @brief Converts a group-local content point into canvas space.
+   * @param groupId Target group.
+   * @param localPoint Point in the group's inner canvas.
+   */
+  [[nodiscard]] juce::Point<float>
+  groupLocalToWorld(std::int32_t groupId, juce::Point<float> localPoint) const;
+
+  /**
+   * @brief Scale from one group's content-local units to editor canvas units.
+   * @param groupId Target group.
+   */
+  [[nodiscard]] float groupContentToCanvasScale(std::int32_t groupId) const;
+
+  /**
+   * @brief Expands groups in a selection to freezable leaf node ids.
+   * @param selectedIds Mixed node and group identifiers.
+   */
+  [[nodiscard]] std::vector<std::int32_t> expandSelectionToFreezableLeaves(
+      const std::vector<std::int32_t> &selectedIds) const;
+
+  /**
+   * @brief Returns a compile-only graph with invisible copies unrolled in series.
+   */
+  [[nodiscard]] NodeGraph withInvisibleCopiesMaterialized() const;
+
+  /** @brief Returns groups in stable insertion order. */
+  [[nodiscard]] const std::vector<GraphGroup> &getGroups() const noexcept;
+
+  /** @brief Returns mutable groups for message-thread rendering. */
+  [[nodiscard]] std::vector<GraphGroup> &getGroups() noexcept;
+
+  /** @brief Finds a group by stable identifier. */
+  [[nodiscard]] GraphGroup *findGroup(std::int32_t groupId) noexcept;
+
+  /** @brief Finds a group by stable identifier. */
+  [[nodiscard]] const GraphGroup *findGroup(std::int32_t groupId) const noexcept;
+
+  /**
+   * @brief Returns true when a node is hidden by a collapsed ancestor.
+   * @param nodeId Candidate node.
+   */
+  [[nodiscard]] bool isNodeHiddenByCollapse(std::int32_t nodeId) const;
+
+  /**
+   * @brief Returns true when a nested group is hidden by a collapsed ancestor.
+   * @param groupId Candidate group.
+   */
+  [[nodiscard]] bool isGroupHiddenByCollapse(std::int32_t groupId) const;
+
+  /**
+   * @brief Returns true when a visible expanded group clips @p nodeId.
+   * @param nodeId Candidate node.
+   */
+  [[nodiscard]] bool isNodeClippedByGroup(std::int32_t nodeId) const;
+
+  /**
+   * @brief Innermost expanded group whose frame contains @p canvasPoint.
+   * @param canvasPoint Position in editor canvas space.
+   */
+  [[nodiscard]] std::optional<std::int32_t>
+  findExpandedGroupAt(juce::Point<float> canvasPoint) const;
+
+  /**
+   * @brief Returns true when @p nodeId is a direct child of the focused canvas.
+   * @param nodeId Candidate node.
+   * @param focusedGroupId Focused group, or empty for the graph root.
+   */
+  [[nodiscard]] bool isNodeOnFocusedCanvas(
+      std::int32_t nodeId,
+      std::optional<std::int32_t> focusedGroupId) const;
+
+  /**
+   * @brief Returns true when @p groupId is a group box on the focused canvas.
+   * @param groupId Candidate group.
+   * @param focusedGroupId Focused group, or empty for the graph root.
+   */
+  [[nodiscard]] bool isGroupOnFocusedCanvas(
+      std::int32_t groupId,
+      std::optional<std::int32_t> focusedGroupId) const;
+
+  /**
+   * @brief Nested group box on the focused canvas that contains @p nodeId.
+   * @param nodeId Candidate node.
+   * @param focusedGroupId Focused group, or empty for the graph root.
+   * @return Host group id, or empty when the node itself is on the canvas.
+   */
+  [[nodiscard]] std::optional<std::int32_t> focusedCanvasHostGroup(
+      std::int32_t nodeId, std::optional<std::int32_t> focusedGroupId) const;
+
+  /**
+   * @brief Ancestor chain from the graph root to @p groupId, inclusive.
+   * @param groupId Target group.
+   */
+  [[nodiscard]] std::vector<std::int32_t>
+  groupAncestorChain(std::int32_t groupId) const;
+
+  /**
+   * @brief Currently attached cables that cross a group's membership boundary.
+   * @param groupId Target group.
+   */
+  [[nodiscard]] std::vector<GroupBoundaryPort>
+  groupBoundaryPorts(std::int32_t groupId) const;
+
+  /**
+   * @brief Pins that form a group's external I/O (unconnected internally).
+   * @param groupId Target group.
+   */
+  [[nodiscard]] std::vector<GroupBoundaryPort>
+  groupInterfacePorts(std::int32_t groupId) const;
+
+  /**
+   * @brief Innermost group that is currently drawn and contains @p nodeId.
+   * @param nodeId Candidate node.
+   */
+  [[nodiscard]] std::optional<std::int32_t>
+  innermostVisibleGroupOf(std::int32_t nodeId) const;
+
+  /**
+   * @brief Leaf processing nodes owned by a group, including nested groups.
+   * @param groupId Target group.
+   */
+  [[nodiscard]] std::vector<std::int32_t>
+  collectLeafNodeIds(std::int32_t groupId) const;
+
+  /**
+   * @brief Product of copies on groups that contain @p nodeId.
+   * @param nodeId Candidate node.
+   */
+  [[nodiscard]] int effectiveCopyCount(std::int32_t nodeId) const;
 
   /**
    * @brief Validates and commits a directed connection.
@@ -215,8 +478,12 @@ public:
   /**
    * @brief Restores seed provenance after randomization.
    * @param nodeId Target node identifier.
-   * @param seed New randomization seed.
+   * @param seed New randomization seed for the visible element (slot 0).
    * @return True when the node owns weights.
+   *
+   * Ensures copy-slot count matches enclosing group N. Non-BatchNorm members
+   * derive `seed + i` on every slot so N&gt;1 copies stay distinct for live
+   * audition/freeze. Training does not use these seeds for initialization.
    */
   bool clearWeightsToSeed(std::int32_t nodeId, std::int32_t seed);
 
@@ -290,6 +557,28 @@ public:
    */
   bool restoreFromValueTree(const juce::ValueTree &tree);
 
+  /**
+   * @brief Serializes one element or one group tree (internal links only).
+   * @param boxId Node id or group id to snapshot.
+   * @param error Receives a user-facing refusal when empty.
+   * @return Snapshot tree, or invalid when refused.
+   */
+  [[nodiscard]] juce::ValueTree exportBox(std::int32_t boxId,
+                                          juce::String &error) const;
+
+  /**
+   * @brief Clones a box snapshot into this graph at @p position with new IDs.
+   * @param snapshot Tree produced by @ref exportBox.
+   * @param position Canvas origin for the placed root.
+   * @param collapseGroups True to force every imported group collapsed.
+   * @param error Receives a user-facing failure.
+   * @return New root node or group id, or no value on failure.
+   */
+  std::optional<std::int32_t> importBox(const juce::ValueTree &snapshot,
+                                        juce::Point<float> position,
+                                        bool collapseGroups,
+                                        juce::String &error);
+
   /** @brief Serializes the graph into compact JSON for worker IPC. */
   [[nodiscard]] std::string toJson() const;
 
@@ -311,6 +600,8 @@ private:
 
   /** @brief Stable insertion-ordered node collection. */
   std::vector<GraphNode> nodes;
+  /** @brief Stable insertion-ordered group collection. */
+  std::vector<GraphGroup> groups;
   /** @brief Stable insertion-ordered link collection. */
   std::vector<GraphLink> links;
   /** @brief Persisted graph navigation state. */

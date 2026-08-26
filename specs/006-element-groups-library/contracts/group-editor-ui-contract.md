@@ -2,21 +2,28 @@
 
 ## Purpose
 
-Defines in-plugin graph interactions for creating, nesting, editing, expanding, and collapsing groups using Dear ImGui + imgui-node-editor as far as practical.
+Defines in-plugin graph interactions for creating, nesting, editing, and opening groups using Dear ImGui + imgui-node-editor as far as practical.
 
 ## Placement
 
 - All interactions inside the existing graph view (`NodeRenderer` / plugin editor window).
 - No standalone grouping tool.
 
+## Canvas model
+
+- One editor canvas is visible at a time: the graph root, or the interior of exactly one focused group.
+- Nested structure is shown as a breadcrumb above the canvas (`Graph > Parent > Subgroup`). Clicking an ancestor opens that canvas.
+- Double-clicking a group box opens that group as the focused canvas and hides sibling/parent boxes.
+- Groups on their parent's canvas are compact boxes with derived I/O pins; interiors are never drawn in place.
+- The overview map shows only boxes on the focused canvas (members and nested group boxes).
+
 ## imgui-node-editor usage (required preference)
 
 | Concern | Use |
 |---------|-----|
-| Expanded group chrome | `ed::BeginNode` + `ed::Group(size)` (+ group style colors); `BeginGroupHint` / `EndGroupHint` when helpful at distance |
+| Group box | Compact `ed::BeginNode` with mediating I/O pins; **not** nested `Group()` viewports |
 | Selection | Existing `GetSelectedNodes` / synchronizeSelection |
-| Context menus | `ShowNodeContextMenu` / background menu for Group / Ungroup / Collapse / Expand / Save to Box Library |
-| Collapsed group | Compact `BeginNode` representing the group; **not** a third-party widget toolkit |
+| Context menus | `ShowNodeContextMenu` / background menu for Group / Ungroup / Open / Save to Box Library |
 | Library browser | Standard ImGui list/buttons (see user-box-library-contract) |
 
 ## Actions
@@ -25,24 +32,24 @@ Defines in-plugin graph interactions for creating, nesting, editing, expanding, 
 |--------|---------------|--------|
 | **Group** | ≥2 selected allowed boxes; no Audio I/O | New `GraphGroup`; members get `parentGroupId`; default name e.g. `Group` |
 | **Ungroup** | One group targeted | Members lifted to parent/root; group removed; links kept |
-| **Add to group** | Drag/drop or command into group | Membership update if legal |
-| **Remove from group** | Drag out or command | Member to parent/root |
+| **Add to group** | Drag/drop or command onto a group box | Membership update if legal |
+| **Remove from group** | Command | Member to parent/root |
 | **Rename group** | Group targeted | Name edit (ImGui field / menu) |
 | **Set copies (N)** | Group targeted | Update N; materialize/remove independent serial copies when legal (see `group-copies-contract.md`) |
-| **Collapse** | Expanded group | `collapsed=true`; hide interior draw; show external pins |
-| **Expand** | Collapsed group | `collapsed=false`; show members |
+| **Open** | Group box on the current canvas | Focus that group's interior; breadcrumb updates |
+| **Back** | Breadcrumb ancestor | Restore that canvas (root or parent group) |
 | **Save to Box Library** | Exactly one target box (node or group); not Audio I/O | Opens name dialog → library save (see library contract) |
 
-## Collapsed external ports
+## Group box external ports
 
-- For each link crossing the collapsed group boundary, expose a pin on the compact group node matching the outside-facing endpoint’s type/shape.
-- Drawing a new link to a collapsed group pin wires to the underlying member pin (same validation as direct connect).
-- Internal links are not drawn while collapsed.
+- For each pin that is not wired internally inside the group, expose a pin on the group box matching the outside-facing endpoint’s type/shape.
+- Drawing a new link to a group pin wires to the underlying member pin (same validation as direct connect).
+- Internal links are drawn only on the group's own canvas.
 
 ## Persistence
 
-- Group hierarchy, names, membership, bounds, and `collapsed` persist in project/plugin state with the graph.
-- Collapse does not change DSP topology.
+- Group hierarchy, names, membership, bounds, and focused-canvas id persist in project/plugin state with the graph.
+- Opening a group does not change DSP topology.
 
 ## Errors (user-visible)
 
@@ -55,12 +62,13 @@ Defines in-plugin graph interactions for creating, nesting, editing, expanding, 
 ## Non-Goals
 
 - Auto-layout of entire graphs
-- Collapse affecting audio
+- Opening a group affecting audio
 - Geometry-only membership without durable IDs
+- Nested in-place expanded frames / progressive clip of member chrome
 
 ## Implementation anchors
 
 - `OpenYourBox/Source/graph/NodeRenderer.cpp`
 - `OpenYourBox/Source/graph/NodeGraph.cpp`
 - `OpenYourBox/Source/graph/GraphTypes.h`
-- imgui-node-editor: `Group`, `SetGroupSize`, `BeginGroupHint`, selection/context APIs
+- imgui-node-editor: selection/context APIs

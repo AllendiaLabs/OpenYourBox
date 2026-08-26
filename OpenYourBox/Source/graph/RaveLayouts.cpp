@@ -72,6 +72,9 @@ std::string insertRaveLayout(NodeGraph &graph, RaveLayoutId layout,
                              int channelWidth) {
   if (channelWidth != 1 && channelWidth != 2)
     return "RAVE layout channel width must be mono (1) or stereo (2)";
+  if (graph.getViewport().focusedGroupId.has_value())
+    return "RAVE layouts can only be inserted on the root canvas "
+           "(open Graph from the breadcrumb first)";
 
   graph.ensureFixedHostIo();
   const GraphNode *input = nullptr;

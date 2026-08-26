@@ -67,4 +67,11 @@ inline juce::File samplesDirectory() {
     return legacy;
   return ensureDirectory(samples);
 }
+
+/**
+ * @brief Directory where saved user boxes (elements and groups) are stored.
+ */
+inline juce::File boxesDirectory() {
+  return ensureDirectory(userDataRoot().getChildFile("Boxes"));
+}
 } // namespace openyourbox::library

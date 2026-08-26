@@ -180,7 +180,8 @@ void OpenYourBoxAudioProcessorEditor::renderFrame() {
   callbacks.browseWeights = [this](std::int32_t nodeId) {
     handleBrowseWeights(nodeId);
   };
-  nodeRenderer.render(nodeGraph, callbacks, imguiHost.takeMagnification());
+  nodeRenderer.render(nodeGraph, callbacks, imguiHost.takeMagnification(),
+                      &boxLibrary);
   ImGui::EndChild();
 
   ImGui::SameLine();
@@ -542,7 +543,13 @@ void OpenYourBoxAudioProcessorEditor::handleRandomize(std::int32_t nodeId,
 
 void OpenYourBoxAudioProcessorEditor::handleFreeze(
     const std::vector<std::int32_t> &selectedNodeIds) {
-  auto chains = nodeGraph.partitionFreezeChains(selectedNodeIds);
+  const auto expanded =
+      nodeGraph.expandSelectionToFreezableLeaves(selectedNodeIds);
+  if (expanded.empty()) {
+    showError("Freeze requires live Blue elements inside the selection");
+    return;
+  }
+  auto chains = nodeGraph.partitionFreezeChains(expanded);
   if (chains.empty()) {
     showError(
         "Freeze requires live Blue chains with a single input and output");

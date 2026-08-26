@@ -73,13 +73,13 @@
 **Alternatives considered**:
 - Unlimited depth with no guard: risk UI/stack issues; soft cap with message is enough.
 
-## Decision 8: Group copies N = independent materialized serial stack
+## Decision 8: Group copies N = independent serial stack, invisible in the UI
 
-**Decision**: Each `GraphGroup` has integer `copies` N (default 1). For N > 1, **materialize** N independent canvas copies of the group’s block (separate weights/parameters—not shared). Wire copies in a **serial chain** when external I/O shapes allow (outputs of copy i → matching inputs of copy i+1); attach external cables to the first copy’s inputs and last copy’s outputs. If chaining is illegal, refuse/clamp N with a clear message and do not leave orphan nodes. Increasing N clones the last copy into a new trailing instance; decreasing N deletes trailing instances. Nested groups each have their own N. Persist N and all instances in project state and box-library snapshots. On successful N update, re-assert serial wiring between copies.
+**Decision**: Each `GraphGroup` has integer `copies` N (default 1). For N > 1 the live engine **unrolls** N independent serial copies of the group’s processing chain (separate weights/parameters—not shared). The editor **does not draw** cloned elements: users edit one visible chain; each member stores a `copySlots` vector holding every copy’s seed/weights/artifact. External cables attach to the first copy’s inputs and last copy’s outputs. If chaining is illegal, refuse/clamp N with a clear message. Increasing N clones the last slot; decreasing N drops trailing slots. Nested groups each have their own N (slot count is the product of ancestor N). Persist N and slots in project state. Collapse remains presentation-only.
 
-**Rationale**: Spec FR-017–FR-017e; clarifications (independent copies, canvas materialize, serial-only).
+**Rationale**: Spec FR-017–FR-017e plus later product note that copies must not appear as extra canvas boxes (TODO group UX). Independent weights still required for training.
 
 **Alternatives considered**:
 - Shared weights across repeats: rejected by clarify.
-- Runtime-only unroll with single UI group: rejected (materialize on canvas).
+- Materialize copies as extra visible nodes: rejected — clutters the graph and duplicates UI.
 - Parallel or residual stack topologies in v1: deferred.

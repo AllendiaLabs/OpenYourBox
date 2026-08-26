@@ -13,8 +13,9 @@ enum class RaveLayoutId { original, latestContinuous };
  *
  * Existing processing nodes (except host Audio Input/Output) are left in
  * place; the layout is added to the right of Audio Input. Channel width is
- * 1 (mono) or 2 (stereo). Host vs layout width mismatches remain a shape
- * error unless the user wires adapters.
+ * 1 (mono) or 2 (stereo). Refused while a nested group canvas is focused.
+ * Host vs layout width mismatches remain a shape error unless the user wires
+ * adapters.
  *
  * @param graph Document to mutate.
  * @param layout Published lineage.
