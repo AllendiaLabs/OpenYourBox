@@ -239,6 +239,15 @@ void beginPropertyRow(const char *label) {
 }
 
 /**
+ * @brief Draws a property label and places a full-width value row beneath it.
+ * @param label Property label text.
+ */
+void beginCopyListPropertyRow(const char *label) {
+  ImGui::TextUnformatted(label);
+  ImGui::SetNextItemWidth(nodeBodyWidth);
+}
+
+/**
  * @brief Returns true when a palette type can be inserted onto an existing cable.
  * @param type Palette element type.
  * @return False for source-only Knob/XY elements.
@@ -846,6 +855,100 @@ void NodeRenderer::renderNode(NodeGraph &graph, GraphNode &node,
         }
       }
       ImGui::PopID();
+      continue;
+    }
+    const auto copyCount = graph.effectiveCopyCount(node.id);
+    const auto listEdit =
+        copyCount > 1 && propertySupportsCopyValueList(property);
+    if (listEdit) {
+      constexpr float handleWidth = 18.0f;
+      beginCopyListPropertyRow(property.label.c_str());
+      const auto fieldHeight = ImGui::GetFrameHeight();
+      const auto fieldOrigin = ImGui::GetCursorScreenPos();
+      ImGui::GetWindowDrawList()->AddRectFilled(
+          fieldOrigin,
+          ImVec2(fieldOrigin.x + nodeBodyWidth, fieldOrigin.y + fieldHeight),
+          ImGui::GetColorU32(ImGuiCol_FrameBg), ImGui::GetStyle().FrameRounding);
+
+      dragSteps = propertyDragSteps("##drag", ImVec2(handleWidth, fieldHeight));
+      if (dragSteps != 0) {
+        ensurePropertyCopyCount(property, copyCount);
+        if (property.kind == PropertyKind::real) {
+          const auto span = property.floatMaximum - property.floatMinimum;
+          const auto stepPerTick =
+              ImGui::GetIO().KeyShift ? span / 2000.0f : span / 200.0f;
+          auto values = property.copyFloatValues;
+          for (auto &item : values)
+            item += static_cast<float>(dragSteps) * stepPerTick;
+          if (graph.setFloatPropertyCopyValues(node.id, property.key, values)) {
+            mutatedThisFrame = true;
+            recompileThisFrame = true;
+            if (callbacks.floatPropertyChanged)
+              callbacks.floatPropertyChanged(node.id, property.key,
+                                             property.floatValue);
+          }
+        } else {
+          auto values = property.copyIntValues;
+          for (auto &item : values)
+            item += dragSteps;
+          if (graph.setPropertyCopyValues(node.id, property.key, values)) {
+            mutatedThisFrame = true;
+            recompileThisFrame = true;
+            if (callbacks.propertyChanged)
+              callbacks.propertyChanged(node.id, property.key, property.value);
+          }
+        }
+      }
+      ImGui::SameLine(0.0f, 0.0f);
+      ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(0.0f, 0.0f, 0.0f, 0.0f));
+      ImGui::PushStyleVar(ImGuiStyleVar_FrameBorderSize, 0.0f);
+      ImGui::SetNextItemWidth(nodeBodyWidth - handleWidth);
+      const auto bufferKey = std::to_string(node.id) + ":" + property.key;
+      auto &buffer = propertyListBuffers[bufferKey];
+      const auto widgetId = ImGui::GetID("##copyList");
+      if (ImGui::GetActiveID() != widgetId) {
+        const auto formatted = formatPropertyCopyList(property, copyCount);
+        std::snprintf(buffer.data(), buffer.size(), "%s", formatted.c_str());
+      }
+      ImGui::InputText("##copyList", buffer.data(), buffer.size());
+      ImGui::PopStyleVar();
+      ImGui::PopStyleColor();
+      if (ImGui::IsItemDeactivatedAfterEdit()) {
+        const auto parsed =
+            parsePropertyCopyList(property, copyCount, buffer.data());
+        if (!parsed.accepted) {
+          transientMessage = parsed.message;
+          transientMessageDeadline = ImGui::GetTime() + 2.5;
+          if (callbacks.showMessage)
+            callbacks.showMessage(transientMessage);
+          const auto formatted = formatPropertyCopyList(property, copyCount);
+          std::snprintf(buffer.data(), buffer.size(), "%s", formatted.c_str());
+        } else if (property.kind == PropertyKind::real) {
+          if (graph.setFloatPropertyCopyValues(node.id, property.key,
+                                               parsed.floatValues)) {
+            mutatedThisFrame = true;
+            recompileThisFrame = true;
+            if (callbacks.floatPropertyChanged)
+              callbacks.floatPropertyChanged(node.id, property.key,
+                                             property.floatValue);
+          }
+        } else if (graph.setPropertyCopyValues(node.id, property.key,
+                                               parsed.intValues)) {
+          mutatedThisFrame = true;
+          recompileThisFrame = true;
+          if (callbacks.propertyChanged)
+            callbacks.propertyChanged(node.id, property.key, property.value);
+        } else {
+          transientMessage =
+              "That mode would break downstream channel compatibility";
+          transientMessageDeadline = ImGui::GetTime() + 2.5;
+          if (callbacks.showMessage)
+            callbacks.showMessage(transientMessage);
+        }
+      }
+      ImGui::PopID();
+      if (liveOnGold)
+        ImGui::BeginDisabled();
       continue;
     }
     if (property.kind == PropertyKind::choice && !property.choices.empty()) {

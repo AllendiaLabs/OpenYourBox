@@ -107,6 +107,53 @@ int main() {
                    "members hold independent weight slots per copy");
   graph.findNode(convA)->copySlots[1].seed = 99;
   graph.findNode(convA)->copySlots[2].seed = 100;
+
+  {
+    using openyourbox::graph::NodeProperty;
+    using openyourbox::graph::PropertyKind;
+    using openyourbox::graph::parsePropertyCopyList;
+    NodeProperty gain;
+    gain.key = "gain";
+    gain.label = "Gain";
+    gain.kind = PropertyKind::real;
+    gain.floatValue = 1.0f;
+    gain.floatMinimum = openyourbox::graph::gainMinimum;
+    gain.floatMaximum = openyourbox::graph::gainMaximum;
+    const auto parsed = parsePropertyCopyList(gain, 3, "0.50, 1.00, 1.50");
+    passed &= expect(parsed.accepted && parsed.floatValues.size() == 3 &&
+                         std::abs(parsed.floatValues[1] - 1.0f) < 1.0e-5f,
+                     "comma-separated reals parse into per-copy values");
+    const auto broadcast = parsePropertyCopyList(gain, 3, "0.25");
+    passed &= expect(broadcast.accepted && broadcast.floatValues.size() == 3 &&
+                         std::abs(broadcast.floatValues[2] - 0.25f) < 1.0e-5f,
+                     "a single value broadcasts to every copy");
+    const auto commaDecimal = parsePropertyCopyList(gain, 3, "0,5");
+    passed &= expect(!commaDecimal.accepted,
+                     "comma is a list separator, not a decimal mark");
+    const auto wrongCount = parsePropertyCopyList(gain, 3, "0.5, 1.0");
+    passed &= expect(!wrongCount.accepted,
+                     "lists that are not 1 or N values are refused");
+  }
+  passed &= expect(graph.setPropertyCopyValues(convA, "kernel_size", {3, 5, 7}),
+                   "grouped integer properties accept N values");
+  passed &= expect(!graph.setPropertyCopyValues(convA, "kernel_size", {3, 5}),
+                   "wrong-sized copy lists are refused");
+  {
+    const auto *node = graph.findNode(convA);
+    const openyourbox::graph::NodeProperty *kernel = nullptr;
+    if (node != nullptr) {
+      for (const auto &property : node->properties) {
+        if (property.key == "kernel_size")
+          kernel = &property;
+      }
+    }
+    passed &= expect(kernel != nullptr && kernel->copyIntValues.size() == 3 &&
+                         kernel->copyIntValues[0] == 3 &&
+                         kernel->copyIntValues[1] == 5 &&
+                         kernel->copyIntValues[2] == 7,
+                     "per-copy integer values are stored on the property");
+  }
+
   const auto expanded = graph.withInvisibleCopiesMaterialized();
   int convolutionCount = 0;
   for (const auto &node : expanded.getNodes()) {
@@ -115,6 +162,27 @@ int main() {
   }
   passed &= expect(convolutionCount == 6,
                    "DSP unroll materializes two extra copies of each member");
+  {
+    int kernel3 = 0;
+    int kernel5 = 0;
+    int kernel7 = 0;
+    for (const auto &node : expanded.getNodes()) {
+      if (node.type != NodeType::convolution)
+        continue;
+      for (const auto &property : node.properties) {
+        if (property.key != "kernel_size")
+          continue;
+        if (property.value == 3)
+          ++kernel3;
+        else if (property.value == 5)
+          ++kernel5;
+        else if (property.value == 7)
+          ++kernel7;
+      }
+    }
+    passed &= expect(kernel3 == 4 && kernel5 == 1 && kernel7 == 1,
+                     "DSP unroll applies per-copy integer properties");
+  }
   {
     std::unordered_map<std::int32_t, int> indegree;
     std::unordered_map<std::int32_t, std::vector<std::int32_t>> outgoing;
@@ -252,6 +320,20 @@ int main() {
   passed &= expect(restored.findNode(convA)->copySlots.size() == 3 &&
                        restored.findNode(convA)->copySlots[1].seed == 99,
                    "per-copy weights survive round-trip");
+  {
+    const auto *node = restored.findNode(convA);
+    const openyourbox::graph::NodeProperty *kernel = nullptr;
+    if (node != nullptr) {
+      for (const auto &property : node->properties) {
+        if (property.key == "kernel_size")
+          kernel = &property;
+      }
+    }
+    passed &= expect(kernel != nullptr && kernel->copyIntValues.size() == 3 &&
+                         kernel->copyIntValues[1] == 5 &&
+                         kernel->copyIntValues[2] == 7,
+                     "per-copy integer properties survive round-trip");
+  }
   passed &= expect(restored.findGroup(created.groupId) != nullptr &&
                        std::abs(restored.findGroup(created.groupId)->viewPan.x -
                                 12.0f) < 0.01f &&
@@ -461,6 +543,25 @@ int main() {
                            linear->copySlots[1].seed == 12346 &&
                            linear->copySlots[2].seed == 12347,
                        "element randomize writes seed + i across copies");
+      passed &= expect(elementRandomize.setFloatPropertyCopyValues(
+                           actId, "gain", {0.5f, 1.0f, 1.5f}),
+                       "grouped real properties accept N values");
+      const auto expandedGains =
+          elementRandomize.withInvisibleCopiesMaterialized();
+      std::vector<float> gains;
+      for (const auto &node : expandedGains.getNodes()) {
+        if (node.type != NodeType::activation)
+          continue;
+        for (const auto &property : node.properties) {
+          if (property.key == "gain")
+            gains.push_back(property.floatValue);
+        }
+      }
+      passed &= expect(gains.size() == 3 &&
+                           std::abs(gains[0] - 0.5f) < 1.0e-5f &&
+                           std::abs(gains[1] - 1.0f) < 1.0e-5f &&
+                           std::abs(gains[2] - 1.5f) < 1.0e-5f,
+                       "DSP unroll applies per-copy real properties");
     }
   }
 

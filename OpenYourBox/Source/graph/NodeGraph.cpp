@@ -1359,6 +1359,18 @@ juce::ValueTree nodeToTree(const openyourbox::graph::GraphNode &node) {
     child.setProperty("floatValue", property.floatValue, nullptr);
     child.setProperty("floatMinimum", property.floatMinimum, nullptr);
     child.setProperty("floatMaximum", property.floatMaximum, nullptr);
+    if (!property.copyIntValues.empty()) {
+      juce::StringArray ints;
+      for (const auto value : property.copyIntValues)
+        ints.add(juce::String(value));
+      child.setProperty("copyIntValues", ints.joinIntoString(","), nullptr);
+    }
+    if (!property.copyFloatValues.empty()) {
+      juce::StringArray reals;
+      for (const auto value : property.copyFloatValues)
+        reals.add(juce::String(value, 6));
+      child.setProperty("copyFloatValues", reals.joinIntoString(","), nullptr);
+    }
     tree.appendChild(child, nullptr);
   }
   return tree;
@@ -1468,6 +1480,18 @@ openyourbox::graph::GraphNode nodeFromTree(const juce::ValueTree &tree) {
           static_cast<float>(child.getProperty("floatMinimum", 0.0));
       property.floatMaximum =
           static_cast<float>(child.getProperty("floatMaximum", 1.0));
+      if (child.hasProperty("copyIntValues")) {
+        const auto tokens = juce::StringArray::fromTokens(
+            child["copyIntValues"].toString(), ",", "");
+        for (const auto &token : tokens)
+          property.copyIntValues.push_back(token.getIntValue());
+      }
+      if (child.hasProperty("copyFloatValues")) {
+        const auto tokens = juce::StringArray::fromTokens(
+            child["copyFloatValues"].toString(), ",", "");
+        for (const auto &token : tokens)
+          property.copyFloatValues.push_back(token.getFloatValue());
+      }
       node.properties.push_back(std::move(property));
     }
   }
@@ -1578,9 +1602,11 @@ void assignParent(openyourbox::graph::NodeGraph &graph, std::int32_t memberId,
 void refreshCopySlotsForGroup(openyourbox::graph::NodeGraph &graph,
                               std::int32_t groupId) {
   for (const auto nodeId : graph.collectLeafNodeIds(groupId)) {
-    if (auto *node = graph.findNode(nodeId))
-      openyourbox::graph::ensureCopySlotCount(*node,
-                                              graph.effectiveCopyCount(nodeId));
+    if (auto *node = graph.findNode(nodeId)) {
+      const auto copies = graph.effectiveCopyCount(nodeId);
+      openyourbox::graph::ensureCopySlotCount(*node, copies);
+      openyourbox::graph::ensureNodePropertyCopyCounts(*node, copies);
+    }
   }
 }
 
@@ -1742,8 +1768,11 @@ std::int32_t NodeGraph::addNode(NodeType type, juce::Point<float> position,
           group->memberIds.end())
         group->memberIds.push_back(id);
     }
-    if (auto *created = findNode(id))
-      ensureCopySlotCount(*created, effectiveCopyCount(id));
+    if (auto *created = findNode(id)) {
+      const auto copies = effectiveCopyCount(id);
+      ensureCopySlotCount(*created, copies);
+      ensureNodePropertyCopyCounts(*created, copies);
+    }
   }
   return id;
 }
@@ -2592,9 +2621,12 @@ GroupActionResult NodeGraph::removeFromGroup(std::int32_t memberId) {
     if (auto *ancestor = findGroup(*grandparent))
       ancestor->memberIds.push_back(memberId);
   }
-  if (findNode(memberId) != nullptr)
-    ensureCopySlotCount(*findNode(memberId), effectiveCopyCount(memberId));
-  else if (findGroup(memberId) != nullptr)
+  if (findNode(memberId) != nullptr) {
+    auto *node = findNode(memberId);
+    const auto copies = effectiveCopyCount(memberId);
+    ensureCopySlotCount(*node, copies);
+    ensureNodePropertyCopyCounts(*node, copies);
+  } else if (findGroup(memberId) != nullptr)
     refreshCopySlotsForGroup(*this, memberId);
   return {true, {}, *parent};
 }
@@ -2749,9 +2781,13 @@ NodeGraph NodeGraph::withInvisibleCopiesMaterialized() const {
       }
       if (auto *node = expanded.findNode(nodeId)) {
         const auto slot = working[nodeId].slotIndex;
+        const auto originalId = working[nodeId].originalId;
+        if (const auto *original = findNode(originalId))
+          node->properties = original->properties;
         ensureCopySlotCount(*node, std::max(slot + 1, effectiveCopyCount(working[nodeId].originalId)));
         if (slot < static_cast<int>(node->copySlots.size()))
           applyCopySlot(*node, node->copySlots[static_cast<std::size_t>(slot)]);
+        applyCopyPropertyValues(*node, slot);
       }
     }
 
@@ -2779,11 +2815,13 @@ NodeGraph NodeGraph::withInvisibleCopiesMaterialized() const {
         const auto originalId = working[nodeId].originalId;
         if (const auto *original = findNode(originalId)) {
           clone.copySlots = original->copySlots;
+          clone.properties = original->properties;
           ensureCopySlotCount(clone, std::max(slot + 1,
                                               static_cast<int>(original->copySlots.size())));
           if (slot < static_cast<int>(clone.copySlots.size()))
             applyCopySlot(clone,
                           clone.copySlots[static_cast<std::size_t>(slot)]);
+          applyCopyPropertyValues(clone, slot);
         }
         instance.nodeMap[nodeId] = clone.id;
         working[clone.id] = WorkingNode{originalId, slot};
@@ -2969,7 +3007,20 @@ bool NodeGraph::setProperty(std::int32_t nodeId, const std::string &key,
   if (property == node->properties.end())
     return false;
   const auto previousValue = property->value;
+  const auto previousCopyValues = property->copyIntValues;
   property->setValue(value);
+
+  const auto syncCopyValues = [&]() {
+    if (!propertySupportsCopyValueList(*property))
+      return;
+    ensurePropertyCopyCount(*property, effectiveCopyCount(nodeId));
+    std::fill(property->copyIntValues.begin(), property->copyIntValues.end(),
+              property->value);
+  };
+  const auto restoreCopyValues = [&]() {
+    property->copyIntValues = previousCopyValues;
+  };
+  syncCopyValues();
 
   if (key == "channels" && isFixedIoType(node->type)) {
     property->setValue(std::clamp(property->value, 0, 2));
@@ -2994,6 +3045,7 @@ bool NodeGraph::setProperty(std::int32_t nodeId, const std::string &key,
     const auto incompatible = firstIncompatibleLinkMessage(*this);
     if (!incompatible.empty()) {
       property->setValue(previousValue);
+      restoreCopyValues();
       applyHostIoChannels(*node);
       if (paired != nullptr) {
         for (auto &pairedProperty : paired->properties) {
@@ -3007,6 +3059,7 @@ bool NodeGraph::setProperty(std::int32_t nodeId, const std::string &key,
       refreshPropagatedPinShapes(*this);
       return false;
     }
+    syncCopyValues();
     return true;
   } else if (key == "channels" && isConvolutionType(node->type)) {
     for (auto &pin : node->outputs)
@@ -3020,6 +3073,7 @@ bool NodeGraph::setProperty(std::int32_t nodeId, const std::string &key,
     updateMergeOutputShape(*this, *node);
     if (!mergeDownstreamIsCompatible(*this, *node)) {
       property->setValue(previousValue);
+      restoreCopyValues();
       updateMergeOutputShape(*this, *node);
       return false;
     }
@@ -3059,6 +3113,7 @@ bool NodeGraph::setProperty(std::int32_t nodeId, const std::string &key,
   const auto incompatible = firstIncompatibleLinkMessage(*this);
   if (!incompatible.empty()) {
     property->setValue(previousValue);
+    restoreCopyValues();
     if (isConvolutionType(node->type))
       updateConv1dDetail(*node);
     else if (isConvTransposeType(node->type))
@@ -3066,6 +3121,7 @@ bool NodeGraph::setProperty(std::int32_t nodeId, const std::string &key,
     refreshPropagatedPinShapes(*this);
     return false;
   }
+  syncCopyValues();
   return true;
 }
 
@@ -3085,6 +3141,78 @@ bool NodeGraph::setFloatProperty(std::int32_t nodeId, const std::string &key,
       property->kind != PropertyKind::real)
     return false;
   property->setFloatValue(value);
+  if (key == "fidelity")
+    node->fidelityPercent = clampFidelity(property->floatValue);
+  if (propertySupportsCopyValueList(*property)) {
+    ensurePropertyCopyCount(*property, effectiveCopyCount(nodeId));
+    std::fill(property->copyFloatValues.begin(),
+              property->copyFloatValues.end(), property->floatValue);
+  }
+  return true;
+}
+
+bool NodeGraph::setPropertyCopyValues(std::int32_t nodeId,
+                                      const std::string &key,
+                                      const std::vector<int> &values) {
+  auto *node = findNode(nodeId);
+  if (node == nullptr || node->state == NodeState::frozenGold)
+    return false;
+  const auto property = std::find_if(
+      node->properties.begin(), node->properties.end(),
+      [&key](const NodeProperty &candidate) { return candidate.key == key; });
+  if (property == node->properties.end() ||
+      !propertySupportsCopyValueList(*property) ||
+      property->kind != PropertyKind::integer)
+    return false;
+  const auto copies = effectiveCopyCount(nodeId);
+  if (static_cast<int>(values.size()) != copies)
+    return false;
+  std::vector<int> clamped;
+  clamped.reserve(values.size());
+  for (const auto value : values) {
+    if (value < property->minimum || value > property->maximum)
+      return false;
+    clamped.push_back(std::clamp(value, property->minimum, property->maximum));
+  }
+  if (!setProperty(nodeId, key, clamped.front()))
+    return false;
+  property->copyIntValues = std::move(clamped);
+  property->value = property->copyIntValues.front();
+  return true;
+}
+
+bool NodeGraph::setFloatPropertyCopyValues(std::int32_t nodeId,
+                                           const std::string &key,
+                                           const std::vector<float> &values) {
+  auto *node = findNode(nodeId);
+  if (node == nullptr)
+    return false;
+  const bool fidelityOnGold =
+      key == "fidelity" && node->state == NodeState::frozenGold;
+  if (node->state == NodeState::frozenGold && !fidelityOnGold)
+    return false;
+  const auto property = std::find_if(
+      node->properties.begin(), node->properties.end(),
+      [&key](const NodeProperty &candidate) { return candidate.key == key; });
+  if (property == node->properties.end() ||
+      !propertySupportsCopyValueList(*property) ||
+      property->kind != PropertyKind::real)
+    return false;
+  const auto copies = effectiveCopyCount(nodeId);
+  if (static_cast<int>(values.size()) != copies)
+    return false;
+  std::vector<float> clamped;
+  clamped.reserve(values.size());
+  for (const auto value : values) {
+    if (value < property->floatMinimum || value > property->floatMaximum)
+      return false;
+    clamped.push_back(
+        std::clamp(value, property->floatMinimum, property->floatMaximum));
+  }
+  if (!setFloatProperty(nodeId, key, clamped.front()))
+    return false;
+  property->copyFloatValues = std::move(clamped);
+  property->floatValue = property->copyFloatValues.front();
   if (key == "fidelity")
     node->fidelityPercent = clampFidelity(property->floatValue);
   return true;

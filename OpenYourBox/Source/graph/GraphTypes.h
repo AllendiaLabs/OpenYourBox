@@ -3,10 +3,14 @@
 #include <JuceHeader.h>
 
 #include <algorithm>
+#include <charconv>
+#include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <limits>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace openyourbox::graph {
@@ -644,6 +648,18 @@ struct NodeProperty {
   float floatMinimum = 0.0f;
   /** @brief Inclusive maximum accepted real value. */
   float floatMaximum = 1.0f;
+  /**
+   * @brief Per-copy integer values when the owner sits in a group with N&gt;1.
+   *
+   * Empty means every copy uses `value`. Slot 0 mirrors `value`.
+   */
+  std::vector<int> copyIntValues;
+  /**
+   * @brief Per-copy real values when the owner sits in a group with N&gt;1.
+   *
+   * Empty means every copy uses `floatValue`. Slot 0 mirrors `floatValue`.
+   */
+  std::vector<float> copyFloatValues;
 
   /** @brief Clamps and stores a proposed integer value. */
   void setValue(int proposed) noexcept {
@@ -654,6 +670,20 @@ struct NodeProperty {
   void setFloatValue(float proposed) noexcept {
     floatValue = std::clamp(proposed, floatMinimum, floatMaximum);
   }
+};
+
+/**
+ * @brief Outcome of parsing a comma-separated per-copy property list.
+ */
+struct PropertyCopyListParse {
+  /** @brief True when the text is a legal 1-value broadcast or N-value list. */
+  bool accepted = false;
+  /** @brief User-facing reason when parsing failed. */
+  std::string message;
+  /** @brief Parsed integers, sized to the requested copy count. */
+  std::vector<int> intValues;
+  /** @brief Parsed reals, sized to the requested copy count. */
+  std::vector<float> floatValues;
 };
 
 /** @brief Live performance values displayed by a frozen BlackBox node. */
@@ -1030,5 +1060,239 @@ inline void ensureCopySlotCount(GraphNode &node, int count) {
   if (static_cast<int>(node.copySlots.size()) > target)
     node.copySlots.resize(static_cast<std::size_t>(target));
   applyCopySlot(node, node.copySlots.front());
+}
+
+/**
+ * @brief Returns true when a property can store one numeric value per copy.
+ * @param property Candidate inline property.
+ */
+inline bool propertySupportsCopyValueList(const NodeProperty &property) noexcept {
+  if (property.kind != PropertyKind::integer &&
+      property.kind != PropertyKind::real)
+    return false;
+  return property.key != "residual" && property.key != "inputs";
+}
+
+/**
+ * @brief Integer used by copy slot @p slot, falling back to the primary value.
+ * @param property Source property.
+ * @param slot Copy index (0 is the visible element).
+ */
+inline int integerValueForCopy(const NodeProperty &property, int slot) noexcept {
+  if (slot >= 0 && slot < static_cast<int>(property.copyIntValues.size()))
+    return property.copyIntValues[static_cast<std::size_t>(slot)];
+  return property.value;
+}
+
+/**
+ * @brief Real used by copy slot @p slot, falling back to the primary value.
+ * @param property Source property.
+ * @param slot Copy index (0 is the visible element).
+ */
+inline float floatValueForCopy(const NodeProperty &property, int slot) noexcept {
+  if (slot >= 0 && slot < static_cast<int>(property.copyFloatValues.size()))
+    return property.copyFloatValues[static_cast<std::size_t>(slot)];
+  return property.floatValue;
+}
+
+/**
+ * @brief Grows or shrinks a property's per-copy list to @p count.
+ * @param property Property to resize.
+ * @param count Required slot count (≥ 1). New slots clone the previous last value.
+ */
+inline void ensurePropertyCopyCount(NodeProperty &property, int count) {
+  if (!propertySupportsCopyValueList(property))
+    return;
+  const auto target = std::max(1, count);
+  if (property.kind == PropertyKind::real) {
+    if (property.copyFloatValues.empty())
+      property.copyFloatValues.push_back(property.floatValue);
+    while (static_cast<int>(property.copyFloatValues.size()) < target)
+      property.copyFloatValues.push_back(property.copyFloatValues.back());
+    if (static_cast<int>(property.copyFloatValues.size()) > target)
+      property.copyFloatValues.resize(static_cast<std::size_t>(target));
+    property.floatValue = property.copyFloatValues.front();
+    return;
+  }
+  if (property.copyIntValues.empty())
+    property.copyIntValues.push_back(property.value);
+  while (static_cast<int>(property.copyIntValues.size()) < target)
+    property.copyIntValues.push_back(property.copyIntValues.back());
+  if (static_cast<int>(property.copyIntValues.size()) > target)
+    property.copyIntValues.resize(static_cast<std::size_t>(target));
+  property.value = property.copyIntValues.front();
+}
+
+/**
+ * @brief Resizes every list-capable property on @p node to @p count slots.
+ * @param node Element whose enclosing copy product changed.
+ * @param count Required slot count (≥ 1).
+ */
+inline void ensureNodePropertyCopyCounts(GraphNode &node, int count) {
+  for (auto &property : node.properties)
+    ensurePropertyCopyCount(property, count);
+}
+
+/**
+ * @brief Writes one copy slot's numeric property values onto the primary fields.
+ * @param node Destination element (typically an unrolled clone).
+ * @param slot Copy index to apply.
+ */
+inline void applyCopyPropertyValues(GraphNode &node, int slot) {
+  for (auto &property : node.properties) {
+    if (property.kind == PropertyKind::real)
+      property.setFloatValue(floatValueForCopy(property, slot));
+    else if (property.kind == PropertyKind::integer)
+      property.setValue(integerValueForCopy(property, slot));
+  }
+}
+
+/**
+ * @brief Formats N numeric copy values as a comma-separated list.
+ * @param property Source property.
+ * @param copyCount Number of copies to include.
+ */
+inline std::string formatPropertyCopyList(const NodeProperty &property,
+                                          int copyCount) {
+  const auto count = std::max(1, copyCount);
+  std::string text;
+  for (int index = 0; index < count; ++index) {
+    if (index > 0)
+      text += ", ";
+    if (property.kind == PropertyKind::real) {
+      char buffer[32];
+      std::snprintf(buffer, sizeof(buffer), "%.2f",
+                    floatValueForCopy(property, index));
+      text += buffer;
+    } else {
+      text += std::to_string(integerValueForCopy(property, index));
+    }
+  }
+  return text;
+}
+
+/**
+ * @brief Parses a comma-separated list of 1 (broadcast) or N per-copy numbers.
+ *
+ * Commas separate values. Periods are the decimal mark. A single token is
+ * applied to every copy.
+ * @param property Property providing kind and legal ranges.
+ * @param copyCount Required list length when more than one token is present.
+ * @param text User-entered list.
+ */
+inline PropertyCopyListParse
+parsePropertyCopyList(const NodeProperty &property, int copyCount,
+                      const std::string &text) {
+  PropertyCopyListParse result;
+  const auto target = std::max(1, copyCount);
+  std::vector<std::string> tokens;
+  std::string_view remaining(text);
+  while (!remaining.empty() || tokens.empty()) {
+    const auto comma = remaining.find(',');
+    const auto token =
+        comma == std::string_view::npos ? remaining : remaining.substr(0, comma);
+    const auto first = token.find_first_not_of(" \t");
+    if (first == std::string_view::npos) {
+      result.message = property.label + " uses commas to separate copy values";
+      return result;
+    }
+    const auto last = token.find_last_not_of(" \t");
+    tokens.emplace_back(token.substr(first, last - first + 1));
+    if (comma == std::string_view::npos)
+      break;
+    remaining = remaining.substr(comma + 1);
+    if (remaining.empty()) {
+      result.message = property.label + " uses commas to separate copy values";
+      return result;
+    }
+  }
+  if (tokens.size() != 1 &&
+      tokens.size() != static_cast<std::size_t>(target)) {
+    result.message = property.label + " needs " + std::to_string(target) +
+                     " comma-separated values (one per copy)";
+    return result;
+  }
+
+  const auto parseToken = [&](const std::string &token, float &real,
+                              int &integer) {
+    if (property.kind == PropertyKind::real) {
+      if (token.empty())
+        return false;
+      std::size_t index = 0;
+      const auto negative = token[index] == '-';
+      if (negative || token[index] == '+')
+        ++index;
+      if (index >= token.size())
+        return false;
+      double value = 0.0;
+      auto anyDigit = false;
+      while (index < token.size() && token[index] >= '0' &&
+             token[index] <= '9') {
+        anyDigit = true;
+        value = value * 10.0 + static_cast<double>(token[index] - '0');
+        ++index;
+      }
+      if (index < token.size() && token[index] == '.') {
+        ++index;
+        double place = 0.1;
+        while (index < token.size() && token[index] >= '0' &&
+               token[index] <= '9') {
+          anyDigit = true;
+          value += static_cast<double>(token[index] - '0') * place;
+          place *= 0.1;
+          ++index;
+        }
+      }
+      if (!anyDigit || index != token.size())
+        return false;
+      real = static_cast<float>(negative ? -value : value);
+      return std::isfinite(real);
+    }
+    const auto *begin = token.data();
+    const auto *end = begin + token.size();
+    const auto parsed = std::from_chars(begin, end, integer);
+    return parsed.ec == std::errc{} && parsed.ptr == end;
+  };
+
+  std::vector<float> reals;
+  std::vector<int> integers;
+  for (const auto &token : tokens) {
+    float real = 0.0f;
+    int integer = 0;
+    if (!parseToken(token, real, integer)) {
+      result.message = property.label + " values must be numbers";
+      return result;
+    }
+    if (property.kind == PropertyKind::real) {
+      if (real < property.floatMinimum || real > property.floatMaximum) {
+        result.message = property.label + " must be between " +
+                         std::to_string(property.floatMinimum) + " and " +
+                         std::to_string(property.floatMaximum);
+        return result;
+      }
+      reals.push_back(real);
+    } else {
+      if (integer < property.minimum || integer > property.maximum) {
+        result.message = property.label + " must be between " +
+                         std::to_string(property.minimum) + " and " +
+                         std::to_string(property.maximum);
+        return result;
+      }
+      integers.push_back(integer);
+    }
+  }
+  if (tokens.size() == 1) {
+    if (property.kind == PropertyKind::real) {
+      const auto broadcastValue = reals.front();
+      reals.assign(static_cast<std::size_t>(target), broadcastValue);
+    } else {
+      const auto broadcastValue = integers.front();
+      integers.assign(static_cast<std::size_t>(target), broadcastValue);
+    }
+  }
+  result.accepted = true;
+  result.floatValues = std::move(reals);
+  result.intValues = std::move(integers);
+  return result;
 }
 } // namespace openyourbox::graph

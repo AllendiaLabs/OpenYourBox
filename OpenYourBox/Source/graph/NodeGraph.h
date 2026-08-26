@@ -372,6 +372,26 @@ public:
                         float value);
 
   /**
+   * @brief Writes one integer per group copy onto a numeric property.
+   * @param nodeId Target node identifier.
+   * @param key Canonical property key.
+   * @param values Copy-ordered integers; size must match `effectiveCopyCount`.
+   * @return True when the property exists, is list-capable, and was updated.
+   */
+  bool setPropertyCopyValues(std::int32_t nodeId, const std::string &key,
+                             const std::vector<int> &values);
+
+  /**
+   * @brief Writes one real per group copy onto a numeric property.
+   * @param nodeId Target node identifier.
+   * @param key Canonical property key.
+   * @param values Copy-ordered reals; size must match `effectiveCopyCount`.
+   * @return True when the property exists, is list-capable, and was updated.
+   */
+  bool setFloatPropertyCopyValues(std::int32_t nodeId, const std::string &key,
+                                  const std::vector<float> &values);
+
+  /**
    * @brief Stores a Knob Input conditioning scalar.
    * @param nodeId Target Knob Input node.
    * @param value Proposed conditioning value.
