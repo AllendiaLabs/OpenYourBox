@@ -109,7 +109,7 @@ int main() {
                .saveBox(graph, boundaryId, "Boundary", {}, false, error)
                .has_value(),
       "group boundary hubs cannot be saved as standalone boxes");
-  graph.setGroupCopies(grouped.groupId, 3);
+  graph.setGroupRepeats(grouped.groupId, 3);
   error.clear();
   const auto savedGroup =
       library.saveBox(graph, grouped.groupId, "G1", {}, false, error);
@@ -173,8 +173,8 @@ int main() {
         placedGroupId.has_value() ? placed.findGroup(*placedGroupId) : nullptr;
     passed &= expect(placedGroup != nullptr && placedGroup->collapsed,
                      "inserted groups start collapsed");
-    passed &= expect(placedGroup != nullptr && placedGroup->copies == 3,
-                     "inserted groups restore copies N");
+    passed &= expect(placedGroup != nullptr && placedGroup->repeats == 3,
+                     "inserted groups restore repeats N");
     passed &= expect(placed.getGroups().size() == 1,
                      "library original is not mutated into extra groups");
     int boundaryCount = 0;

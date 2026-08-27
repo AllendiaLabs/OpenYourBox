@@ -56,7 +56,7 @@ FetchContent_Declare(
 FetchContent_MakeAvailable(imgui imgui_node_editor)
 
 # imgui 1.91+ already provides float * ImVec2 when IMGUI_DEFINE_MATH_OPERATORS is
-# set. imgui-node-editor 021aa0e still emits its own copy.
+# set. imgui-node-editor 021aa0e still emits its own repeat.
 set(_openyourbox_extra_math_h "${imgui_node_editor_SOURCE_DIR}/imgui_extra_math.h")
 set(_openyourbox_extra_math_inl "${imgui_node_editor_SOURCE_DIR}/imgui_extra_math.inl")
 file(READ "${_openyourbox_extra_math_h}" _openyourbox_extra_math_h_src)
@@ -301,13 +301,13 @@ if(BUILD_TESTING)
         juce::juce_recommended_warning_flags)
     add_test(NAME OpenYourBoxGroups COMMAND OpenYourBoxGroupTests)
 
-    juce_add_console_app(OpenYourBoxCopyListTests PRODUCT_NAME "OpenYourBox Copy List Tests")
-    target_sources(OpenYourBoxCopyListTests PRIVATE Tests/CopyListTilingTests.cpp)
-    target_include_directories(OpenYourBoxCopyListTests BEFORE PRIVATE
+    juce_add_console_app(OpenYourBoxRepeatListTests PRODUCT_NAME "OpenYourBox Repeat List Tests")
+    target_sources(OpenYourBoxRepeatListTests PRIVATE Tests/RepeatListTilingTests.cpp)
+    target_include_directories(OpenYourBoxRepeatListTests BEFORE PRIVATE
         "${CMAKE_CURRENT_BINARY_DIR}/OpenYourBox_artefacts/JuceLibraryCode"
         OpenYourBox/Source
         "${TORCH_INCLUDE_DIRS}")
-    target_link_libraries(OpenYourBoxCopyListTests PRIVATE
+    target_link_libraries(OpenYourBoxRepeatListTests PRIVATE
         OpenYourBox
         OpenYourBoxResources
         juce::juce_audio_utils
@@ -315,7 +315,7 @@ if(BUILD_TESTING)
         juce::juce_opengl
         juce::juce_recommended_config_flags
         juce::juce_recommended_warning_flags)
-    add_test(NAME OpenYourBoxCopyLists COMMAND OpenYourBoxCopyListTests)
+    add_test(NAME OpenYourBoxRepeatLists COMMAND OpenYourBoxRepeatListTests)
 
     juce_add_console_app(OpenYourBoxLibraryTests PRODUCT_NAME "OpenYourBox Library Tests")
     target_sources(OpenYourBoxLibraryTests PRIVATE Tests/UserBoxLibraryTests.cpp)

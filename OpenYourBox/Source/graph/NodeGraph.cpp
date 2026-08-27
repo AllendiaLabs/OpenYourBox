@@ -25,7 +25,7 @@ void normalizeMergeNodeProperties(openyourbox::graph::GraphNode &node);
 
 void refreshPropagatedPinShapes(openyourbox::graph::NodeGraph &graph);
 void refreshPropagatedPinShapesCore(openyourbox::graph::NodeGraph &graph);
-void refreshOutputCopyShapes(openyourbox::graph::NodeGraph &graph);
+void refreshOutputRepeatShapes(openyourbox::graph::NodeGraph &graph);
 
 /**
  * @brief Collects every node and nested group owned by @p groupId.
@@ -183,7 +183,7 @@ int groupDepth(const openyourbox::graph::NodeGraph &graph, std::int32_t groupId)
  * @param out Destination list.
  *
  * Walks @c memberIds and also any node whose @c parentGroupId is @p groupId so
- * compile-time copy clones remain visible to outer unrolls.
+ * compile-time repeat clones remain visible to outer unrolls.
  */
 void collectLeaves(const openyourbox::graph::NodeGraph &graph, std::int32_t groupId,
                    std::vector<std::int32_t> &out) {
@@ -234,7 +234,7 @@ bool nodeIsInsideGroup(const openyourbox::graph::NodeGraph &graph,
 }
 
 /**
- * @brief Records a materialized copy as a member of its parent group.
+ * @brief Records a materialized repeat as a member of its parent group.
  * @param graph Expanded compile graph.
  * @param parentGroupId Group that owns the cloned node.
  * @param cloneId New node identifier.
@@ -277,7 +277,7 @@ void collectGroupSubtree(const openyourbox::graph::NodeGraph &graph,
 }
 
 /**
- * @brief Signal I/O used to stack independent group copies in series.
+ * @brief Signal I/O used to stack independent group repeats in series.
  *
  * Uses the group's interface pins (unconnected internally) rather than
  * currently attached external cables, and omits TCN/BlackBox control inputs
@@ -562,7 +562,7 @@ int readBoundShapeProperty(const openyourbox::graph::GraphNode &node,
   for (const auto &property : node.properties) {
     if (property.key != key)
       continue;
-    if (property.copyListInvalid)
+    if (property.repeatListInvalid)
       return 0;
     if (property.preserveInBound)
       return incomingChannels > 0 ? incomingChannels : 0;
@@ -572,15 +572,15 @@ int readBoundShapeProperty(const openyourbox::graph::GraphNode &node,
 }
 
 /**
- * @brief Returns true when @p key on @p node is flagged copy-list invalid.
+ * @brief Returns true when @p key on @p node is flagged repeat-list invalid.
  * @param node Graph node to inspect.
  * @param key Property key.
  */
-bool propertyCopyListIsInvalid(const openyourbox::graph::GraphNode &node,
+bool propertyRepeatListIsInvalid(const openyourbox::graph::GraphNode &node,
                                const char *key) {
   for (const auto &property : node.properties) {
     if (property.key == key)
-      return property.copyListInvalid;
+      return property.repeatListInvalid;
   }
   return false;
 }
@@ -1291,7 +1291,7 @@ void applyNodePinShapes(openyourbox::graph::NodeGraph &graph,
                         openyourbox::graph::GraphNode &node);
 
 /**
- * @brief Refreshes inherited hop rate and nBand on every node (first copy only).
+ * @brief Refreshes inherited hop rate and nBand on every node (first repeat only).
  * @param graph Graph document to mutate.
  */
 void refreshPropagatedPinShapesCore(openyourbox::graph::NodeGraph &graph) {
@@ -1336,12 +1336,12 @@ void refreshPropagatedPinShapesCore(openyourbox::graph::NodeGraph &graph) {
 }
 
 /**
- * @brief Fills @c Pin::copyShapes from an unrolled serial stack.
- * @param graph Editable graph whose first-copy shapes are already current.
+ * @brief Fills @c Pin::repeatShapes from an unrolled serial stack.
+ * @param graph Editable graph whose first-repeat shapes are already current.
  */
-void refreshOutputCopyShapes(openyourbox::graph::NodeGraph &graph) {
+void refreshOutputRepeatShapes(openyourbox::graph::NodeGraph &graph) {
   // Materialize restores via ValueTree, which refreshes shapes again. Skip the
-  // nested copy-shape pass so we only unroll once per outer refresh.
+  // nested repeat-shape pass so we only unroll once per outer refresh.
   static thread_local int depth = 0;
   if (depth > 0)
     return;
@@ -1353,22 +1353,22 @@ void refreshOutputCopyShapes(openyourbox::graph::NodeGraph &graph) {
 
   for (auto &node : graph.getNodes()) {
     for (auto &pin : node.outputs)
-      pin.copyShapes.clear();
+      pin.repeatShapes.clear();
     for (auto &pin : node.inputs)
-      pin.copyShapes.clear();
+      pin.repeatShapes.clear();
   }
-  bool anyMultiCopy = false;
+  bool anyMultiRepeat = false;
   for (const auto &group : graph.getGroups()) {
-    if (graph.groupCopyStatus(group.id).effectiveCopies > 1) {
-      anyMultiCopy = true;
+    if (graph.groupRepeatStatus(group.id).effectiveRepeats > 1) {
+      anyMultiRepeat = true;
       break;
     }
   }
-  if (!anyMultiCopy)
+  if (!anyMultiRepeat)
     return;
 
   std::unordered_map<std::int32_t, std::pair<std::int32_t, int>> provenance;
-  auto expanded = graph.withInvisibleCopiesMaterialized(&provenance);
+  auto expanded = graph.withInvisibleRepeatsMaterialized(&provenance);
   refreshPropagatedPinShapesCore(expanded);
 
   std::unordered_map<std::int64_t, const openyourbox::graph::GraphNode *>
@@ -1385,37 +1385,37 @@ void refreshOutputCopyShapes(openyourbox::graph::NodeGraph &graph) {
   }
 
   for (auto &node : graph.getNodes()) {
-    const auto copies = graph.effectiveRuntimeCopyCount(node.id);
-    if (copies <= 1)
+    const auto repeats = graph.effectiveRuntimeRepeatCount(node.id);
+    if (repeats <= 1)
       continue;
     for (std::size_t pinIndex = 0; pinIndex < node.outputs.size(); ++pinIndex) {
       auto &pin = node.outputs[pinIndex];
-      pin.copyShapes.assign(static_cast<std::size_t>(copies), pin.shape);
-      for (int slot = 0; slot < copies; ++slot) {
+      pin.repeatShapes.assign(static_cast<std::size_t>(repeats), pin.shape);
+      for (int slot = 0; slot < repeats; ++slot) {
         const auto found = nodeAtSlot.find(slotKey(node.id, slot));
         if (found == nodeAtSlot.end() || found->second == nullptr)
           continue;
         if (pinIndex >= found->second->outputs.size())
           continue;
-        pin.copyShapes[static_cast<std::size_t>(slot)] =
+        pin.repeatShapes[static_cast<std::size_t>(slot)] =
             found->second->outputs[pinIndex].shape;
       }
     }
     for (std::size_t pinIndex = 0; pinIndex < node.inputs.size(); ++pinIndex) {
       auto &pin = node.inputs[pinIndex];
-      pin.copyShapes.assign(static_cast<std::size_t>(copies), pin.shape);
-      for (int slot = 0; slot < copies; ++slot) {
+      pin.repeatShapes.assign(static_cast<std::size_t>(repeats), pin.shape);
+      for (int slot = 0; slot < repeats; ++slot) {
         const auto found = nodeAtSlot.find(slotKey(node.id, slot));
         if (found == nodeAtSlot.end() || found->second == nullptr)
           continue;
         if (pinIndex >= found->second->inputs.size())
           continue;
-        pin.copyShapes[static_cast<std::size_t>(slot)] =
+        pin.repeatShapes[static_cast<std::size_t>(slot)] =
             found->second->inputs[pinIndex].shape;
       }
     }
   }
-  // Hubs are flattened out of the materialized graph, so copy their
+  // Hubs are flattened out of the materialized graph, so repeat their
   // per-slot shapes from the connected member pins instead.
   for (auto &node : graph.getNodes()) {
     if (node.type == openyourbox::graph::NodeType::groupOutput) {
@@ -1425,15 +1425,15 @@ void refreshOutputCopyShapes(openyourbox::graph::NodeGraph &graph) {
           if (link.destinationPinId != node.inputs[index].id)
             continue;
           const auto *source = graph.findPin(link.sourcePinId);
-          if (source != nullptr && !source->copyShapes.empty()) {
-            const auto hubCopies =
-                std::max(1, graph.effectiveRuntimeCopyCount(node.id));
-            const auto n = static_cast<int>(source->copyShapes.size());
+          if (source != nullptr && !source->repeatShapes.empty()) {
+            const auto hubRepeats =
+                std::max(1, graph.effectiveRuntimeRepeatCount(node.id));
+            const auto n = static_cast<int>(source->repeatShapes.size());
             int innerFold = 1;
-            if (n >= hubCopies && n % hubCopies == 0)
-              innerFold = n / hubCopies;
-            node.outputs[index].copyShapes = openyourbox::graph::foldInnerCopyShapes(
-                source->copyShapes, innerFold, true);
+            if (n >= hubRepeats && n % hubRepeats == 0)
+              innerFold = n / hubRepeats;
+            node.outputs[index].repeatShapes = openyourbox::graph::foldInnerRepeatShapes(
+                source->repeatShapes, innerFold, true);
           }
           break;
         }
@@ -1445,17 +1445,17 @@ void refreshOutputCopyShapes(openyourbox::graph::NodeGraph &graph) {
           if (link.sourcePinId != node.outputs[index].id)
             continue;
           const auto *destination = graph.findPin(link.destinationPinId);
-          if (destination != nullptr && !destination->copyShapes.empty()) {
-            const auto hubCopies =
-                std::max(1, graph.effectiveRuntimeCopyCount(node.id));
-            const auto n = static_cast<int>(destination->copyShapes.size());
+          if (destination != nullptr && !destination->repeatShapes.empty()) {
+            const auto hubRepeats =
+                std::max(1, graph.effectiveRuntimeRepeatCount(node.id));
+            const auto n = static_cast<int>(destination->repeatShapes.size());
             int innerFold = 1;
-            if (n >= hubCopies && n % hubCopies == 0)
-              innerFold = n / hubCopies;
-            const auto folded = openyourbox::graph::foldInnerCopyShapes(
-                destination->copyShapes, innerFold, false);
-            node.inputs[index].copyShapes = folded;
-            node.outputs[index].copyShapes = folded;
+            if (n >= hubRepeats && n % hubRepeats == 0)
+              innerFold = n / hubRepeats;
+            const auto folded = openyourbox::graph::foldInnerRepeatShapes(
+                destination->repeatShapes, innerFold, false);
+            node.inputs[index].repeatShapes = folded;
+            node.outputs[index].repeatShapes = folded;
           }
           break;
         }
@@ -1465,12 +1465,12 @@ void refreshOutputCopyShapes(openyourbox::graph::NodeGraph &graph) {
 }
 
 /**
- * @brief Refreshes first-copy pin shapes and per-copy shape lists.
+ * @brief Refreshes first-repeat pin shapes and per-repeat shape lists.
  * @param graph Graph document to mutate.
  */
 void refreshPropagatedPinShapes(openyourbox::graph::NodeGraph &graph) {
   refreshPropagatedPinShapesCore(graph);
-  refreshOutputCopyShapes(graph);
+  refreshOutputRepeatShapes(graph);
 }
 
 /**
@@ -1588,7 +1588,7 @@ void applyNodePinShapes(openyourbox::graph::NodeGraph &graph,
           readBoundShapeProperty(node, "channels", incoming.channels, 0);
       if (channels > 0)
         outgoing.channels = channels;
-      else if (propertyCopyListIsInvalid(node, "channels"))
+      else if (propertyRepeatListIsInvalid(node, "channels"))
         outgoing.channels = 0;
       updateConv1dDetail(node);
     } else if (isConvTransposeType(node.type)) {
@@ -1600,7 +1600,7 @@ void applyNodePinShapes(openyourbox::graph::NodeGraph &graph,
           readBoundShapeProperty(node, "channels", incoming.channels, 0);
       if (channels > 0)
         outgoing.channels = channels;
-      else if (propertyCopyListIsInvalid(node, "channels"))
+      else if (propertyRepeatListIsInvalid(node, "channels"))
         outgoing.channels = 0;
       updateConvTransposeDetail(node);
     } else if (node.type == NodeType::linear) {
@@ -1608,7 +1608,7 @@ void applyNodePinShapes(openyourbox::graph::NodeGraph &graph,
           readBoundShapeProperty(node, "features", incoming.channels, 0);
       if (features > 0)
         outgoing.channels = features;
-      else if (propertyCopyListIsInvalid(node, "features"))
+      else if (propertyRepeatListIsInvalid(node, "features"))
         outgoing.channels = 0;
     } else if (node.type == NodeType::merge) {
       updateMergeOutputShape(graph, node);
@@ -1639,8 +1639,8 @@ std::string firstIncompatibleLinkMessage(const openyourbox::graph::NodeGraph &gr
   using openyourbox::graph::variationalBottleneckChannelMessage;
   for (const auto &node : graph.getNodes()) {
     for (const auto &property : node.properties) {
-      if (property.copyListInvalid && !property.copyListInvalidMessage.empty())
-        return property.copyListInvalidMessage;
+      if (property.repeatListInvalid && !property.repeatListInvalidMessage.empty())
+        return property.repeatListInvalidMessage;
     }
   }
   for (const auto &link : graph.getLinks()) {
@@ -1822,6 +1822,22 @@ bool isKnownPersistedNodeType(const juce::String &name) {
   return false;
 }
 
+/**
+ * @brief Reads @p name, falling back to a pre-rename property if needed.
+ * @param tree Serialized node, group, or property.
+ * @param name Current property identifier.
+ * @param legacy Previous identifier used before the copies→repeats rename.
+ * @param fallback Value when neither identifier is present.
+ */
+juce::var propertyOrLegacy(const juce::ValueTree &tree, const char *name,
+                           const char *legacy, const juce::var &fallback = {}) {
+  if (tree.hasProperty(name))
+    return tree.getProperty(name);
+  if (tree.hasProperty(legacy))
+    return tree.getProperty(legacy);
+  return fallback;
+}
+
 juce::ValueTree nodeToTree(const openyourbox::graph::GraphNode &node) {
   juce::ValueTree tree{"Node"};
   tree.setProperty("id", node.id, nullptr);
@@ -1873,8 +1889,8 @@ juce::ValueTree nodeToTree(const openyourbox::graph::GraphNode &node) {
   if (node.parentGroupId.has_value())
     tree.setProperty("parentGroupId", *node.parentGroupId, nullptr);
 
-  for (const auto &slot : node.copySlots) {
-    juce::ValueTree child{"CopySlot"};
+  for (const auto &slot : node.repeatSlots) {
+    juce::ValueTree child{"RepeatSlot"};
     child.setProperty("seed", slot.seed, nullptr);
     child.setProperty("weightsProvenance",
                       slot.provenance ==
@@ -1927,27 +1943,27 @@ juce::ValueTree nodeToTree(const openyourbox::graph::GraphNode &node) {
     child.setProperty("floatMinimum", property.floatMinimum, nullptr);
     child.setProperty("floatMaximum", property.floatMaximum, nullptr);
     child.setProperty("preserveIn", property.preserveInBound, nullptr);
-    child.setProperty("copyListInvalid", property.copyListInvalid, nullptr);
-    if (!property.copyListInvalidMessage.empty())
-      child.setProperty("copyListInvalidMessage",
-                        juce::String(property.copyListInvalidMessage), nullptr);
+    child.setProperty("repeatListInvalid", property.repeatListInvalid, nullptr);
+    if (!property.repeatListInvalidMessage.empty())
+      child.setProperty("repeatListInvalidMessage",
+                        juce::String(property.repeatListInvalidMessage), nullptr);
     if (property.preserveInBound) {
       juce::StringArray tokens;
-      const auto count = std::max(1, static_cast<int>(property.copyIntValues.size()));
+      const auto count = std::max(1, static_cast<int>(property.repeatIntValues.size()));
       for (int index = 0; index < count; ++index)
         tokens.add(openyourbox::graph::preserveInToken);
-      child.setProperty("copyIntValues", tokens.joinIntoString(","), nullptr);
-    } else if (!property.copyIntValues.empty()) {
+      child.setProperty("repeatIntValues", tokens.joinIntoString(","), nullptr);
+    } else if (!property.repeatIntValues.empty()) {
       juce::StringArray ints;
-      for (const auto value : property.copyIntValues)
+      for (const auto value : property.repeatIntValues)
         ints.add(juce::String(value));
-      child.setProperty("copyIntValues", ints.joinIntoString(","), nullptr);
+      child.setProperty("repeatIntValues", ints.joinIntoString(","), nullptr);
     }
-    if (!property.copyFloatValues.empty()) {
+    if (!property.repeatFloatValues.empty()) {
       juce::StringArray reals;
-      for (const auto value : property.copyFloatValues)
+      for (const auto value : property.repeatFloatValues)
         reals.add(juce::String(value, 6));
-      child.setProperty("copyFloatValues", reals.joinIntoString(","), nullptr);
+      child.setProperty("repeatFloatValues", reals.joinIntoString(","), nullptr);
     }
     tree.appendChild(child, nullptr);
   }
@@ -2031,8 +2047,8 @@ openyourbox::graph::GraphNode nodeFromTree(const juce::ValueTree &tree) {
       pin.shape.nBand = static_cast<int>(child.getProperty("nBand", 0));
       (pin.kind == PinKind::input ? node.inputs : node.outputs)
           .push_back(std::move(pin));
-    } else if (child.hasType("CopySlot")) {
-      CopyWeightSlot slot;
+    } else if (child.hasType("RepeatSlot") || child.hasType("CopySlot")) {
+      RepeatWeightSlot slot;
       slot.seed = openyourbox::graph::clampSeed(
           static_cast<std::int32_t>(child.getProperty("seed", 42)));
       slot.provenance =
@@ -2041,7 +2057,7 @@ openyourbox::graph::GraphNode nodeFromTree(const juce::ValueTree &tree) {
               : WeightsProvenance::random;
       slot.weightsPath = child["weightsPath"].toString().toStdString();
       slot.artifactPath = child["artifactPath"].toString().toStdString();
-      node.copySlots.push_back(std::move(slot));
+      node.repeatSlots.push_back(std::move(slot));
     } else if (child.hasType("Property")) {
       NodeProperty property;
       property.key = child["key"].toString().toStdString();
@@ -2062,33 +2078,43 @@ openyourbox::graph::GraphNode nodeFromTree(const juce::ValueTree &tree) {
       property.floatMaximum =
           static_cast<float>(child.getProperty("floatMaximum", 1.0));
       property.preserveInBound = static_cast<bool>(child.getProperty("preserveIn", false));
-      property.copyListInvalid =
-          static_cast<bool>(child.getProperty("copyListInvalid", false));
-      property.copyListInvalidMessage =
-          child.getProperty("copyListInvalidMessage", "").toString().toStdString();
-      if (child.hasProperty("copyIntValues")) {
+      property.repeatListInvalid =
+          static_cast<bool>(propertyOrLegacy(child, "repeatListInvalid",
+                                             "copyListInvalid", false));
+      property.repeatListInvalidMessage =
+          propertyOrLegacy(child, "repeatListInvalidMessage",
+                           "copyListInvalidMessage", "")
+              .toString()
+              .toStdString();
+      if (child.hasProperty("repeatIntValues") ||
+          child.hasProperty("copyIntValues")) {
         const auto tokens = juce::StringArray::fromTokens(
-            child["copyIntValues"].toString(), ",", "");
+            propertyOrLegacy(child, "repeatIntValues", "copyIntValues")
+                .toString(),
+            ",", "");
         bool anyIn = false;
         bool allIn = true;
         for (const auto &token : tokens) {
           const auto trimmed = token.trim();
           if (trimmed == openyourbox::graph::preserveInToken) {
             anyIn = true;
-            property.copyIntValues.push_back(0);
+            property.repeatIntValues.push_back(0);
           } else {
             allIn = false;
-            property.copyIntValues.push_back(trimmed.getIntValue());
+            property.repeatIntValues.push_back(trimmed.getIntValue());
           }
         }
         if (anyIn && allIn)
           property.preserveInBound = true;
       }
-      if (child.hasProperty("copyFloatValues")) {
+      if (child.hasProperty("repeatFloatValues") ||
+          child.hasProperty("copyFloatValues")) {
         const auto tokens = juce::StringArray::fromTokens(
-            child["copyFloatValues"].toString(), ",", "");
+            propertyOrLegacy(child, "repeatFloatValues", "copyFloatValues")
+                .toString(),
+            ",", "");
         for (const auto &token : tokens)
-          property.copyFloatValues.push_back(token.getFloatValue());
+          property.repeatFloatValues.push_back(token.getFloatValue());
       }
       node.properties.push_back(std::move(property));
     }
@@ -2117,7 +2143,7 @@ juce::ValueTree groupToTree(const openyourbox::graph::GraphGroup &group) {
   if (group.parentGroupId.has_value())
     tree.setProperty("parentGroupId", *group.parentGroupId, nullptr);
   tree.setProperty("collapsed", group.collapsed, nullptr);
-  tree.setProperty("copies", group.copies, nullptr);
+  tree.setProperty("repeats", group.repeats, nullptr);
   tree.setProperty("x", group.position.x, nullptr);
   tree.setProperty("y", group.position.y, nullptr);
   tree.setProperty("width", group.size.x, nullptr);
@@ -2147,8 +2173,10 @@ openyourbox::graph::GraphGroup groupFromTree(const juce::ValueTree &tree) {
     group.parentGroupId =
         static_cast<std::int32_t>(tree.getProperty("parentGroupId"));
   group.collapsed = static_cast<bool>(tree.getProperty("collapsed", false));
-  group.copies = std::max(1, static_cast<int>(tree.getProperty(
-                                   "copies", openyourbox::graph::defaultGroupCopies)));
+  group.repeats = std::max(
+      1, static_cast<int>(propertyOrLegacy(
+             tree, "repeats", "copies",
+             openyourbox::graph::defaultGroupRepeats)));
   group.position = {static_cast<float>(tree.getProperty("x", 0.0f)),
                     static_cast<float>(tree.getProperty("y", 0.0f))};
   group.size = {static_cast<float>(tree.getProperty("width", 320.0f)),
@@ -2195,48 +2223,48 @@ void assignParent(openyourbox::graph::NodeGraph &graph, std::int32_t memberId,
 }
 
 /**
- * @brief Resizes copy slots for every leaf of @p groupId.
+ * @brief Resizes repeat slots for every leaf of @p groupId.
  * @param graph Graph to mutate.
  * @param groupId Group whose descendants need slot updates.
  */
-void refreshCopySlotsForGroup(openyourbox::graph::NodeGraph &graph,
+void refreshRepeatSlotsForGroup(openyourbox::graph::NodeGraph &graph,
                               std::int32_t groupId) {
   for (const auto nodeId : graph.collectLeafNodeIds(groupId)) {
     if (auto *node = graph.findNode(nodeId)) {
       if (openyourbox::graph::isGroupBoundaryType(node->type))
         continue;
-      const auto copies = graph.effectiveCopyCount(nodeId);
-      openyourbox::graph::ensureCopySlotCount(*node, copies);
-      openyourbox::graph::ensureNodePropertyCopyCounts(*node, copies);
-      graph.validateAuthoredCopyLists(nodeId);
+      const auto repeats = graph.effectiveRepeatCount(nodeId);
+      openyourbox::graph::ensureRepeatSlotCount(*node, repeats);
+      openyourbox::graph::ensureNodePropertyRepeatCounts(*node, repeats);
+      graph.validateAuthoredRepeatLists(nodeId);
     }
   }
 }
 
 /**
- * @brief Writes a randomization seed onto a node and its copy slots.
+ * @brief Writes a randomization seed onto a node and its repeat slots.
  * @param node Weighted live element to update.
  * @param primarySeed Seed applied to the visible element (slot 0).
- * @param independentExtraSlots True to derive `primarySeed + i` per copy slot.
+ * @param independentExtraSlots True to derive `primarySeed + i` per repeat slot.
  */
 void writeRandomizedWeightSlots(openyourbox::graph::GraphNode &node,
                                 std::int32_t primarySeed,
                                 bool independentExtraSlots) {
   using openyourbox::graph::WeightsProvenance;
   using openyourbox::graph::clampSeed;
-  using openyourbox::graph::copySlotFromNode;
-  using openyourbox::graph::seedForCopySlot;
+  using openyourbox::graph::repeatSlotFromNode;
+  using openyourbox::graph::seedForRepeatSlot;
   node.seed = clampSeed(primarySeed);
   node.weightsProvenance = WeightsProvenance::random;
   node.weightsPath.clear();
   node.artifactPath.clear();
-  if (node.copySlots.empty())
-    node.copySlots.push_back(copySlotFromNode(node));
+  if (node.repeatSlots.empty())
+    node.repeatSlots.push_back(repeatSlotFromNode(node));
   else
-    node.copySlots.front() = copySlotFromNode(node);
-  for (std::size_t index = 0; index < node.copySlots.size(); ++index) {
-    auto &slot = node.copySlots[index];
-    slot.seed = independentExtraSlots ? seedForCopySlot(node.seed, index)
+    node.repeatSlots.front() = repeatSlotFromNode(node);
+  for (std::size_t index = 0; index < node.repeatSlots.size(); ++index) {
+    auto &slot = node.repeatSlots[index];
+    slot.seed = independentExtraSlots ? seedForRepeatSlot(node.seed, index)
                                       : node.seed;
     slot.provenance = WeightsProvenance::random;
     slot.weightsPath.clear();
@@ -2330,26 +2358,26 @@ openyourbox::graph::GraphLink linkFromTree(const juce::ValueTree &tree) {
 }
 
 /**
- * @brief Result of simulating whether serial copies can chain by shape.
+ * @brief Result of simulating whether serial repeats can chain by shape.
  */
-struct SerialCopyShapeResult {
-  /** @brief True when every copy can feed the next. */
+struct SerialRepeatShapeResult {
+  /** @brief True when every repeat can feed the next. */
   bool ok = true;
   /** @brief User-facing reason when @ref ok is false. */
   std::string message;
   /** @brief Properties that can repair an internal join mismatch. */
-  std::vector<openyourbox::graph::GroupCopyPropertyHint> hints;
+  std::vector<openyourbox::graph::GroupRepeatPropertyHint> hints;
 };
 
 /**
- * @brief Copy-slot index for a leaf relative to an enclosing group's slot.
+ * @brief Repeat-slot index for a leaf relative to an enclosing group's slot.
  * @param graph Graph owning membership.
  * @param nodeId Leaf node.
- * @param groupId Group whose serial copies are being simulated.
- * @param groupSlot Outer copy index of @p groupId.
- * @return Slot passed to @c integerValueForCopy.
+ * @param groupId Group whose serial repeats are being simulated.
+ * @param groupSlot Outer repeat index of @p groupId.
+ * @return Slot passed to @c integerValueForRepeat.
  */
-int leafCopySlotForGroup(const openyourbox::graph::NodeGraph &graph,
+int leafRepeatSlotForGroup(const openyourbox::graph::NodeGraph &graph,
                          std::int32_t nodeId, std::int32_t groupId,
                          int groupSlot) {
   const auto *node = graph.findNode(nodeId);
@@ -2364,17 +2392,17 @@ int leafCopySlotForGroup(const openyourbox::graph::NodeGraph &graph,
     const auto *ancestor = graph.findGroup(*parent);
     if (ancestor == nullptr)
       break;
-    innerProduct *= std::max(1, ancestor->copies);
+    innerProduct *= std::max(1, ancestor->repeats);
     parent = ancestor->parentGroupId;
   }
   return groupSlot * innerProduct;
 }
 
 /**
- * @brief Simulated pin shape, falling back to the live first-copy shape.
+ * @brief Simulated pin shape, falling back to the live first-repeat shape.
  * @param graph Graph owning pins.
  * @param pinId Endpoint to resolve.
- * @param pinShapes Shapes computed for the current copy slot.
+ * @param pinShapes Shapes computed for the current repeat slot.
  */
 openyourbox::graph::ShapeSignature simulatedPinShape(
     const openyourbox::graph::NodeGraph &graph, std::int32_t pinId,
@@ -2390,41 +2418,41 @@ openyourbox::graph::ShapeSignature simulatedPinShape(
 }
 
 /**
- * @brief Integer used by copy @p slot, honoring `in` and invalid lists.
+ * @brief Integer used by repeat @p slot, honoring `in` and invalid lists.
  * @param node Owner of the property.
  * @param key Property key.
  * @param incomingChannels Paired input width for `in`.
- * @param slot Copy index.
+ * @param slot Repeat index.
  * @param fallback Value when the property is absent.
  */
-int boundIntForCopySlot(const openyourbox::graph::GraphNode &node,
+int boundIntForRepeatSlot(const openyourbox::graph::GraphNode &node,
                         const char *key, int incomingChannels, int slot,
                         int fallback) {
-  using openyourbox::graph::integerValueForCopy;
+  using openyourbox::graph::integerValueForRepeat;
   for (const auto &property : node.properties) {
     if (property.key != key)
       continue;
-    if (property.copyListInvalid)
+    if (property.repeatListInvalid)
       return 0;
     if (property.preserveInBound)
       return incomingChannels > 0 ? incomingChannels : 0;
-    const auto value = integerValueForCopy(property, slot);
+    const auto value = integerValueForRepeat(property, slot);
     return value > 0 ? value : fallback;
   }
   return fallback;
 }
 
 /**
- * @brief Stride used by copy @p slot.
+ * @brief Stride used by repeat @p slot.
  * @param node Convolution or transposed-convolution node.
- * @param slot Copy index.
+ * @param slot Repeat index.
  */
-int strideForCopySlot(const openyourbox::graph::GraphNode &node, int slot) {
-  using openyourbox::graph::integerValueForCopy;
+int strideForRepeatSlot(const openyourbox::graph::GraphNode &node, int slot) {
+  using openyourbox::graph::integerValueForRepeat;
   for (const auto &property : node.properties) {
     if (property.key != "stride")
       continue;
-    return std::max(1, integerValueForCopy(property, slot));
+    return std::max(1, integerValueForRepeat(property, slot));
   }
   return 1;
 }
@@ -2437,11 +2465,11 @@ int strideForCopySlot(const openyourbox::graph::GraphNode &node, int slot) {
  * @param message Hint text copied onto each candidate.
  * @param hints Destination list.
  */
-void appendCopyShapePropertyHints(
+void appendRepeatShapePropertyHints(
     const openyourbox::graph::NodeGraph &graph, std::int32_t startNodeId,
     std::int32_t groupId, const std::string &message,
-    std::vector<openyourbox::graph::GroupCopyPropertyHint> &hints) {
-  using openyourbox::graph::GroupCopyPropertyHint;
+    std::vector<openyourbox::graph::GroupRepeatPropertyHint> &hints) {
+  using openyourbox::graph::GroupRepeatPropertyHint;
   using openyourbox::graph::NodeType;
   using openyourbox::graph::propertySupportsPreserveIn;
   std::queue<std::int32_t> pending;
@@ -2461,7 +2489,7 @@ void appendCopyShapePropertyHints(
                             property.key == "latent_size";
       if (!channels)
         continue;
-      GroupCopyPropertyHint hint;
+      GroupRepeatPropertyHint hint;
       hint.nodeId = node->id;
       hint.propertyKey = property.key;
       hint.message = message;
@@ -2532,28 +2560,28 @@ topologicalNodesInsideGroup(const openyourbox::graph::NodeGraph &graph,
 }
 
 /**
- * @brief Writes simulated output shapes for one node at one copy slot.
+ * @brief Writes simulated output shapes for one node at one repeat slot.
  * @param graph Graph owning cables.
  * @param node Node to evaluate.
- * @param leafSlot Copy index for this node's properties.
+ * @param leafSlot Repeat index for this node's properties.
  * @param groupId Enclosing group being chained (for merge diagnostics).
  * @param pinShapes In/out map of simulated pin shapes.
  * @param result Failure destination when a residual join cannot combine.
  */
-void simulateNodeCopyShapes(
+void simulateNodeRepeatShapes(
     const openyourbox::graph::NodeGraph &graph,
     const openyourbox::graph::GraphNode &node, int leafSlot,
     std::int32_t groupId,
     std::unordered_map<std::int32_t, openyourbox::graph::ShapeSignature>
         &pinShapes,
-    SerialCopyShapeResult &result) {
+    SerialRepeatShapeResult &result) {
   using openyourbox::graph::MergeMode;
   using openyourbox::graph::NodeType;
   using openyourbox::graph::convolutionOutputTemporalRate;
   using openyourbox::graph::defaultLatentSize;
   using openyourbox::graph::defaultPqmfBands;
   using openyourbox::graph::flexibleTensorShape;
-  using openyourbox::graph::integerValueForCopy;
+  using openyourbox::graph::integerValueForRepeat;
   using openyourbox::graph::isControlInputPin;
   using openyourbox::graph::isConvTransposeType;
   using openyourbox::graph::isConvolutionType;
@@ -2592,7 +2620,7 @@ void simulateNodeCopyShapes(
     int nBand = defaultPqmfBands;
     for (const auto &property : node.properties) {
       if (property.key == "n_band")
-        nBand = std::max(2, integerValueForCopy(property, leafSlot));
+        nBand = std::max(2, integerValueForRepeat(property, leafSlot));
     }
     const auto audioChannels = std::max(0, incoming.channels);
     openyourbox::graph::ShapeSignature outgoing;
@@ -2606,7 +2634,7 @@ void simulateNodeCopyShapes(
     int nBand = defaultPqmfBands;
     for (const auto &property : node.properties) {
       if (property.key == "n_band")
-        nBand = std::max(2, integerValueForCopy(property, leafSlot));
+        nBand = std::max(2, integerValueForRepeat(property, leafSlot));
     }
     openyourbox::graph::ShapeSignature outgoing;
     outgoing.temporalRate = 1;
@@ -2619,7 +2647,7 @@ void simulateNodeCopyShapes(
   case NodeType::variationalBottleneck: {
     auto outgoing = incoming;
     outgoing.channels =
-        boundIntForCopySlot(node, "latent_size", incoming.channels, leafSlot,
+        boundIntForRepeatSlot(node, "latent_size", incoming.channels, leafSlot,
                             defaultLatentSize);
     writeOutputs(outgoing);
     return;
@@ -2661,7 +2689,7 @@ void simulateNodeCopyShapes(
                                       : right.displayLabel();
           result.message = "Utility inputs cannot combine (" + leftLabel +
                            " vs " + rightLabel + ")";
-          appendCopyShapePropertyHints(graph, node.id, groupId, result.message,
+          appendRepeatShapePropertyHints(graph, node.id, groupId, result.message,
                                        result.hints);
           return;
         }
@@ -2681,13 +2709,13 @@ void simulateNodeCopyShapes(
   }
 
   if (isConvolutionType(node.type) || isConvTransposeType(node.type)) {
-    const auto stride = strideForCopySlot(node, leafSlot);
+    const auto stride = strideForRepeatSlot(node, leafSlot);
     const auto upsample = isConvTransposeType(node.type);
     const auto rate =
         convolutionOutputTemporalRate(incoming.temporalRate, stride, upsample);
     outgoing.temporalRate = rate < 0 ? 0 : rate;
     const auto channels =
-        boundIntForCopySlot(node, "channels", incoming.channels, leafSlot, 0);
+        boundIntForRepeatSlot(node, "channels", incoming.channels, leafSlot, 0);
     if (channels > 0)
       outgoing.channels = channels;
     writeOutputs(outgoing);
@@ -2695,7 +2723,7 @@ void simulateNodeCopyShapes(
   }
   if (node.type == NodeType::linear) {
     const auto features =
-        boundIntForCopySlot(node, "features", incoming.channels, leafSlot, 0);
+        boundIntForRepeatSlot(node, "features", incoming.channels, leafSlot, 0);
     if (features > 0)
       outgoing.channels = features;
     writeOutputs(outgoing);
@@ -2705,20 +2733,20 @@ void simulateNodeCopyShapes(
 }
 
 /**
- * @brief Simulates N serial copies using per-copy properties, not first-copy I/O.
- * @param graph Graph whose first-copy pins supply the initial incoming shapes.
- * @param groupId Group whose copies are requested.
- * @param copies Requested copy count N.
+ * @brief Simulates N serial repeats using per-repeat properties, not first-repeat I/O.
+ * @param graph Graph whose first-repeat pins supply the initial incoming shapes.
+ * @param groupId Group whose repeats are requested.
+ * @param repeats Requested repeat count N.
  * @param inputs Declared Group Input lanes.
  * @param outputs Declared Group Output lanes.
- * @return Failure when an internal join cannot combine at any copy.
+ * @return Failure when an internal join cannot combine at any repeat.
  */
-SerialCopyShapeResult evaluateSerialCopyShapeChain(
-    const openyourbox::graph::NodeGraph &graph, std::int32_t groupId, int copies,
+SerialRepeatShapeResult evaluateSerialRepeatShapeChain(
+    const openyourbox::graph::NodeGraph &graph, std::int32_t groupId, int repeats,
     const std::vector<openyourbox::graph::GroupBoundaryPort> &inputs,
     const std::vector<openyourbox::graph::GroupBoundaryPort> &outputs) {
-  SerialCopyShapeResult result;
-  if (inputs.empty() || outputs.empty() || copies <= 1)
+  SerialRepeatShapeResult result;
+  if (inputs.empty() || outputs.empty() || repeats <= 1)
     return result;
   const auto *inputHub = graph.findNode(inputs.front().memberNodeId);
   const auto *outputHub = graph.findNode(outputs.front().memberNodeId);
@@ -2729,7 +2757,7 @@ SerialCopyShapeResult evaluateSerialCopyShapeChain(
   for (const auto &port : inputs)
     laneIn.push_back(port.shape);
   const auto order = topologicalNodesInsideGroup(graph, groupId);
-  for (int slot = 0; slot < copies; ++slot) {
+  for (int slot = 0; slot < repeats; ++slot) {
     std::unordered_map<std::int32_t, openyourbox::graph::ShapeSignature>
         pinShapes;
     for (std::size_t index = 0; index < laneIn.size(); ++index) {
@@ -2745,12 +2773,12 @@ SerialCopyShapeResult evaluateSerialCopyShapeChain(
       if (node == nullptr)
         continue;
       const auto leafSlot =
-          leafCopySlotForGroup(graph, nodeId, groupId, slot);
-      simulateNodeCopyShapes(graph, *node, leafSlot, groupId, pinShapes,
+          leafRepeatSlotForGroup(graph, nodeId, groupId, slot);
+      simulateNodeRepeatShapes(graph, *node, leafSlot, groupId, pinShapes,
                              result);
       if (!result.ok) {
-        result.message = "Requested " + std::to_string(copies) +
-                         " copies are inactive: " + result.message;
+        result.message = "Requested " + std::to_string(repeats) +
+                         " repeats are inactive: " + result.message;
         return result;
       }
     }
@@ -2819,9 +2847,9 @@ std::int32_t NodeGraph::addNode(NodeType type, juce::Point<float> position,
     }
     if (auto *created = findNode(id);
         created != nullptr && !isGroupBoundaryType(created->type)) {
-      const auto copies = effectiveCopyCount(id);
-      ensureCopySlotCount(*created, copies);
-      ensureNodePropertyCopyCounts(*created, copies);
+      const auto repeats = effectiveRepeatCount(id);
+      ensureRepeatSlotCount(*created, repeats);
+      ensureNodePropertyRepeatCounts(*created, repeats);
     }
   }
   return id;
@@ -3127,7 +3155,7 @@ std::vector<std::int32_t> NodeGraph::orderSiblingBoxesByFlow(
   return orderBoxesByFlowRank(std::move(boxIds), names, edges);
 }
 
-int NodeGraph::effectiveCopyCount(std::int32_t nodeId) const {
+int NodeGraph::effectiveRepeatCount(std::int32_t nodeId) const {
   const auto *node = findNode(nodeId);
   if (node == nullptr)
     return 1;
@@ -3140,23 +3168,23 @@ int NodeGraph::effectiveCopyCount(std::int32_t nodeId) const {
     const auto *group = findGroup(*parent);
     if (group == nullptr)
       break;
-    count *= std::max(1, group->copies);
+    count *= std::max(1, group->repeats);
     parent = group->parentGroupId;
   }
   return std::max(1, count);
 }
 
-GroupCopyStatus NodeGraph::groupCopyStatus(std::int32_t groupId) const {
-  GroupCopyStatus status;
+GroupRepeatStatus NodeGraph::groupRepeatStatus(std::int32_t groupId) const {
+  GroupRepeatStatus status;
   const auto *group = findGroup(groupId);
   if (group == nullptr) {
     status.active = false;
     status.message = "Group no longer exists";
     return status;
   }
-  status.requestedCopies =
-      std::clamp(group->copies, 1, maximumGroupCopies);
-  if (status.requestedCopies == 1)
+  status.requestedRepeats =
+      std::clamp(group->repeats, 1, maximumGroupRepeats);
+  if (status.requestedRepeats == 1)
     return status;
 
   std::vector<GroupBoundaryPort> inputs;
@@ -3164,8 +3192,8 @@ GroupCopyStatus NodeGraph::groupCopyStatus(std::int32_t groupId) const {
   appendSerialChainPorts(*this, groupId, inputs, outputs);
   if (inputs.empty() || outputs.empty() || inputs.size() != outputs.size()) {
     status.active = false;
-    status.message = "Requested " + std::to_string(status.requestedCopies) +
-                     " copies are inactive: declare the same number of Group "
+    status.message = "Requested " + std::to_string(status.requestedRepeats) +
+                     " repeats are inactive: declare the same number of Group "
                      "Input and Group Output lanes";
     return status;
   }
@@ -3198,14 +3226,14 @@ GroupCopyStatus NodeGraph::groupCopyStatus(std::int32_t groupId) const {
   }
   if (!hasThroughPath) {
     status.active = false;
-    status.message = "Requested " + std::to_string(status.requestedCopies) +
-                     " copies are inactive: connect Group Input through the "
+    status.message = "Requested " + std::to_string(status.requestedRepeats) +
+                     " repeats are inactive: connect Group Input through the "
                      "group to Group Output";
     return status;
   }
 
-  const auto chain = evaluateSerialCopyShapeChain(
-      *this, groupId, status.requestedCopies, inputs, outputs);
+  const auto chain = evaluateSerialRepeatShapeChain(
+      *this, groupId, status.requestedRepeats, inputs, outputs);
   if (!chain.ok) {
     status.active = false;
     status.message = chain.message;
@@ -3213,11 +3241,11 @@ GroupCopyStatus NodeGraph::groupCopyStatus(std::int32_t groupId) const {
     return status;
   }
 
-  status.effectiveCopies = status.requestedCopies;
+  status.effectiveRepeats = status.requestedRepeats;
   return status;
 }
 
-int NodeGraph::effectiveRuntimeCopyCount(std::int32_t nodeId) const {
+int NodeGraph::effectiveRuntimeRepeatCount(std::int32_t nodeId) const {
   const auto *node = findNode(nodeId);
   if (node == nullptr)
     return 1;
@@ -3227,8 +3255,8 @@ int NodeGraph::effectiveRuntimeCopyCount(std::int32_t nodeId) const {
   while (parent.has_value()) {
     if (!visiting.insert(*parent).second)
       break;
-    const auto status = groupCopyStatus(*parent);
-    count *= std::max(1, status.effectiveCopies);
+    const auto status = groupRepeatStatus(*parent);
+    count *= std::max(1, status.effectiveRepeats);
     const auto *group = findGroup(*parent);
     if (group == nullptr)
       break;
@@ -3238,7 +3266,7 @@ int NodeGraph::effectiveRuntimeCopyCount(std::int32_t nodeId) const {
 }
 
 std::optional<std::string>
-NodeGraph::groupCopyPropertyHint(std::int32_t nodeId,
+NodeGraph::groupRepeatPropertyHint(std::int32_t nodeId,
                                  const std::string &propertyKey) const {
   const auto *node = findNode(nodeId);
   if (node == nullptr)
@@ -3248,7 +3276,7 @@ NodeGraph::groupCopyPropertyHint(std::int32_t nodeId,
   while (parent.has_value()) {
     if (!visiting.insert(*parent).second)
       break;
-    const auto status = groupCopyStatus(*parent);
+    const auto status = groupRepeatStatus(*parent);
     for (const auto &hint : status.propertyHints) {
       if (hint.nodeId == nodeId && hint.propertyKey == propertyKey)
         return hint.message;
@@ -3264,8 +3292,8 @@ NodeGraph::groupCopyPropertyHint(std::int32_t nodeId,
 std::vector<std::string> NodeGraph::collectGraphWarnings() const {
   std::vector<std::string> warnings;
   for (const auto &group : groups) {
-    const auto status = groupCopyStatus(group.id);
-    if (status.active || status.message.empty() || status.requestedCopies <= 1)
+    const auto status = groupRepeatStatus(group.id);
+    if (status.active || status.message.empty() || status.requestedRepeats <= 1)
       continue;
     warnings.push_back(group.name + ": " + status.message);
   }
@@ -3284,7 +3312,7 @@ std::string NodeGraph::graphWarningMessage() const {
   return joined;
 }
 
-std::vector<int> NodeGraph::ancestorCopyCounts(std::int32_t nodeId) const {
+std::vector<int> NodeGraph::ancestorRepeatCounts(std::int32_t nodeId) const {
   const auto *node = findNode(nodeId);
   if (node == nullptr)
     return {};
@@ -3297,20 +3325,20 @@ std::vector<int> NodeGraph::ancestorCopyCounts(std::int32_t nodeId) const {
     const auto *group = findGroup(*parent);
     if (group == nullptr)
       break;
-    innerToOuter.push_back(std::max(1, group->copies));
+    innerToOuter.push_back(std::max(1, group->repeats));
     parent = group->parentGroupId;
   }
   std::reverse(innerToOuter.begin(), innerToOuter.end());
   return innerToOuter;
 }
 
-void NodeGraph::validateAuthoredCopyLists(std::int32_t nodeId) {
+void NodeGraph::validateAuthoredRepeatLists(std::int32_t nodeId) {
   auto *node = findNode(nodeId);
   if (node == nullptr)
     return;
-  const auto counts = ancestorCopyCounts(nodeId);
+  const auto counts = ancestorRepeatCounts(nodeId);
   for (auto &property : node->properties)
-    syncCopyListValidity(property, counts);
+    syncRepeatListValidity(property, counts);
 }
 
 bool NodeGraph::isNodeHiddenByCollapse(std::int32_t nodeId) const {
@@ -3869,7 +3897,7 @@ NodeGraph::createGroup(const std::vector<std::int32_t> &memberIds) {
   for (std::size_t index = 0; index < unique.size(); ++index)
     storeWorldPosition(*this, unique[index], memberWorlds[index], group.id);
   ensureGroupBoundaryNodes(group.id, false);
-  refreshCopySlotsForGroup(*this, group.id);
+  refreshRepeatSlotsForGroup(*this, group.id);
   return {true, {}, group.id};
 }
 
@@ -3992,7 +4020,7 @@ GroupActionResult NodeGraph::addToGroup(std::int32_t groupId,
   group->memberIds.push_back(memberId);
   if (!preserveStoredPosition)
     storeWorldPosition(*this, memberId, world, groupId);
-  refreshCopySlotsForGroup(*this, groupId);
+  refreshRepeatSlotsForGroup(*this, groupId);
   return {true, {}, groupId};
 }
 
@@ -4017,11 +4045,11 @@ GroupActionResult NodeGraph::removeFromGroup(std::int32_t memberId) {
   }
   if (findNode(memberId) != nullptr) {
     auto *node = findNode(memberId);
-    const auto copies = effectiveCopyCount(memberId);
-    ensureCopySlotCount(*node, copies);
-    ensureNodePropertyCopyCounts(*node, copies);
+    const auto repeats = effectiveRepeatCount(memberId);
+    ensureRepeatSlotCount(*node, repeats);
+    ensureNodePropertyRepeatCounts(*node, repeats);
   } else if (findGroup(memberId) != nullptr)
-    refreshCopySlotsForGroup(*this, memberId);
+    refreshRepeatSlotsForGroup(*this, memberId);
   return {true, {}, *parent};
 }
 
@@ -4050,17 +4078,17 @@ std::vector<std::int32_t> NodeGraph::expandSelectionToFreezableLeaves(
   return leaves;
 }
 
-GroupActionResult NodeGraph::setGroupCopies(std::int32_t groupId, int copies) {
+GroupActionResult NodeGraph::setGroupRepeats(std::int32_t groupId, int repeats) {
   auto *group = findGroup(groupId);
   if (group == nullptr)
     return {false, "Group no longer exists", 0};
-  copies = std::clamp(copies, 1, maximumGroupCopies);
-  if (copies == group->copies)
-    return {true, groupCopyStatus(groupId).message, groupId};
-  group->copies = copies;
-  refreshCopySlotsForGroup(*this, groupId);
+  repeats = std::clamp(repeats, 1, maximumGroupRepeats);
+  if (repeats == group->repeats)
+    return {true, groupRepeatStatus(groupId).message, groupId};
+  group->repeats = repeats;
+  refreshRepeatSlotsForGroup(*this, groupId);
   refreshPropagatedPinShapes(*this);
-  const auto status = groupCopyStatus(groupId);
+  const auto status = groupRepeatStatus(groupId);
   if (!status.active)
     return {true, status.message, groupId};
   const auto warning = firstIncompatibleLinkMessage(*this);
@@ -4090,11 +4118,11 @@ bool NodeGraph::randomizeGroupWeights(std::int32_t groupId) {
   return any;
 }
 
-NodeGraph NodeGraph::withInvisibleCopiesMaterialized() const {
-  return withInvisibleCopiesMaterialized(nullptr);
+NodeGraph NodeGraph::withInvisibleRepeatsMaterialized() const {
+  return withInvisibleRepeatsMaterialized(nullptr);
 }
 
-NodeGraph NodeGraph::withInvisibleCopiesMaterialized(
+NodeGraph NodeGraph::withInvisibleRepeatsMaterialized(
     std::unordered_map<std::int32_t, std::pair<std::int32_t, int>> *provenance)
     const {
   NodeGraph expanded;
@@ -4123,14 +4151,14 @@ NodeGraph NodeGraph::withInvisibleCopiesMaterialized(
 
   for (const auto groupId : ordered) {
     auto *group = expanded.findGroup(groupId);
-    if (group == nullptr || group->copies <= 1)
+    if (group == nullptr || group->repeats <= 1)
       continue;
-    const auto copyStatus = expanded.groupCopyStatus(groupId);
-    if (!copyStatus.active || copyStatus.effectiveCopies <= 1) {
-      group->copies = 1;
+    const auto repeatStatus = expanded.groupRepeatStatus(groupId);
+    if (!repeatStatus.active || repeatStatus.effectiveRepeats <= 1) {
+      group->repeats = 1;
       continue;
     }
-    const auto copies = copyStatus.effectiveCopies;
+    const auto repeats = repeatStatus.effectiveRepeats;
     const auto templateNodes = expanded.collectLeafNodeIds(groupId);
     if (templateNodes.empty())
       continue;
@@ -4151,7 +4179,7 @@ NodeGraph NodeGraph::withInvisibleCopiesMaterialized(
         const auto *ancestor = findGroup(*parent);
         if (ancestor == nullptr)
           break;
-        product *= std::max(1, ancestor->copies);
+        product *= std::max(1, ancestor->repeats);
         parent = ancestor->parentGroupId;
       }
       return std::max(1, product);
@@ -4171,11 +4199,11 @@ NodeGraph NodeGraph::withInvisibleCopiesMaterialized(
     std::vector<GroupBoundaryPort> outputs;
     appendSerialChainPorts(expanded, groupId, inputs, outputs);
 
-    struct CopyInstance {
+    struct RepeatInstance {
       std::unordered_map<std::int32_t, std::int32_t> pinMap;
       std::unordered_map<std::int32_t, std::int32_t> nodeMap;
     };
-    std::vector<CopyInstance> instances(static_cast<std::size_t>(copies));
+    std::vector<RepeatInstance> instances(static_cast<std::size_t>(repeats));
     for (const auto nodeId : templateNodes) {
       instances[0].nodeMap[nodeId] = nodeId;
       if (const auto *node = expanded.findNode(nodeId)) {
@@ -4189,18 +4217,18 @@ NodeGraph NodeGraph::withInvisibleCopiesMaterialized(
         const auto originalId = working[nodeId].originalId;
         if (const auto *original = findNode(originalId))
           node->properties = original->properties;
-        ensureCopySlotCount(
-            *node, std::max(slot + 1, effectiveCopyCount(originalId)));
-        if (slot < static_cast<int>(node->copySlots.size()))
-          applyCopySlot(*node, node->copySlots[static_cast<std::size_t>(slot)]);
-        applyCopyPropertyValues(*node, slot);
+        ensureRepeatSlotCount(
+            *node, std::max(slot + 1, effectiveRepeatCount(originalId)));
+        if (slot < static_cast<int>(node->repeatSlots.size()))
+          applyRepeatSlot(*node, node->repeatSlots[static_cast<std::size_t>(slot)]);
+        applyRepeatPropertyValues(*node, slot);
         if (provenance != nullptr)
           (*provenance)[nodeId] = {originalId, slot};
       }
     }
 
-    for (int copy = 1; copy < copies; ++copy) {
-      auto &instance = instances[static_cast<std::size_t>(copy)];
+    for (int repeat = 1; repeat < repeats; ++repeat) {
+      auto &instance = instances[static_cast<std::size_t>(repeat)];
       for (const auto nodeId : templateNodes) {
         const auto *templateNode = expanded.findNode(nodeId);
         if (templateNode == nullptr)
@@ -4219,18 +4247,18 @@ NodeGraph NodeGraph::withInvisibleCopiesMaterialized(
           instance.pinMap[originalPin] = pin.id;
         }
         const auto slot =
-            working[nodeId].slotIndex + copy * innerProduct(nodeId);
+            working[nodeId].slotIndex + repeat * innerProduct(nodeId);
         const auto originalId = working[nodeId].originalId;
         if (const auto *original = findNode(originalId)) {
-          clone.copySlots = original->copySlots;
+          clone.repeatSlots = original->repeatSlots;
           clone.properties = original->properties;
-          ensureCopySlotCount(
+          ensureRepeatSlotCount(
               clone, std::max(slot + 1,
-                              static_cast<int>(original->copySlots.size())));
-          if (slot < static_cast<int>(clone.copySlots.size()))
-            applyCopySlot(clone,
-                          clone.copySlots[static_cast<std::size_t>(slot)]);
-          applyCopyPropertyValues(clone, slot);
+                              static_cast<int>(original->repeatSlots.size())));
+          if (slot < static_cast<int>(clone.repeatSlots.size()))
+            applyRepeatSlot(clone,
+                          clone.repeatSlots[static_cast<std::size_t>(slot)]);
+          applyRepeatPropertyValues(clone, slot);
         }
         instance.nodeMap[nodeId] = clone.id;
         working[clone.id] = WorkingNode{originalId, slot};
@@ -4253,9 +4281,9 @@ NodeGraph NodeGraph::withInvisibleCopiesMaterialized(
       }
     }
 
-    // Retarget outs that leave this group onto the last copy. Destinations
+    // Retarget outs that leave this group onto the last repeat. Destinations
     // still inside the group — including serial edges from a nested unroll —
-    // stay put; rewriting those onto the last outer copy closes a cycle.
+    // stay put; rewriting those onto the last outer repeat closes a cycle.
     const auto &last = instances.back();
     for (auto &link : expanded.links) {
       const auto sourceNode = expanded.findNodeForPin(link.sourcePinId);
@@ -4271,9 +4299,9 @@ NodeGraph NodeGraph::withInvisibleCopiesMaterialized(
     }
 
     const auto pairCount = std::min(inputs.size(), outputs.size());
-    for (int copy = 0; copy + 1 < copies; ++copy) {
-      const auto &current = instances[static_cast<std::size_t>(copy)];
-      const auto &next = instances[static_cast<std::size_t>(copy + 1)];
+    for (int repeat = 0; repeat + 1 < repeats; ++repeat) {
+      const auto &current = instances[static_cast<std::size_t>(repeat)];
+      const auto &next = instances[static_cast<std::size_t>(repeat + 1)];
       for (std::size_t index = 0; index < pairCount; ++index) {
         const auto outPin = current.pinMap.find(outputs[index].memberPinId);
         const auto inPin = next.pinMap.find(inputs[index].memberPinId);
@@ -4286,7 +4314,7 @@ NodeGraph NodeGraph::withInvisibleCopiesMaterialized(
         expanded.links.push_back(chain);
       }
     }
-    group->copies = 1;
+    group->repeats = 1;
   }
   expanded.flattenGroupBoundaryNodes();
   return expanded;
@@ -4427,9 +4455,9 @@ bool NodeGraph::setProperty(std::int32_t nodeId, const std::string &key,
   if (property == node->properties.end())
     return false;
   const auto previousValue = property->value;
-  const auto previousCopyValues = property->copyIntValues;
+  const auto previousRepeatValues = property->repeatIntValues;
   const auto previousPreserveIn = property->preserveInBound;
-  const auto previousInvalid = property->copyListInvalid;
+  const auto previousInvalid = property->repeatListInvalid;
   if (key == "ports" && isGroupBoundaryType(node->type)) {
     if (!setGroupBoundaryPortCount(*node, value))
       return false;
@@ -4438,20 +4466,20 @@ bool NodeGraph::setProperty(std::int32_t nodeId, const std::string &key,
   }
   property->setValue(value);
 
-  const auto syncCopyValues = [&]() {
-    if (!propertySupportsCopyValueList(*property))
+  const auto syncRepeatValues = [&]() {
+    if (!propertySupportsRepeatValueList(*property))
       return;
     property->preserveInBound = false;
-    property->copyListInvalid = false;
-    property->copyListInvalidMessage.clear();
-    property->copyIntValues = {property->value};
+    property->repeatListInvalid = false;
+    property->repeatListInvalidMessage.clear();
+    property->repeatIntValues = {property->value};
   };
-  const auto restoreCopyValues = [&]() {
-    property->copyIntValues = previousCopyValues;
+  const auto restoreRepeatValues = [&]() {
+    property->repeatIntValues = previousRepeatValues;
     property->preserveInBound = previousPreserveIn;
-    property->copyListInvalid = previousInvalid;
+    property->repeatListInvalid = previousInvalid;
   };
-  syncCopyValues();
+  syncRepeatValues();
 
   if (key == "channels" && isFixedIoType(node->type)) {
     property->setValue(std::clamp(property->value, 0, 2));
@@ -4476,7 +4504,7 @@ bool NodeGraph::setProperty(std::int32_t nodeId, const std::string &key,
     const auto incompatible = firstIncompatibleLinkMessage(*this);
     if (!incompatible.empty()) {
       property->setValue(previousValue);
-      restoreCopyValues();
+      restoreRepeatValues();
       applyHostIoChannels(*node);
       if (paired != nullptr) {
         for (auto &pairedProperty : paired->properties) {
@@ -4490,7 +4518,7 @@ bool NodeGraph::setProperty(std::int32_t nodeId, const std::string &key,
       refreshPropagatedPinShapes(*this);
       return false;
     }
-    syncCopyValues();
+    syncRepeatValues();
     return true;
   } else if (key == "channels" && isConvolutionType(node->type)) {
     for (auto &pin : node->outputs)
@@ -4504,7 +4532,7 @@ bool NodeGraph::setProperty(std::int32_t nodeId, const std::string &key,
     updateMergeOutputShape(*this, *node);
     if (!mergeDownstreamIsCompatible(*this, *node)) {
       property->setValue(previousValue);
-      restoreCopyValues();
+      restoreRepeatValues();
       updateMergeOutputShape(*this, *node);
       return false;
     }
@@ -4529,7 +4557,7 @@ bool NodeGraph::setProperty(std::int32_t nodeId, const std::string &key,
              node->type == NodeType::variationalBottleneck) {
     if (variationalBottleneckLatentIsError(property->value)) {
       property->setValue(previousValue);
-      restoreCopyValues();
+      restoreRepeatValues();
       return false;
     }
     for (auto &pin : node->outputs) {
@@ -4548,7 +4576,7 @@ bool NodeGraph::setProperty(std::int32_t nodeId, const std::string &key,
   const auto incompatible = firstIncompatibleLinkMessage(*this);
   if (!incompatible.empty()) {
     property->setValue(previousValue);
-    restoreCopyValues();
+    restoreRepeatValues();
     if (isConvolutionType(node->type))
       updateConv1dDetail(*node);
     else if (isConvTransposeType(node->type))
@@ -4556,7 +4584,7 @@ bool NodeGraph::setProperty(std::int32_t nodeId, const std::string &key,
     refreshPropagatedPinShapes(*this);
     return false;
   }
-  syncCopyValues();
+  syncRepeatValues();
   return true;
 }
 
@@ -4582,15 +4610,15 @@ bool NodeGraph::setFloatProperty(std::int32_t nodeId, const std::string &key,
   property->setFloatValue(value);
   if (key == "fidelity")
     node->fidelityPercent = clampFidelity(property->floatValue);
-  if (propertySupportsCopyValueList(*property)) {
-    property->copyListInvalid = false;
-    property->copyListInvalidMessage.clear();
-    property->copyFloatValues = {property->floatValue};
+  if (propertySupportsRepeatValueList(*property)) {
+    property->repeatListInvalid = false;
+    property->repeatListInvalidMessage.clear();
+    property->repeatFloatValues = {property->floatValue};
   }
   return true;
 }
 
-bool NodeGraph::setPropertyCopyValues(std::int32_t nodeId,
+bool NodeGraph::setPropertyRepeatValues(std::int32_t nodeId,
                                       const std::string &key,
                                       const std::vector<int> &values) {
   auto *node = findNode(nodeId);
@@ -4600,10 +4628,10 @@ bool NodeGraph::setPropertyCopyValues(std::int32_t nodeId,
       node->properties.begin(), node->properties.end(),
       [&key](const NodeProperty &candidate) { return candidate.key == key; });
   if (property == node->properties.end() ||
-      !propertySupportsCopyValueList(*property) ||
+      !propertySupportsRepeatValueList(*property) ||
       property->kind != PropertyKind::integer)
     return false;
-  const auto counts = ancestorCopyCounts(nodeId);
+  const auto counts = ancestorRepeatCounts(nodeId);
   if (!isDividingSetLength(static_cast<int>(values.size()), counts))
     return false;
   std::vector<int> clamped;
@@ -4616,10 +4644,10 @@ bool NodeGraph::setPropertyCopyValues(std::int32_t nodeId,
   if (!setProperty(nodeId, key, clamped.front()))
     return false;
   property->preserveInBound = false;
-  property->copyListInvalid = false;
-  property->copyListInvalidMessage.clear();
-  property->copyIntValues = std::move(clamped);
-  property->value = property->copyIntValues.front();
+  property->repeatListInvalid = false;
+  property->repeatListInvalidMessage.clear();
+  property->repeatIntValues = std::move(clamped);
+  property->value = property->repeatIntValues.front();
   refreshPropagatedPinShapes(*this);
   return true;
 }
@@ -4635,32 +4663,32 @@ bool NodeGraph::setPropertyPreserveIn(std::int32_t nodeId, const std::string &ke
   if (property == node->properties.end() ||
       !propertySupportsPreserveIn(*property))
     return false;
-  const auto counts = ancestorCopyCounts(nodeId);
+  const auto counts = ancestorRepeatCounts(nodeId);
   if (!isDividingSetLength(std::max(1, authoredLength), counts))
     return false;
   const auto previousValue = property->value;
-  const auto previousCopyValues = property->copyIntValues;
+  const auto previousRepeatValues = property->repeatIntValues;
   const auto previousPreserveIn = property->preserveInBound;
-  const auto previousInvalid = property->copyListInvalid;
+  const auto previousInvalid = property->repeatListInvalid;
   property->preserveInBound = true;
-  property->copyListInvalid = false;
-  property->copyListInvalidMessage.clear();
-  property->copyIntValues.assign(static_cast<std::size_t>(std::max(1, authoredLength)),
+  property->repeatListInvalid = false;
+  property->repeatListInvalidMessage.clear();
+  property->repeatIntValues.assign(static_cast<std::size_t>(std::max(1, authoredLength)),
                                  0);
   refreshPropagatedPinShapes(*this);
   const auto incompatible = firstIncompatibleLinkMessage(*this);
   if (!incompatible.empty()) {
     property->value = previousValue;
-    property->copyIntValues = previousCopyValues;
+    property->repeatIntValues = previousRepeatValues;
     property->preserveInBound = previousPreserveIn;
-    property->copyListInvalid = previousInvalid;
+    property->repeatListInvalid = previousInvalid;
     refreshPropagatedPinShapes(*this);
     return false;
   }
   return true;
 }
 
-bool NodeGraph::setFloatPropertyCopyValues(std::int32_t nodeId,
+bool NodeGraph::setFloatPropertyRepeatValues(std::int32_t nodeId,
                                            const std::string &key,
                                            const std::vector<float> &values) {
   auto *node = findNode(nodeId);
@@ -4674,10 +4702,10 @@ bool NodeGraph::setFloatPropertyCopyValues(std::int32_t nodeId,
       node->properties.begin(), node->properties.end(),
       [&key](const NodeProperty &candidate) { return candidate.key == key; });
   if (property == node->properties.end() ||
-      !propertySupportsCopyValueList(*property) ||
+      !propertySupportsRepeatValueList(*property) ||
       property->kind != PropertyKind::real)
     return false;
-  const auto counts = ancestorCopyCounts(nodeId);
+  const auto counts = ancestorRepeatCounts(nodeId);
   if (!isDividingSetLength(static_cast<int>(values.size()), counts))
     return false;
   std::vector<float> clamped;
@@ -4690,10 +4718,10 @@ bool NodeGraph::setFloatPropertyCopyValues(std::int32_t nodeId,
   }
   if (!setFloatProperty(nodeId, key, clamped.front()))
     return false;
-  property->copyListInvalid = false;
-  property->copyListInvalidMessage.clear();
-  property->copyFloatValues = std::move(clamped);
-  property->floatValue = property->copyFloatValues.front();
+  property->repeatListInvalid = false;
+  property->repeatListInvalidMessage.clear();
+  property->repeatFloatValues = std::move(clamped);
+  property->floatValue = property->repeatFloatValues.front();
   if (key == "fidelity")
     node->fidelityPercent = clampFidelity(property->floatValue);
   refreshPropagatedPinShapes(*this);
@@ -4734,15 +4762,15 @@ bool NodeGraph::setSeed(std::int32_t nodeId, std::int32_t seed) {
   node->seed = clampSeed(seed);
   if (node->useExplicitSeed)
     node->explicitSeed = node->seed;
-  if (!node->copySlots.empty() &&
+  if (!node->repeatSlots.empty() &&
       node->weightsProvenance == WeightsProvenance::random) {
-    for (std::size_t index = 0; index < node->copySlots.size(); ++index) {
-      auto &slot = node->copySlots[index];
+    for (std::size_t index = 0; index < node->repeatSlots.size(); ++index) {
+      auto &slot = node->repeatSlots[index];
       if (slot.provenance != WeightsProvenance::random)
         continue;
-      slot.seed = seedForCopySlot(node->seed, index);
+      slot.seed = seedForRepeatSlot(node->seed, index);
     }
-    node->copySlots.front() = copySlotFromNode(*node);
+    node->repeatSlots.front() = repeatSlotFromNode(*node);
   }
   return true;
 }
@@ -4890,7 +4918,7 @@ std::optional<FreezeSelectionRequest> NodeGraph::createFreezeRequest(
     NodeGraph prepared;
     prepared.restoreFromValueTree(toValueTree());
     for (auto &group : prepared.groups)
-      group.copies = 1;
+      group.repeats = 1;
     prepared.flattenGroupBoundaryNodes();
     return prepared.createFreezeRequest(selectedNodeIds);
   }
@@ -5230,7 +5258,7 @@ bool NodeGraph::restoreFromValueTree(const juce::ValueTree &tree) {
   for (const auto groupId : groupsByDepth)
     ensureGroupBoundaryNodes(groupId, true);
   for (auto &node : nodes)
-    validateAuthoredCopyLists(node.id);
+    validateAuthoredRepeatLists(node.id);
   ensureFixedHostIo();
   refreshAllMergeOutputShapes(*this);
   for (auto &node : nodes) {
@@ -6183,9 +6211,9 @@ bool NodeGraph::clearWeightsToSeed(std::int32_t nodeId, std::int32_t seed) {
   if (node == nullptr || !node->hasWeights ||
       node->state == NodeState::frozenGold)
     return false;
-  ensureCopySlotCount(*node, effectiveCopyCount(nodeId));
+  ensureRepeatSlotCount(*node, effectiveRepeatCount(nodeId));
   // BatchNorm keeps a shared identity seed; every other weighted member derives
-  // `seed + i` so materialized copies do not share live audition weights.
+  // `seed + i` so materialized repeats do not share live audition weights.
   const bool independentExtraSlots = node->type != NodeType::batchNorm;
   writeRandomizedWeightSlots(*node, seed, independentExtraSlots);
   node->blackBoxOrigin = BlackBoxOrigin::manualFreeze;
@@ -6197,13 +6225,13 @@ std::optional<TrainJobRequest> NodeGraph::createTrainRequest() const {
       nodes.begin(), nodes.end(),
       [](const GraphNode &node) { return isGroupBoundaryType(node.type); });
   for (const auto &group : groups) {
-    if (group.copies > 1) {
-      auto expanded = withInvisibleCopiesMaterialized();
+    if (group.repeats > 1) {
+      auto expanded = withInvisibleRepeatsMaterialized();
       return expanded.createTrainRequest();
     }
   }
   if (hasBoundary) {
-    auto prepared = withInvisibleCopiesMaterialized();
+    auto prepared = withInvisibleRepeatsMaterialized();
     return prepared.createTrainRequest();
   }
   const auto armed = getArmedTrainableNodeIds();

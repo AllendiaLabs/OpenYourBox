@@ -105,10 +105,10 @@ inline constexpr float leakyReluNegativeSlopeMaximum = 1.0f;
 inline constexpr int leakyReluActivationIndex = 3;
 /** @brief Reserved token binding a dim/channels/features field to its input. */
 inline constexpr const char *preserveInToken = "in";
-/** @brief Default copies parameter N for a new group. */
-inline constexpr int defaultGroupCopies = 1;
-/** @brief Inclusive upper bound for a group's copies parameter. */
-inline constexpr int maximumGroupCopies = 32;
+/** @brief Default repeats parameter N for a new group. */
+inline constexpr int defaultGroupRepeats = 1;
+/** @brief Inclusive upper bound for a group's repeats parameter. */
+inline constexpr int maximumGroupRepeats = 32;
 /** @brief Supported nesting depth for groups and subgroups. */
 inline constexpr int maximumGroupNestingDepth = 8;
 /** @brief Bit flag applied to member pin ids drawn as group I/O pins. */
@@ -428,17 +428,17 @@ struct ShapeSignature {
 };
 
 /**
- * @brief Formats copy-slot labels as nested @c [] lists along the nest axes.
+ * @brief Formats repeat-slot labels as nested @c [] lists along the nest axes.
  *
- * @p copyCounts is outer→inner. Axes of 1 are skipped. A single ungrouped
+ * @p repeatCounts is outer→inner. Axes of 1 are skipped. A single ungrouped
  * item is returned without brackets. When @p items length does not match the
- * product of @p copyCounts, the items are shown as one flat bracketed list.
- * @param items One label per expanded copy slot.
- * @param copyCounts Outer→inner ancestor copy-count vector C.
+ * product of @p repeatCounts, the items are shown as one flat bracketed list.
+ * @param items One label per expanded repeat slot.
+ * @param repeatCounts Outer→inner ancestor repeat-count vector C.
  */
 inline std::string
-formatHierarchicalCopyList(const std::vector<std::string> &items,
-                           const std::vector<int> &copyCounts) {
+formatHierarchicalRepeatList(const std::vector<std::string> &items,
+                           const std::vector<int> &repeatCounts) {
   if (items.empty())
     return {};
 
@@ -454,8 +454,8 @@ formatHierarchicalCopyList(const std::vector<std::string> &items,
   };
 
   int product = 1;
-  for (const auto copies : copyCounts)
-    product *= std::max(1, copies);
+  for (const auto repeats : repeatCounts)
+    product *= std::max(1, repeats);
   product = std::max(1, product);
   const auto count = static_cast<int>(items.size());
   if (product != count)
@@ -463,20 +463,20 @@ formatHierarchicalCopyList(const std::vector<std::string> &items,
 
   struct Formatter {
     const std::vector<std::string> &items;
-    const std::vector<int> &copyCounts;
+    const std::vector<int> &repeatCounts;
     /**
      * @brief Nests @p span items starting at @p start from axis @p dim.
      * @param start First item index.
      * @param span Number of items in this axis slice.
-     * @param dim Current outer→inner copy-count index.
+     * @param dim Current outer→inner repeat-count index.
      */
     std::string format(int start, int span, int dim) const {
       if (span <= 0)
         return {};
-      while (dim < static_cast<int>(copyCounts.size()) &&
-             copyCounts[static_cast<std::size_t>(dim)] <= 1)
+      while (dim < static_cast<int>(repeatCounts.size()) &&
+             repeatCounts[static_cast<std::size_t>(dim)] <= 1)
         ++dim;
-      if (dim >= static_cast<int>(copyCounts.size())) {
+      if (dim >= static_cast<int>(repeatCounts.size())) {
         if (span == 1)
           return items[static_cast<std::size_t>(start)];
         std::string text = "[";
@@ -489,7 +489,7 @@ formatHierarchicalCopyList(const std::vector<std::string> &items,
         return text;
       }
       const int groups =
-          std::max(1, copyCounts[static_cast<std::size_t>(dim)]);
+          std::max(1, repeatCounts[static_cast<std::size_t>(dim)]);
       if (span % groups != 0) {
         std::string text = "[";
         for (int index = 0; index < span; ++index) {
@@ -511,20 +511,20 @@ formatHierarchicalCopyList(const std::vector<std::string> &items,
       return text;
     }
   };
-  return Formatter{items, copyCounts}.format(0, count, 0);
+  return Formatter{items, repeatCounts}.format(0, count, 0);
 }
 
 /**
- * @brief Formats per-copy pin shapes as a nested copy-hierarchy label.
- * @param shapes Ordered shapes (one per copy). Falls back to @p fallback when
+ * @brief Formats per-repeat pin shapes as a nested repeat-hierarchy label.
+ * @param shapes Ordered shapes (one per repeat). Falls back to @p fallback when
  *        empty.
- * @param fallback Shape used when @p shapes is empty (typically the first copy).
- * @param copyCounts Outer→inner ancestor copy counts used to nest @c [] groups.
+ * @param fallback Shape used when @p shapes is empty (typically the first repeat).
+ * @param repeatCounts Outer→inner ancestor repeat counts used to nest @c [] groups.
  * @return Empty when no concrete shape fields are known yet.
  */
-inline std::string formatShapeCopyList(const std::vector<ShapeSignature> &shapes,
+inline std::string formatShapeRepeatList(const std::vector<ShapeSignature> &shapes,
                                        const ShapeSignature &fallback,
-                                       const std::vector<int> &copyCounts = {}) {
+                                       const std::vector<int> &repeatCounts = {}) {
   std::vector<std::string> labels;
   if (shapes.size() <= 1) {
     const auto &shape = shapes.empty() ? fallback : shapes.front();
@@ -541,22 +541,22 @@ inline std::string formatShapeCopyList(const std::vector<ShapeSignature> &shapes
       labels.push_back(std::move(part));
     }
   }
-  return formatHierarchicalCopyList(labels, copyCounts);
+  return formatHierarchicalRepeatList(labels, repeatCounts);
 }
 
 /**
- * @brief Collapses an inner serial-copy axis to first-in or last-out.
+ * @brief Collapses an inner serial-repeat axis to first-in or last-out.
  *
  * @p innerFold is the contiguous innermost chunk width. 1 keeps @p shapes.
  * When @p shapes length is not a multiple of @p innerFold, the whole list
  * reduces to a single first or last entry.
- * @param shapes Flat copy-slot shapes, innermost axis contiguous.
+ * @param shapes Flat repeat-slot shapes, innermost axis contiguous.
  * @param innerFold Width of the inner axis to fold.
  * @param takeLast True to keep the last slot of each chunk (outputs).
  * @return One shape per remaining outer slot.
  */
 inline std::vector<ShapeSignature>
-foldInnerCopyShapes(const std::vector<ShapeSignature> &shapes, int innerFold,
+foldInnerRepeatShapes(const std::vector<ShapeSignature> &shapes, int innerFold,
                     bool takeLast) {
   innerFold = std::max(1, innerFold);
   if (shapes.empty() || innerFold <= 1)
@@ -577,29 +577,29 @@ foldInnerCopyShapes(const std::vector<ShapeSignature> &shapes, int innerFold,
 /**
  * @brief Formats collapsed group-box pin shapes for the parent canvas.
  *
- * Copies of the group itself — and of any nested groups whose copy axes
+ * Repeats of the group itself — and of any nested groups whose repeat axes
  * leaked onto this hub — chain serially, so the parent canvas only attaches
- * to first-copy inputs and last-copy outputs. Those inner shapes are folded
- * away. Strict ancestor copy axes remain as a nested list.
+ * to first-repeat inputs and last-repeat outputs. Those inner shapes are folded
+ * away. Strict ancestor repeat axes remain as a nested list.
  *
- * @param shapes Per-copy shapes; may include the group's own axis and nested
- *        descendant copy axes inside it.
- * @param fallback Shape used when @p shapes is empty (typically first-copy).
- * @param ancestorCopyCounts Outer→inner runtime copy counts for the hub,
+ * @param shapes Per-repeat shapes; may include the group's own axis and nested
+ *        descendant repeat axes inside it.
+ * @param fallback Shape used when @p shapes is empty (typically first-repeat).
+ * @param ancestorRepeatCounts Outer→inner runtime repeat counts for the hub,
  *        including the collapsed group's own N as the last entry.
- * @param takeLast True for outputs (last copy of each inner chunk); false for
- *        inputs (first copy of each inner chunk).
+ * @param takeLast True for outputs (last repeat of each inner chunk); false for
+ *        inputs (first repeat of each inner chunk).
  * @return Hierarchical label, or empty when no concrete shape is known.
  */
 inline std::string formatCollapsedGroupPinShapes(
     const std::vector<ShapeSignature> &shapes, const ShapeSignature &fallback,
-    const std::vector<int> &ancestorCopyCounts, bool takeLast) {
-  std::vector<int> outerCounts = ancestorCopyCounts;
+    const std::vector<int> &ancestorRepeatCounts, bool takeLast) {
+  std::vector<int> outerCounts = ancestorRepeatCounts;
   if (!outerCounts.empty())
     outerCounts.pop_back();
   int outerProduct = 1;
-  for (const auto copies : outerCounts)
-    outerProduct *= std::max(1, copies);
+  for (const auto repeats : outerCounts)
+    outerProduct *= std::max(1, repeats);
   outerProduct = std::max(1, outerProduct);
   const int shapeCount = static_cast<int>(shapes.size());
   int innerFold = 1;
@@ -607,12 +607,12 @@ inline std::string formatCollapsedGroupPinShapes(
     innerFold = std::max(1, shapeCount / outerProduct);
   else if (shapeCount > 0)
     innerFold = shapeCount;
-  const auto folded = foldInnerCopyShapes(shapes, innerFold, takeLast);
+  const auto folded = foldInnerRepeatShapes(shapes, innerFold, takeLast);
   const ShapeSignature &effectiveFallback =
       !folded.empty()
           ? folded.front()
           : (takeLast && !shapes.empty() ? shapes.back() : fallback);
-  return formatShapeCopyList(folded, effectiveFallback, outerCounts);
+  return formatShapeRepeatList(folded, effectiveFallback, outerCounts);
 }
 
 /**
@@ -863,20 +863,20 @@ struct Pin {
   /** @brief Input or output direction. */
   PinKind kind = PinKind::input;
   /**
-   * @brief Tensor shape for the visible (first) copy.
+   * @brief Tensor shape for the visible (first) repeat.
    *
-   * External cables into a multi-copy group still validate against this shape.
-   * Group outputs that leave the stack use @ref copyShapes when present.
+   * External cables into a multi-repeat group still validate against this shape.
+   * Group outputs that leave the stack use @ref repeatShapes when present.
    */
   ShapeSignature shape;
   /**
-   * @brief Per-copy shapes when the owner participates in N&gt;1 group copies.
+   * @brief Per-repeat shapes when the owner participates in N&gt;1 group repeats.
    *
-   * Empty when the runtime copy product is 1. Index 0 matches @ref shape.
+   * Empty when the runtime repeat product is 1. Index 0 matches @ref shape.
    * The innermost axis is the owner's group; ancestor axes nest outside it.
    * Collapsed group boxes fold that inner axis to first-in / last-out.
    */
-  std::vector<ShapeSignature> copyShapes;
+  std::vector<ShapeSignature> repeatShapes;
 };
 
 /**
@@ -925,31 +925,31 @@ struct NodeProperty {
   /** @brief Inclusive maximum accepted real value. */
   float floatMaximum = 1.0f;
   /**
-   * @brief Per-copy integer values when the owner sits in a group with N&gt;1.
+   * @brief Per-repeat integer values when the owner sits in a group with N&gt;1.
    *
-   * Empty means every copy uses `value`. Slot 0 mirrors `value`.
+   * Empty means every repeat uses `value`. Slot 0 mirrors `value`.
    */
-  std::vector<int> copyIntValues;
+  std::vector<int> repeatIntValues;
   /**
-   * @brief Per-copy real values when the owner sits in a group with N&gt;1.
+   * @brief Per-repeat real values when the owner sits in a group with N&gt;1.
    *
-   * Empty means every copy uses `floatValue`. Slot 0 mirrors `floatValue`.
+   * Empty means every repeat uses `floatValue`. Slot 0 mirrors `floatValue`.
    * Length is the **authored** list length L (may be less than P).
    */
-  std::vector<float> copyFloatValues;
+  std::vector<float> repeatFloatValues;
   /**
    * @brief True when authored length L is not in the nest dividing set.
    *
    * Authored values are preserved; runtime and shape inference treat the
    * property as unresolved until the user commits a legal list.
    */
-  bool copyListInvalid = false;
-  /** @brief User-facing reason when @ref copyListInvalid is set. */
-  std::string copyListInvalidMessage;
+  bool repeatListInvalid = false;
+  /** @brief User-facing reason when @ref repeatListInvalid is set. */
+  std::string repeatListInvalidMessage;
   /**
    * @brief True when this integer property is bound to the `in` keyword.
    *
-   * Authored length is `copyIntValues.size()` (or 1 when empty). Resolved
+   * Authored length is `repeatIntValues.size()` (or 1 when empty). Resolved
    * integers are derived from the paired input shape, not persisted as the
    * source of truth.
    */
@@ -986,9 +986,9 @@ inline void widenIntegerPropertyBounds(NodeProperty &property) noexcept {
 }
 
 /**
- * @brief Outcome of parsing a comma-separated per-copy property list.
+ * @brief Outcome of parsing a comma-separated per-repeat property list.
  */
-struct PropertyCopyListParse {
+struct PropertyRepeatListParse {
   /** @brief True when the text is a legal dividing-set length (or all-`in`). */
   bool accepted = false;
   /** @brief User-facing reason when parsing failed. */
@@ -1010,20 +1010,20 @@ struct NodeMetrics {
 };
 
 /**
- * @brief Independent weight/artifact identity for one invisible group copy.
+ * @brief Independent weight/artifact identity for one invisible group repeat.
  *
- * Visible graph elements stay unique. DSP unrolls copies using these slots so
- * live/freeze seeds stay independent across copies. Training does not load
+ * Visible graph elements stay unique. DSP unrolls repeats using these slots so
+ * live/freeze seeds stay independent across repeats. Training does not load
  * these seeds; it initializes with PyTorch defaults.
  */
-struct CopyWeightSlot {
+struct RepeatWeightSlot {
   /** @brief Randomization seed used when provenance is random. */
   std::int32_t seed = 42;
-  /** @brief Whether this copy loads a file or a seed. */
+  /** @brief Whether this repeat loads a file or a seed. */
   WeightsProvenance provenance = WeightsProvenance::random;
   /** @brief Filesystem path of trained or browsed weights. */
   std::string weightsPath;
-  /** @brief Optional frozen artifact used by this copy. */
+  /** @brief Optional frozen artifact used by this repeat. */
   std::string artifactPath;
 };
 
@@ -1039,8 +1039,8 @@ struct GraphGroup {
   std::vector<std::int32_t> memberIds;
   /** @brief Presentation-only collapse flag (library insert still forces true). */
   bool collapsed = false;
-  /** @brief Independent serial copy count (DSP-only; UI stays unique). */
-  int copies = defaultGroupCopies;
+  /** @brief Independent serial repeat count (DSP-only; UI stays unique). */
+  int repeats = defaultGroupRepeats;
   /** @brief Group box origin in parent-canvas or parent-group space. */
   juce::Point<float> position;
   /** @brief Group box size in parent-canvas or parent-group space. */
@@ -1052,9 +1052,9 @@ struct GraphGroup {
 };
 
 /**
- * @brief One shape-driving property implicated by an inactive copy request.
+ * @brief One shape-driving property implicated by an inactive repeat request.
  */
-struct GroupCopyPropertyHint {
+struct GroupRepeatPropertyHint {
   /** @brief Element containing the candidate property. */
   std::int32_t nodeId = 0;
   /** @brief Canonical property key such as `channels` or `features`. */
@@ -1064,22 +1064,22 @@ struct GroupCopyPropertyHint {
 };
 
 /**
- * @brief Derived validity and diagnostics for a group's requested copies.
+ * @brief Derived validity and diagnostics for a group's requested repeats.
  */
-struct GroupCopyStatus {
-  /** @brief User-authored copy count stored on the group. */
-  int requestedCopies = defaultGroupCopies;
+struct GroupRepeatStatus {
+  /** @brief User-authored repeat count stored on the group. */
+  int requestedRepeats = defaultGroupRepeats;
   /** @brief Count safe to materialize; one while the request is inactive. */
-  int effectiveCopies = defaultGroupCopies;
-  /** @brief True when requested N can chain after per-copy properties. */
+  int effectiveRepeats = defaultGroupRepeats;
+  /** @brief True when requested N can chain after per-repeat properties. */
   bool active = true;
   /** @brief Persistent user-facing explanation when inactive. */
   std::string message;
   /** @brief Candidate parameters that can make the chain shape-compatible. */
-  std::vector<GroupCopyPropertyHint> propertyHints;
+  std::vector<GroupRepeatPropertyHint> propertyHints;
 };
 
-/** @brief Outcome of a group create/membership/copies mutation. */
+/** @brief Outcome of a group create/membership/repeats mutation. */
 struct GroupActionResult {
   /** @brief True when the graph was mutated. */
   bool accepted = false;
@@ -1089,7 +1089,7 @@ struct GroupActionResult {
   std::int32_t groupId = 0;
 };
 
-/** @brief Boundary-crossing port used by group I/O pins and copy chaining. */
+/** @brief Boundary-crossing port used by group I/O pins and repeat chaining. */
 struct GroupBoundaryPort {
   /** @brief Member pin that the group pin mediates. */
   std::int32_t memberPinId = 0;
@@ -1178,12 +1178,12 @@ struct GraphNode {
   /** @brief Owning group, or empty when the node is on the root canvas. */
   std::optional<std::int32_t> parentGroupId;
   /**
-   * @brief Per-copy weights for enclosing groups with N&gt;1.
+   * @brief Per-repeat weights for enclosing groups with N&gt;1.
    *
    * Slot 0 mirrors `seed` / `weightsPath` / `artifactPath`. Extra slots hold
-   * independent copies that the UI never draws.
+   * independent repeats that the UI never draws.
    */
-  std::vector<CopyWeightSlot> copySlots;
+  std::vector<RepeatWeightSlot> repeatSlots;
 };
 
 /** @brief Directed connection between two graph pins. */
@@ -1340,21 +1340,21 @@ inline std::int32_t clampSeed(std::int32_t seed) noexcept {
 }
 
 /**
- * @brief Derives a per-copy randomization seed from a visible base seed.
+ * @brief Derives a per-repeat randomization seed from a visible base seed.
  * @param baseSeed Seed shown on the editable template element (slot 0).
- * @param copyIndex Zero-based materialized copy index.
- * @return `baseSeed + copyIndex` wrapped into `[minimumSeed, maximumSeed]`.
+ * @param repeatIndex Zero-based materialized repeat index.
+ * @return `baseSeed + repeatIndex` wrapped into `[minimumSeed, maximumSeed]`.
  *
  * Live audition and freeze use these seeds. Training builds fresh PyTorch
  * modules with framework default initialization and does not consume them.
  */
-inline std::int32_t seedForCopySlot(std::int32_t baseSeed,
-                                   std::size_t copyIndex) noexcept {
+inline std::int32_t seedForRepeatSlot(std::int32_t baseSeed,
+                                   std::size_t repeatIndex) noexcept {
   constexpr auto span =
       static_cast<std::int64_t>(maximumSeed) - minimumSeed + 1;
   const auto mixed =
       (static_cast<std::int64_t>(clampSeed(baseSeed)) -
-       minimumSeed + static_cast<std::int64_t>(copyIndex)) %
+       minimumSeed + static_cast<std::int64_t>(repeatIndex)) %
       span;
   return static_cast<std::int32_t>(minimumSeed +
                                   (mixed < 0 ? mixed + span : mixed));
@@ -1370,7 +1370,7 @@ inline constexpr float mapWidth = 190.0f;
 inline constexpr float mapHeight = 125.0f;
 /** @brief Padding around members when a group is created or fitted. */
 inline constexpr float groupFitPadding = 28.0f;
-/** @brief Extra top padding reserved for the group header and copies control. */
+/** @brief Extra top padding reserved for the group header and repeats control. */
 inline constexpr float groupHeaderHeight = 52.0f;
 /** @brief Inset from a group box origin used when mapping member coordinates. */
 inline constexpr float groupContentPad = 8.0f;
@@ -1383,11 +1383,11 @@ inline juce::Point<float> groupContentOffset() noexcept {
 }
 
 /**
- * @brief Captures a node's primary weight fields into a copy slot.
+ * @brief Captures a node's primary weight fields into a repeat slot.
  * @param node Source element.
  */
-inline CopyWeightSlot copySlotFromNode(const GraphNode &node) {
-  CopyWeightSlot slot;
+inline RepeatWeightSlot repeatSlotFromNode(const GraphNode &node) {
+  RepeatWeightSlot slot;
   slot.seed = node.seed;
   slot.provenance = node.weightsProvenance;
   slot.weightsPath = node.weightsPath;
@@ -1396,11 +1396,11 @@ inline CopyWeightSlot copySlotFromNode(const GraphNode &node) {
 }
 
 /**
- * @brief Writes one copy slot onto a node's primary weight fields.
+ * @brief Writes one repeat slot onto a node's primary weight fields.
  * @param node Destination element.
- * @param slot Independent copy identity to apply.
+ * @param slot Independent repeat identity to apply.
  */
-inline void applyCopySlot(GraphNode &node, const CopyWeightSlot &slot) {
+inline void applyRepeatSlot(GraphNode &node, const RepeatWeightSlot &slot) {
   node.seed = slot.seed;
   node.weightsProvenance = slot.provenance;
   node.weightsPath = slot.weightsPath;
@@ -1409,36 +1409,36 @@ inline void applyCopySlot(GraphNode &node, const CopyWeightSlot &slot) {
 }
 
 /**
- * @brief Ensures @p node has @p count copy slots, deriving or cloning on growth.
- * @param node Element whose enclosing groups changed copy count.
+ * @brief Ensures @p node has @p count repeat slots, deriving or cloning on growth.
+ * @param node Element whose enclosing groups changed repeat count.
  * @param count Required slot count (≥ 1).
  *
- * Random-provenance slots use `seedForCopySlot` so raising N does not leave
+ * Random-provenance slots use `seedForRepeatSlot` so raising N does not leave
  * identical live weights. File-provenance slots still clone the previous last
  * path (FR-017c).
  */
-inline void ensureCopySlotCount(GraphNode &node, int count) {
+inline void ensureRepeatSlotCount(GraphNode &node, int count) {
   const auto target = std::max(1, count);
-  if (node.copySlots.empty())
-    node.copySlots.push_back(copySlotFromNode(node));
-  node.copySlots.front() = copySlotFromNode(node);
-  while (static_cast<int>(node.copySlots.size()) < target) {
-    CopyWeightSlot slot = node.copySlots.back();
-    const auto index = node.copySlots.size();
+  if (node.repeatSlots.empty())
+    node.repeatSlots.push_back(repeatSlotFromNode(node));
+  node.repeatSlots.front() = repeatSlotFromNode(node);
+  while (static_cast<int>(node.repeatSlots.size()) < target) {
+    RepeatWeightSlot slot = node.repeatSlots.back();
+    const auto index = node.repeatSlots.size();
     if (slot.provenance == WeightsProvenance::random)
-      slot.seed = seedForCopySlot(node.seed, index);
-    node.copySlots.push_back(std::move(slot));
+      slot.seed = seedForRepeatSlot(node.seed, index);
+    node.repeatSlots.push_back(std::move(slot));
   }
-  if (static_cast<int>(node.copySlots.size()) > target)
-    node.copySlots.resize(static_cast<std::size_t>(target));
-  applyCopySlot(node, node.copySlots.front());
+  if (static_cast<int>(node.repeatSlots.size()) > target)
+    node.repeatSlots.resize(static_cast<std::size_t>(target));
+  applyRepeatSlot(node, node.repeatSlots.front());
 }
 
 /**
- * @brief Returns true when a property can store one numeric value per copy.
+ * @brief Returns true when a property can store one numeric value per repeat.
  * @param property Candidate inline property.
  */
-inline bool propertySupportsCopyValueList(const NodeProperty &property) noexcept {
+inline bool propertySupportsRepeatValueList(const NodeProperty &property) noexcept {
   if (property.kind != PropertyKind::integer &&
       property.kind != PropertyKind::real)
     return false;
@@ -1457,29 +1457,29 @@ inline bool propertySupportsPreserveIn(const NodeProperty &property) noexcept {
 }
 
 /**
- * @brief Product of ancestor copy counts (P), or 1 when @p copyCounts is empty.
- * @param copyCounts Outer→inner copy-count vector.
+ * @brief Product of ancestor repeat counts (P), or 1 when @p repeatCounts is empty.
+ * @param repeatCounts Outer→inner repeat-count vector.
  */
-inline int copyCountProduct(const std::vector<int> &copyCounts) noexcept {
+inline int repeatCountProduct(const std::vector<int> &repeatCounts) noexcept {
   int product = 1;
-  for (const auto copies : copyCounts)
-    product *= std::max(1, copies);
+  for (const auto repeats : repeatCounts)
+    product *= std::max(1, repeats);
   return std::max(1, product);
 }
 
 /**
- * @brief Dividing-set lengths D(C) = {1} ∪ suffix products of @p copyCounts.
- * @param copyCounts Outer→inner copy-count vector C.
+ * @brief Dividing-set lengths D(C) = {1} ∪ suffix products of @p repeatCounts.
+ * @param repeatCounts Outer→inner repeat-count vector C.
  * @return Sorted unique legal authored lengths including 1 and P.
  */
 inline std::vector<int>
-dividingSetLengths(const std::vector<int> &copyCounts) {
+dividingSetLengths(const std::vector<int> &repeatCounts) {
   std::vector<int> lengths;
   lengths.push_back(1);
   int product = 1;
-  for (int index = static_cast<int>(copyCounts.size()) - 1; index >= 0;
+  for (int index = static_cast<int>(repeatCounts.size()) - 1; index >= 0;
        --index) {
-    product *= std::max(1, copyCounts[static_cast<std::size_t>(index)]);
+    product *= std::max(1, repeatCounts[static_cast<std::size_t>(index)]);
     lengths.push_back(product);
   }
   std::sort(lengths.begin(), lengths.end());
@@ -1488,15 +1488,15 @@ dividingSetLengths(const std::vector<int> &copyCounts) {
 }
 
 /**
- * @brief Returns true when @p length is in D(@p copyCounts).
+ * @brief Returns true when @p length is in D(@p repeatCounts).
  * @param length Authored list length L.
- * @param copyCounts Outer→inner copy-count vector.
+ * @param repeatCounts Outer→inner repeat-count vector.
  */
 inline bool isDividingSetLength(int length,
-                                const std::vector<int> &copyCounts) noexcept {
+                                const std::vector<int> &repeatCounts) noexcept {
   if (length < 1)
     return false;
-  for (const auto allowed : dividingSetLengths(copyCounts)) {
+  for (const auto allowed : dividingSetLengths(repeatCounts)) {
     if (allowed == length)
       return true;
   }
@@ -1506,12 +1506,12 @@ inline bool isDividingSetLength(int length,
 /**
  * @brief User-facing list of allowed authored lengths for @p label.
  * @param label Property label.
- * @param copyCounts Outer→inner copy-count vector.
+ * @param repeatCounts Outer→inner repeat-count vector.
  */
 inline std::string
-formatAllowedCopyListLengths(const std::string &label,
-                             const std::vector<int> &copyCounts) {
-  const auto allowed = dividingSetLengths(copyCounts);
+formatAllowedRepeatListLengths(const std::string &label,
+                             const std::vector<int> &repeatCounts) {
+  const auto allowed = dividingSetLengths(repeatCounts);
   std::string text = label + " needs a list of length ";
   for (std::size_t index = 0; index < allowed.size(); ++index) {
     if (index > 0 && index + 1 == allowed.size())
@@ -1527,37 +1527,37 @@ formatAllowedCopyListLengths(const std::string &label,
  * @brief Authored list length L stored on @p property (at least 1).
  * @param property Source property.
  */
-inline int authoredCopyListLength(const NodeProperty &property) noexcept {
+inline int authoredRepeatListLength(const NodeProperty &property) noexcept {
   if (property.kind == PropertyKind::real)
-    return std::max(1, static_cast<int>(property.copyFloatValues.size()));
-  return std::max(1, static_cast<int>(property.copyIntValues.size()));
+    return std::max(1, static_cast<int>(property.repeatFloatValues.size()));
+  return std::max(1, static_cast<int>(property.repeatIntValues.size()));
 }
 
 /**
- * @brief Marks @p property valid or invalid for nest @p copyCounts without resizing.
+ * @brief Marks @p property valid or invalid for nest @p repeatCounts without resizing.
  * @param property List-capable property whose authored length is preserved.
- * @param copyCounts Outer→inner copy-count vector for the owner node.
+ * @param repeatCounts Outer→inner repeat-count vector for the owner node.
  */
-inline void syncCopyListValidity(NodeProperty &property,
-                                 const std::vector<int> &copyCounts) {
-  if (!propertySupportsCopyValueList(property))
+inline void syncRepeatListValidity(NodeProperty &property,
+                                 const std::vector<int> &repeatCounts) {
+  if (!propertySupportsRepeatValueList(property))
     return;
   if (property.kind == PropertyKind::real) {
-    if (property.copyFloatValues.empty())
-      property.copyFloatValues.push_back(property.floatValue);
-  } else if (property.copyIntValues.empty()) {
-    property.copyIntValues.push_back(
+    if (property.repeatFloatValues.empty())
+      property.repeatFloatValues.push_back(property.floatValue);
+  } else if (property.repeatIntValues.empty()) {
+    property.repeatIntValues.push_back(
         property.preserveInBound ? 0 : property.value);
   }
-  const auto length = authoredCopyListLength(property);
-  if (isDividingSetLength(length, copyCounts)) {
-    property.copyListInvalid = false;
-    property.copyListInvalidMessage.clear();
+  const auto length = authoredRepeatListLength(property);
+  if (isDividingSetLength(length, repeatCounts)) {
+    property.repeatListInvalid = false;
+    property.repeatListInvalidMessage.clear();
     return;
   }
-  property.copyListInvalid = true;
-  property.copyListInvalidMessage =
-      formatAllowedCopyListLengths(property.label, copyCounts) +
+  property.repeatListInvalid = true;
+  property.repeatListInvalidMessage =
+      formatAllowedRepeatListLengths(property.label, repeatCounts) +
       " for this nest (authored length " + std::to_string(length) +
       " is no longer valid)";
 }
@@ -1635,33 +1635,33 @@ inline void pruneStickySpineId(std::vector<std::int32_t> &stickySpine,
 }
 
 /**
- * @brief Integer used by copy slot @p slot, falling back to the primary value.
+ * @brief Integer used by repeat slot @p slot, falling back to the primary value.
  * @param property Source property.
- * @param slot Copy index (0 is the visible element).
+ * @param slot Repeat index (0 is the visible element).
  */
-inline int integerValueForCopy(const NodeProperty &property, int slot) noexcept {
-  if (property.copyIntValues.empty())
+inline int integerValueForRepeat(const NodeProperty &property, int slot) noexcept {
+  if (property.repeatIntValues.empty())
     return property.value;
-  const auto length = static_cast<int>(property.copyIntValues.size());
+  const auto length = static_cast<int>(property.repeatIntValues.size());
   const auto index = ((slot % length) + length) % length;
-  return property.copyIntValues[static_cast<std::size_t>(index)];
+  return property.repeatIntValues[static_cast<std::size_t>(index)];
 }
 
 /**
- * @brief Real used by copy slot @p slot, tiling the authored list when L &lt; P.
+ * @brief Real used by repeat slot @p slot, tiling the authored list when L &lt; P.
  * @param property Source property.
- * @param slot Copy index (0 is the visible element).
+ * @param slot Repeat index (0 is the visible element).
  */
-inline float floatValueForCopy(const NodeProperty &property, int slot) noexcept {
-  if (property.copyFloatValues.empty())
+inline float floatValueForRepeat(const NodeProperty &property, int slot) noexcept {
+  if (property.repeatFloatValues.empty())
     return property.floatValue;
-  const auto length = static_cast<int>(property.copyFloatValues.size());
+  const auto length = static_cast<int>(property.repeatFloatValues.size());
   const auto index = ((slot % length) + length) % length;
-  return property.copyFloatValues[static_cast<std::size_t>(index)];
+  return property.repeatFloatValues[static_cast<std::size_t>(index)];
 }
 
 /**
- * @brief Ensures an authored copy list exists without pad/truncating to P.
+ * @brief Ensures an authored repeat list exists without pad/truncating to P.
  *
  * Empty lists are initialized from the primary scalar. Existing authored
  * lengths are left unchanged so nest changes can flag invalid L instead of
@@ -1669,52 +1669,52 @@ inline float floatValueForCopy(const NodeProperty &property, int slot) noexcept 
  * @param property Property to initialize.
  * @param count Ignored (kept for call-site compatibility); tiling uses P at read.
  */
-inline void ensurePropertyCopyCount(NodeProperty &property, int count) {
+inline void ensurePropertyRepeatCount(NodeProperty &property, int count) {
   (void)count;
-  if (!propertySupportsCopyValueList(property))
+  if (!propertySupportsRepeatValueList(property))
     return;
   if (property.kind == PropertyKind::real) {
-    if (property.copyFloatValues.empty())
-      property.copyFloatValues.push_back(property.floatValue);
+    if (property.repeatFloatValues.empty())
+      property.repeatFloatValues.push_back(property.floatValue);
     return;
   }
-  if (property.copyIntValues.empty())
-    property.copyIntValues.push_back(
+  if (property.repeatIntValues.empty())
+    property.repeatIntValues.push_back(
         property.preserveInBound ? 0 : property.value);
 }
 
 /**
  * @brief Initializes empty authored lists on @p node without forcing size P.
- * @param node Element whose enclosing copy product changed.
- * @param count Ignored; validity is synced separately from the copy-count vector.
+ * @param node Element whose enclosing repeat product changed.
+ * @param count Ignored; validity is synced separately from the repeat-count vector.
  */
-inline void ensureNodePropertyCopyCounts(GraphNode &node, int count) {
+inline void ensureNodePropertyRepeatCounts(GraphNode &node, int count) {
   for (auto &property : node.properties)
-    ensurePropertyCopyCount(property, count);
+    ensurePropertyRepeatCount(property, count);
 }
 
 /**
- * @brief Writes one copy slot's numeric property values onto the primary fields.
+ * @brief Writes one repeat slot's numeric property values onto the primary fields.
  * @param node Destination element (typically an unrolled clone).
- * @param slot Copy index to apply.
+ * @param slot Repeat index to apply.
  */
-inline void applyCopyPropertyValues(GraphNode &node, int slot) {
+inline void applyRepeatPropertyValues(GraphNode &node, int slot) {
   for (auto &property : node.properties) {
-    if (property.preserveInBound || property.copyListInvalid)
+    if (property.preserveInBound || property.repeatListInvalid)
       continue;
     if (property.kind == PropertyKind::real)
-      property.setFloatValue(floatValueForCopy(property, slot));
+      property.setFloatValue(floatValueForRepeat(property, slot));
     else if (property.kind == PropertyKind::integer)
-      property.setValue(integerValueForCopy(property, slot));
+      property.setValue(integerValueForRepeat(property, slot));
   }
 }
 
 /**
- * @brief Formats the authored (short) copy-list for the editable field.
+ * @brief Formats the authored (short) repeat-list for the editable field.
  * @param property Source property.
  */
-inline std::string formatAuthoredPropertyCopyList(const NodeProperty &property) {
-  const auto count = authoredCopyListLength(property);
+inline std::string formatAuthoredPropertyRepeatList(const NodeProperty &property) {
+  const auto count = authoredRepeatListLength(property);
   std::string text;
   for (int index = 0; index < count; ++index) {
     if (index > 0)
@@ -1724,10 +1724,10 @@ inline std::string formatAuthoredPropertyCopyList(const NodeProperty &property) 
     else if (property.kind == PropertyKind::real) {
       char buffer[32];
       std::snprintf(buffer, sizeof(buffer), "%.2f",
-                    floatValueForCopy(property, index));
+                    floatValueForRepeat(property, index));
       text += buffer;
     } else {
-      text += std::to_string(integerValueForCopy(property, index));
+      text += std::to_string(integerValueForRepeat(property, index));
     }
   }
   return text;
@@ -1736,16 +1736,16 @@ inline std::string formatAuthoredPropertyCopyList(const NodeProperty &property) 
 /**
  * @brief Formats the expanded P-length preview (tiling the authored list).
  *
- * Values are nested with @c [] along @p copyCounts so inner-group copies are
- * grouped inside outer-group copies.
+ * Values are nested with @c [] along @p repeatCounts so inner-group repeats are
+ * grouped inside outer-group repeats.
  * @param property Source property.
- * @param copyCount Expanded slot count P.
- * @param copyCounts Outer→inner ancestor copy-count vector C.
+ * @param repeatCount Expanded slot count P.
+ * @param repeatCounts Outer→inner ancestor repeat-count vector C.
  */
 inline std::string
-formatExpandedPropertyCopyList(const NodeProperty &property, int copyCount,
-                               const std::vector<int> &copyCounts = {}) {
-  const auto count = std::max(1, copyCount);
+formatExpandedPropertyRepeatList(const NodeProperty &property, int repeatCount,
+                               const std::vector<int> &repeatCounts = {}) {
+  const auto count = std::max(1, repeatCount);
   std::vector<std::string> items;
   items.reserve(static_cast<std::size_t>(count));
   for (int index = 0; index < count; ++index) {
@@ -1754,42 +1754,42 @@ formatExpandedPropertyCopyList(const NodeProperty &property, int copyCount,
     else if (property.kind == PropertyKind::real) {
       char buffer[32];
       std::snprintf(buffer, sizeof(buffer), "%.2f",
-                    floatValueForCopy(property, index));
+                    floatValueForRepeat(property, index));
       items.emplace_back(buffer);
     } else {
-      items.push_back(std::to_string(integerValueForCopy(property, index)));
+      items.push_back(std::to_string(integerValueForRepeat(property, index)));
     }
   }
-  return formatHierarchicalCopyList(items, copyCounts);
+  return formatHierarchicalRepeatList(items, repeatCounts);
 }
 
 /**
- * @brief Formats N numeric copy values as a comma-separated list.
+ * @brief Formats N numeric repeat values as a comma-separated list.
  * @param property Source property.
- * @param copyCount Number of copies to include.
- * @deprecated Use formatAuthoredPropertyCopyList / formatExpandedPropertyCopyList.
+ * @param repeatCount Number of repeats to include.
+ * @deprecated Use formatAuthoredPropertyRepeatList / formatExpandedPropertyRepeatList.
  */
-inline std::string formatPropertyCopyList(const NodeProperty &property,
-                                          int copyCount) {
-  return formatExpandedPropertyCopyList(property, copyCount);
+inline std::string formatPropertyRepeatList(const NodeProperty &property,
+                                          int repeatCount) {
+  return formatExpandedPropertyRepeatList(property, repeatCount);
 }
 
 /**
- * @brief Parses a comma-separated authored copy list (dividing-set length).
+ * @brief Parses a comma-separated authored repeat list (dividing-set length).
  *
  * Commas separate values. Periods are the decimal mark. Length L must be in
  * D(C). The reserved token `in` is accepted when @p allowPreserveIn is true
  * and every token is `in`.
  * @param property Property providing kind and legal ranges.
- * @param ancestorCopyCounts Outer→inner copy-count vector C.
+ * @param ancestorRepeatCounts Outer→inner repeat-count vector C.
  * @param text User-entered list.
  * @param allowPreserveIn True when this field may bind to `in`.
  */
-inline PropertyCopyListParse
-parsePropertyCopyList(const NodeProperty &property,
-                      const std::vector<int> &ancestorCopyCounts,
+inline PropertyRepeatListParse
+parsePropertyRepeatList(const NodeProperty &property,
+                      const std::vector<int> &ancestorRepeatCounts,
                       const std::string &text, bool allowPreserveIn = false) {
-  PropertyCopyListParse result;
+  PropertyRepeatListParse result;
   std::vector<std::string> tokens;
   std::string_view remaining(text);
   while (!remaining.empty() || tokens.empty()) {
@@ -1798,7 +1798,7 @@ parsePropertyCopyList(const NodeProperty &property,
         comma == std::string_view::npos ? remaining : remaining.substr(0, comma);
     const auto first = token.find_first_not_of(" \t");
     if (first == std::string_view::npos) {
-      result.message = property.label + " uses commas to separate copy values";
+      result.message = property.label + " uses commas to separate repeat values";
       return result;
     }
     const auto last = token.find_last_not_of(" \t");
@@ -1807,7 +1807,7 @@ parsePropertyCopyList(const NodeProperty &property,
       break;
     remaining = remaining.substr(comma + 1);
     if (remaining.empty()) {
-      result.message = property.label + " uses commas to separate copy values";
+      result.message = property.label + " uses commas to separate repeat values";
       return result;
     }
   }
@@ -1832,9 +1832,9 @@ parsePropertyCopyList(const NodeProperty &property,
       return result;
     }
     if (!isDividingSetLength(static_cast<int>(tokens.size()),
-                             ancestorCopyCounts)) {
+                             ancestorRepeatCounts)) {
       result.message =
-          formatAllowedCopyListLengths(property.label, ancestorCopyCounts);
+          formatAllowedRepeatListLengths(property.label, ancestorRepeatCounts);
       return result;
     }
     result.accepted = true;
@@ -1844,9 +1844,9 @@ parsePropertyCopyList(const NodeProperty &property,
   }
 
   if (!isDividingSetLength(static_cast<int>(tokens.size()),
-                           ancestorCopyCounts)) {
+                           ancestorRepeatCounts)) {
     result.message =
-        formatAllowedCopyListLengths(property.label, ancestorCopyCounts);
+        formatAllowedRepeatListLengths(property.label, ancestorRepeatCounts);
     return result;
   }
 
@@ -1925,15 +1925,15 @@ parsePropertyCopyList(const NodeProperty &property,
 }
 
 /**
- * @brief Parses a copy list when only P is known (D = {1, P}).
+ * @brief Parses a repeat list when only P is known (D = {1, P}).
  * @param property Property providing kind and legal ranges.
- * @param copyCount Expanded slot count P.
+ * @param repeatCount Expanded slot count P.
  * @param text User-entered list.
  */
-inline PropertyCopyListParse
-parsePropertyCopyList(const NodeProperty &property, int copyCount,
+inline PropertyRepeatListParse
+parsePropertyRepeatList(const NodeProperty &property, int repeatCount,
                       const std::string &text) {
-  const auto target = std::max(1, copyCount);
-  return parsePropertyCopyList(property, std::vector<int>{target}, text, false);
+  const auto target = std::max(1, repeatCount);
+  return parsePropertyRepeatList(property, std::vector<int>{target}, text, false);
 }
 } // namespace openyourbox::graph

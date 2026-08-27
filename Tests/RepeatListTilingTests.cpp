@@ -32,12 +32,13 @@ int main() {
   using openyourbox::graph::NodeType;
   using openyourbox::graph::PropertyKind;
   using openyourbox::graph::dividingSetLengths;
-  using openyourbox::graph::formatExpandedPropertyCopyList;
-  using openyourbox::graph::formatHierarchicalCopyList;
+  using openyourbox::graph::formatExpandedPropertyRepeatList;
+  using openyourbox::graph::formatHierarchicalRepeatList;
   using openyourbox::graph::formatCollapsedGroupPinShapes;
-  using openyourbox::graph::formatShapeCopyList;
+  using openyourbox::graph::formatShapeRepeatList;
   using openyourbox::graph::isDividingSetLength;
-  using openyourbox::graph::parsePropertyCopyList;
+  using openyourbox::graph::parsePropertyRepeatList;
+  using openyourbox::graph::integerValueForRepeat;
   using openyourbox::graph::updateHierarchyStickySpine;
   juce::ScopedJuceInitialiser_GUI juceInitialiser;
   bool passed = true;
@@ -51,31 +52,31 @@ int main() {
                    "illegal length 3 is outside the dividing set");
 
   const std::vector<std::string> eight{"1", "2", "3", "4", "5", "6", "7", "8"};
-  passed &= expect(formatHierarchicalCopyList(eight, nest) ==
+  passed &= expect(formatHierarchicalRepeatList(eight, nest) ==
                        "[[[1, 2], [3, 4]], [[5, 6], [7, 8]]]",
                    "three-level nest formats as a list of lists of lists");
-  passed &= expect(formatHierarchicalCopyList({"a", "b", "c"}, {3}) ==
+  passed &= expect(formatHierarchicalRepeatList({"a", "b", "c"}, {3}) ==
                        "[a, b, c]",
-                   "one copy axis wraps a single bracketed list");
-  passed &= expect(formatHierarchicalCopyList({"a", "b", "c", "d"}, {2, 2}) ==
+                   "one repeat axis wraps a single bracketed list");
+  passed &= expect(formatHierarchicalRepeatList({"a", "b", "c", "d"}, {2, 2}) ==
                        "[[a, b], [c, d]]",
-                   "two copy axes format as a list of lists");
-  passed &= expect(formatHierarchicalCopyList({"x"}, {}) == "x",
+                   "two repeat axes format as a list of lists");
+  passed &= expect(formatHierarchicalRepeatList({"x"}, {}) == "x",
                    "a single ungrouped value is unbracketed");
-  passed &= expect(formatHierarchicalCopyList({"a", "b", "c"}, {1, 3}) ==
+  passed &= expect(formatHierarchicalRepeatList({"a", "b", "c"}, {1, 3}) ==
                        "[a, b, c]",
-                   "copy axes of 1 are skipped when nesting");
+                   "repeat axes of 1 are skipped when nesting");
 
   NodeProperty preview;
   preview.key = "features";
   preview.label = "Features";
   preview.kind = PropertyKind::integer;
-  preview.copyIntValues = {1, 2, 3, 4, 5, 6, 7, 8};
-  passed &= expect(formatExpandedPropertyCopyList(preview, 8, nest) ==
+  preview.repeatIntValues = {1, 2, 3, 4, 5, 6, 7, 8};
+  passed &= expect(formatExpandedPropertyRepeatList(preview, 8, nest) ==
                        "[[[1, 2], [3, 4]], [[5, 6], [7, 8]]]",
                    "expanded property preview nests along C");
-  preview.copyIntValues = {1, 2};
-  passed &= expect(formatExpandedPropertyCopyList(preview, 8, nest) ==
+  preview.repeatIntValues = {1, 2};
+  passed &= expect(formatExpandedPropertyRepeatList(preview, 8, nest) ==
                        "[[[1, 2], [1, 2]], [[1, 2], [1, 2]]]",
                    "tiled L=2 preview keeps inner-pair grouping");
 
@@ -87,57 +88,57 @@ int main() {
   eightCh.channels = 8;
   openyourbox::graph::ShapeSignature sixteenCh;
   sixteenCh.channels = 16;
-  passed &= expect(formatShapeCopyList({twoCh, fourCh, eightCh, sixteenCh},
+  passed &= expect(formatShapeRepeatList({twoCh, fourCh, eightCh, sixteenCh},
                                        twoCh, {2, 2}) ==
                        "[[2ch, 4ch], [8ch, 16ch]]",
                    "pin shapes nest as a list of lists");
-  passed &= expect(formatShapeCopyList({}, twoCh, {}) == "2ch",
+  passed &= expect(formatShapeRepeatList({}, twoCh, {}) == "2ch",
                    "a pin outside a group still formats its shape");
-  passed &= expect(formatShapeCopyList({twoCh}, twoCh, {1}) == "2ch",
-                   "copies=1 still formats a shape without brackets");
+  passed &= expect(formatShapeRepeatList({twoCh}, twoCh, {1}) == "2ch",
+                   "repeats=1 still formats a shape without brackets");
   passed &= expect(formatCollapsedGroupPinShapes({twoCh, fourCh, eightCh},
                                                  twoCh, {3}, true) == "8ch",
-                   "collapsed group output shows last copy, not the inner list");
+                   "collapsed group output shows last repeat, not the inner list");
   passed &= expect(formatCollapsedGroupPinShapes({twoCh, fourCh, eightCh},
                                                  twoCh, {3}, false) == "2ch",
-                   "collapsed group input shows first copy, not the inner list");
+                   "collapsed group input shows first repeat, not the inner list");
   passed &= expect(formatCollapsedGroupPinShapes(
                        {twoCh, fourCh, eightCh, twoCh, fourCh, eightCh}, twoCh,
                        {2, 3}, true) == "[8ch, 8ch]",
-                   "collapsed group output lists ancestor copies of last-out");
+                   "collapsed group output lists ancestor repeats of last-out");
   passed &= expect(formatCollapsedGroupPinShapes(
                        {twoCh, fourCh, eightCh, twoCh, fourCh, eightCh}, twoCh,
                        {2, 3}, false) == "[2ch, 2ch]",
-                   "collapsed group input lists ancestor copies of first-in");
+                   "collapsed group input lists ancestor repeats of first-in");
   passed &=
       expect(formatCollapsedGroupPinShapes(
                  {twoCh, fourCh, eightCh, twoCh, fourCh, sixteenCh}, twoCh,
                  {2, 3}, true) == "[8ch, 16ch]",
-             "nested ancestor last-outs can differ per outer copy");
+             "nested ancestor last-outs can differ per outer repeat");
   passed &= expect(
       formatCollapsedGroupPinShapes(
           {twoCh, fourCh, eightCh, twoCh, fourCh, sixteenCh, twoCh, fourCh,
            eightCh, twoCh, fourCh, sixteenCh},
           twoCh, {2, 2, 3}, true) == "[[8ch, 16ch], [8ch, 16ch]]",
-      "collapsed pins nest ancestor copy axes outside the folded group");
+      "collapsed pins nest ancestor repeat axes outside the folded group");
   passed &= expect(formatCollapsedGroupPinShapes({twoCh, eightCh}, twoCh,
                                                  {2, 1}, true) == "[2ch, 8ch]",
-                   "own copies=1 still lists ancestor copies on the group box");
+                   "own repeats=1 still lists ancestor repeats on the group box");
   passed &= expect(formatCollapsedGroupPinShapes({twoCh, fourCh, eightCh},
                                                  twoCh, {1}, true) == "8ch",
-                   "parent copies=1 folds nested inner copies to last-out");
+                   "parent repeats=1 folds nested inner repeats to last-out");
   passed &= expect(formatCollapsedGroupPinShapes(
                        {twoCh, fourCh, eightCh, twoCh, fourCh, eightCh}, twoCh,
                        {1}, true) == "8ch",
-                   "parent copies=1 folds a deeper nested copy product to last-out");
+                   "parent repeats=1 folds a deeper nested repeat product to last-out");
   passed &= expect(formatCollapsedGroupPinShapes(
                        {twoCh, fourCh, eightCh, twoCh, fourCh, sixteenCh}, twoCh,
                        {2}, true) == "16ch",
-                   "collapsed parent folds own copies and nested copies together");
+                   "collapsed parent folds own repeats and nested repeats together");
   passed &= expect(formatCollapsedGroupPinShapes(
                        {twoCh, fourCh, eightCh, twoCh, fourCh, sixteenCh}, twoCh,
                        {2, 1}, true) == "[8ch, 16ch]",
-                   "copies=1 group still lists ancestor copies of nested last-out");
+                   "repeats=1 group still lists ancestor repeats of nested last-out");
 
   NodeProperty channels;
   channels.key = "channels";
@@ -146,31 +147,31 @@ int main() {
   channels.minimum = 1;
   channels.maximum = 1024;
   channels.value = 16;
-  const auto tiledTwo = parsePropertyCopyList(channels, nest, "16, 32", false);
+  const auto tiledTwo = parsePropertyRepeatList(channels, nest, "16, 32", false);
   passed &= expect(tiledTwo.accepted && tiledTwo.intValues.size() == 2,
                    "L=2 is accepted for a three-level nest");
-  channels.copyIntValues = tiledTwo.intValues;
-  passed &= expect(integerValueForCopy(channels, 0) == 16 &&
-                       integerValueForCopy(channels, 1) == 32 &&
-                       integerValueForCopy(channels, 2) == 16 &&
-                       integerValueForCopy(channels, 7) == 32,
+  channels.repeatIntValues = tiledTwo.intValues;
+  passed &= expect(integerValueForRepeat(channels, 0) == 16 &&
+                       integerValueForRepeat(channels, 1) == 32 &&
+                       integerValueForRepeat(channels, 2) == 16 &&
+                       integerValueForRepeat(channels, 7) == 32,
                    "L=2 tiles as s % L across P=8");
   const auto tiledFour =
-      parsePropertyCopyList(channels, nest, "1, 2, 3, 4", false);
+      parsePropertyRepeatList(channels, nest, "1, 2, 3, 4", false);
   passed &= expect(tiledFour.accepted && tiledFour.intValues.size() == 4,
                    "L=4 is accepted for a three-level nest");
-  channels.copyIntValues = tiledFour.intValues;
-  passed &= expect(integerValueForCopy(channels, 0) == 1 &&
-                       integerValueForCopy(channels, 4) == 1 &&
-                       integerValueForCopy(channels, 5) == 2,
+  channels.repeatIntValues = tiledFour.intValues;
+  passed &= expect(integerValueForRepeat(channels, 0) == 1 &&
+                       integerValueForRepeat(channels, 4) == 1 &&
+                       integerValueForRepeat(channels, 5) == 2,
                    "L=4 tiles across the outermost axis");
-  const auto refused = parsePropertyCopyList(channels, nest, "1, 2, 3", false);
+  const auto refused = parsePropertyRepeatList(channels, nest, "1, 2, 3", false);
   passed &= expect(!refused.accepted, "L=3 is refused for O=M=N=2");
 
-  const auto bound = parsePropertyCopyList(channels, nest, "in", true);
+  const auto bound = parsePropertyRepeatList(channels, nest, "in", true);
   passed &= expect(bound.accepted && bound.preserveIn,
                    "single in token binds a channels field");
-  const auto mixed = parsePropertyCopyList(channels, nest, "in, 32", true);
+  const auto mixed = parsePropertyRepeatList(channels, nest, "in, 32", true);
   passed &= expect(!mixed.accepted, "mixed in and numbers are refused");
   NodeProperty gain;
   gain.key = "gain";
@@ -178,7 +179,7 @@ int main() {
   gain.kind = PropertyKind::real;
   gain.floatMinimum = 0.1f;
   gain.floatMaximum = 10.0f;
-  const auto gainIn = parsePropertyCopyList(gain, nest, "in", true);
+  const auto gainIn = parsePropertyRepeatList(gain, nest, "in", true);
   passed &= expect(!gainIn.accepted, "in is refused on non-bindable fields");
 
   NodeGraph graph;
@@ -188,18 +189,18 @@ int main() {
   const auto extraOuter = graph.addNode(NodeType::activation, {240.0f, 0.0f});
   const auto inner = graph.createGroup({linear, partner});
   passed &= expect(inner.accepted, "inner group");
-  passed &= expect(graph.setGroupCopies(inner.groupId, 2).accepted, "inner N=2");
+  passed &= expect(graph.setGroupRepeats(inner.groupId, 2).accepted, "inner N=2");
   const auto middle = graph.createGroup({inner.groupId, extraMiddle});
   passed &= expect(middle.accepted, "middle group");
-  passed &= expect(graph.setGroupCopies(middle.groupId, 2).accepted, "middle M=2");
+  passed &= expect(graph.setGroupRepeats(middle.groupId, 2).accepted, "middle M=2");
   const auto outer = graph.createGroup({middle.groupId, extraOuter});
   passed &= expect(outer.accepted, "outer group");
-  passed &= expect(graph.setGroupCopies(outer.groupId, 2).accepted, "outer O=2");
-  passed &= expect(graph.effectiveCopyCount(linear) == 8, "P=8 for O=M=N=2");
-  const auto counts = graph.ancestorCopyCounts(linear);
+  passed &= expect(graph.setGroupRepeats(outer.groupId, 2).accepted, "outer O=2");
+  passed &= expect(graph.effectiveRepeatCount(linear) == 8, "P=8 for O=M=N=2");
+  const auto counts = graph.ancestorRepeatCounts(linear);
   passed &= expect(counts.size() == 3 && counts[0] == 2 && counts[2] == 2,
-                   "ancestor copy vector is outer to inner");
-  passed &= expect(graph.setPropertyCopyValues(linear, "features", {8, 16}),
+                   "ancestor repeat vector is outer to inner");
+  passed &= expect(graph.setPropertyRepeatValues(linear, "features", {8, 16}),
                    "authored L=2 commits");
   const auto *node = graph.findNode(linear);
   const openyourbox::graph::NodeProperty *features = nullptr;
@@ -209,7 +210,7 @@ int main() {
         features = &property;
     }
   }
-  passed &= expect(features != nullptr && features->copyIntValues.size() == 2,
+  passed &= expect(features != nullptr && features->repeatIntValues.size() == 2,
                    "authored length is stored, not expanded to P");
   passed &= expect(graph.setPropertyPreserveIn(linear, "features", 1),
                    "in binding commits on features");
@@ -224,10 +225,10 @@ int main() {
   passed &= expect(features != nullptr && features->preserveInBound,
                    "preserveInBound persists on the property");
 
-  passed &= expect(graph.setPropertyCopyValues(linear, "features", {4, 5, 6, 7}),
+  passed &= expect(graph.setPropertyRepeatValues(linear, "features", {4, 5, 6, 7}),
                    "L=4 remains valid");
-  passed &= expect(graph.setGroupCopies(outer.groupId, 3).accepted,
-                   "outer copies can change");
+  passed &= expect(graph.setGroupRepeats(outer.groupId, 3).accepted,
+                   "outer repeats can change");
   node = graph.findNode(linear);
   features = nullptr;
   if (node != nullptr) {
@@ -236,11 +237,11 @@ int main() {
         features = &property;
     }
   }
-  passed &= expect(features != nullptr && !features->copyListInvalid &&
-                       features->copyIntValues.size() == 4,
+  passed &= expect(features != nullptr && !features->repeatListInvalid &&
+                       features->repeatIntValues.size() == 4,
                    "L=4 still valid when O becomes 3 (P=12)");
-  passed &= expect(graph.setGroupCopies(inner.groupId, 3).accepted,
-                   "inner copies can change");
+  passed &= expect(graph.setGroupRepeats(inner.groupId, 3).accepted,
+                   "inner repeats can change");
   node = graph.findNode(linear);
   features = nullptr;
   if (node != nullptr) {
@@ -249,8 +250,8 @@ int main() {
         features = &property;
     }
   }
-  passed &= expect(features != nullptr && features->copyListInvalid &&
-                       features->copyIntValues.size() == 4,
+  passed &= expect(features != nullptr && features->repeatListInvalid &&
+                       features->repeatIntValues.size() == 4,
                    "L=4 is flagged invalid when N becomes 3");
 
   std::vector<std::int32_t> spine;

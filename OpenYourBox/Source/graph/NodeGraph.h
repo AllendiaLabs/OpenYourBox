@@ -134,17 +134,17 @@ public:
   bool toggleGroupCollapsed(std::int32_t groupId);
 
   /**
-   * @brief Sets independent serial copy count without drawing extra UI nodes.
+   * @brief Sets independent serial repeat count without drawing extra UI nodes.
    * @param groupId Target group.
-   * @param copies Requested N ≥ 1.
+   * @param repeats Requested N ≥ 1.
    */
-  GroupActionResult setGroupCopies(std::int32_t groupId, int copies);
+  GroupActionResult setGroupRepeats(std::int32_t groupId, int repeats);
 
   /**
    * @brief Randomizes live weighted leaves of a group, resetting BatchNorm.
    *
    * Members with the seed checkbox enabled keep `explicitSeed` as the base.
-   * Other weighted members draw a new base seed. Extra copy slots use
+   * Other weighted members draw a new base seed. Extra repeat slots use
    * `seed + i`. BatchNorm members are restored to identity affine parameters.
    * Frozen Gold members are left unchanged. These seeds drive live audition and
    * freeze only; training uses PyTorch default initialization.
@@ -230,16 +230,16 @@ public:
       const std::vector<std::int32_t> &selectedIds) const;
 
   /**
-   * @brief Returns a compile-only graph with invisible copies unrolled in series.
+   * @brief Returns a compile-only graph with invisible repeats unrolled in series.
    */
-  [[nodiscard]] NodeGraph withInvisibleCopiesMaterialized() const;
+  [[nodiscard]] NodeGraph withInvisibleRepeatsMaterialized() const;
 
   /**
-   * @brief Same as @ref withInvisibleCopiesMaterialized, optionally recording
+   * @brief Same as @ref withInvisibleRepeatsMaterialized, optionally recording
    *        which expanded node came from which original slot.
    * @param provenance Expanded node id → (original node id, absolute slot).
    */
-  [[nodiscard]] NodeGraph withInvisibleCopiesMaterialized(
+  [[nodiscard]] NodeGraph withInvisibleRepeatsMaterialized(
       std::unordered_map<std::int32_t, std::pair<std::int32_t, int>> *provenance)
       const;
 
@@ -342,7 +342,7 @@ public:
    * @brief Leaf processing nodes owned by a group, including nested groups.
    *
    * Includes nodes listed in @c memberIds and nodes whose @c parentGroupId is
-   * this group or a nested group, so materialized copy clones stay visible.
+   * this group or a nested group, so materialized repeat clones stay visible.
    * @param groupId Target group.
    */
   [[nodiscard]] std::vector<std::int32_t>
@@ -364,42 +364,42 @@ public:
       std::vector<std::int32_t> boxIds) const;
 
   /**
-   * @brief Product of copies on groups that contain @p nodeId.
+   * @brief Product of repeats on groups that contain @p nodeId.
    * @param nodeId Candidate node.
    */
-  [[nodiscard]] int effectiveCopyCount(std::int32_t nodeId) const;
+  [[nodiscard]] int effectiveRepeatCount(std::int32_t nodeId) const;
 
   /**
-   * @brief Product of currently chainable ancestor copy counts.
+   * @brief Product of currently chainable ancestor repeat counts.
    * @param nodeId Candidate node.
-   * @return Runtime copy product, using one for every inactive request.
+   * @return Runtime repeat product, using one for every inactive request.
    */
-  [[nodiscard]] int effectiveRuntimeCopyCount(std::int32_t nodeId) const;
+  [[nodiscard]] int effectiveRuntimeRepeatCount(std::int32_t nodeId) const;
 
   /**
-   * @brief Evaluates a group's requested serial copies without mutating it.
+   * @brief Evaluates a group's requested serial repeats without mutating it.
    *
-   * Copies are active when lanes match, a through-path exists, and each copy
-   * can feed the next after per-copy properties (`in`, channel lists). First-copy
-   * output need not match first-copy input.
+   * Repeats are active when lanes match, a through-path exists, and each repeat
+   * can feed the next after per-repeat properties (`in`, channel lists). First-repeat
+   * output need not match first-repeat input.
    * @param groupId Target group.
    * @return Effective count and actionable diagnostics.
    */
-  [[nodiscard]] GroupCopyStatus groupCopyStatus(std::int32_t groupId) const;
+  [[nodiscard]] GroupRepeatStatus groupRepeatStatus(std::int32_t groupId) const;
 
   /**
-   * @brief Returns the inactive-copy hint affecting one property, if any.
+   * @brief Returns the inactive-repeat hint affecting one property, if any.
    * @param nodeId Element containing the property.
    * @param propertyKey Canonical property key.
    */
   [[nodiscard]] std::optional<std::string>
-  groupCopyPropertyHint(std::int32_t nodeId,
+  groupRepeatPropertyHint(std::int32_t nodeId,
                         const std::string &propertyKey) const;
 
   /**
    * @brief Collects persistent graph warnings that are not compile errors.
    *
-   * Currently reports every group whose requested copies are inactive, named
+   * Currently reports every group whose requested repeats are inactive, named
    * so the editor can show one Warning control next to the Error box.
    * @return One user-facing line per warning, in group insertion order.
    */
@@ -412,17 +412,17 @@ public:
   [[nodiscard]] std::string graphWarningMessage() const;
 
   /**
-   * @brief Ancestor copy counts from outermost group to the node's parent.
+   * @brief Ancestor repeat counts from outermost group to the node's parent.
    * @param nodeId Candidate node.
    * @return Outer→inner vector C; empty when the node has no parent group.
    */
-  [[nodiscard]] std::vector<int> ancestorCopyCounts(std::int32_t nodeId) const;
+  [[nodiscard]] std::vector<int> ancestorRepeatCounts(std::int32_t nodeId) const;
 
   /**
-   * @brief Re-tiles or flags authored copy lists after a nest change.
-   * @param nodeId Leaf node whose ancestor copies may have changed.
+   * @brief Re-tiles or flags authored repeat lists after a nest change.
+   * @param nodeId Leaf node whose ancestor repeats may have changed.
    */
-  void validateAuthoredCopyLists(std::int32_t nodeId);
+  void validateAuthoredRepeatLists(std::int32_t nodeId);
 
   /**
    * @brief Validates and commits a directed connection.
@@ -465,7 +465,7 @@ public:
    * @param values Authored integers of legal length L.
    * @return True when the property exists, is list-capable, and was updated.
    */
-  bool setPropertyCopyValues(std::int32_t nodeId, const std::string &key,
+  bool setPropertyRepeatValues(std::int32_t nodeId, const std::string &key,
                              const std::vector<int> &values);
 
   /**
@@ -485,7 +485,7 @@ public:
    * @param values Authored reals of legal length L.
    * @return True when the property exists, is list-capable, and was updated.
    */
-  bool setFloatPropertyCopyValues(std::int32_t nodeId, const std::string &key,
+  bool setFloatPropertyRepeatValues(std::int32_t nodeId, const std::string &key,
                                   const std::vector<float> &values);
 
   /**
@@ -598,8 +598,8 @@ public:
    * @param seed New randomization seed for the visible element (slot 0).
    * @return True when the node owns weights.
    *
-   * Ensures copy-slot count matches enclosing group N. Non-BatchNorm members
-   * derive `seed + i` on every slot so N&gt;1 copies stay distinct for live
+   * Ensures repeat-slot count matches enclosing group N. Non-BatchNorm members
+   * derive `seed + i` on every slot so N&gt;1 repeats stay distinct for live
    * audition/freeze. Training does not use these seeds for initialization.
    */
   bool clearWeightsToSeed(std::int32_t nodeId, std::int32_t seed);

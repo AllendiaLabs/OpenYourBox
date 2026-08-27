@@ -237,7 +237,7 @@ private:
   /** @brief Editable signed seed text retained independently for each node. */
   std::unordered_map<std::int32_t, std::array<char, 16>> seedBuffers;
   /**
-   * @brief Editable comma-separated per-copy property text, keyed by
+   * @brief Editable comma-separated per-repeat property text, keyed by
    *        `nodeId:propertyKey`.
    */
   std::unordered_map<std::string, std::array<char, 512>> propertyListBuffers;

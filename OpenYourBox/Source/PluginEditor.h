@@ -242,7 +242,7 @@ private:
   openyourbox::ui::CopyrightModal copyrightModal;
   /** @brief Copyable error dialog for plugin, train, freeze, and model failures. */
   openyourbox::ui::ErrorModal errorModal;
-  /** @brief Copyable warning dialog for inactive copies and similar notices. */
+  /** @brief Copyable warning dialog for inactive repeats and similar notices. */
   openyourbox::ui::ErrorModal warningModal;
   /** @brief Side-panel tab: 0 info, 1 library, 2 capture, 3 train, 4 presets. */
   int sidePanelTab = 0;
@@ -250,7 +250,7 @@ private:
   float rightPanelWidth = 332.0f;
   /** @brief Tab index to select on the next frame, or -1. */
   int pendingSidePanelTab = -1;
-  /** @brief True while the copyright modal should be shown. */
+  /** @brief True while the repeatright modal should be shown. */
   bool copyrightModalVisible = false;
   /** @brief Last model/runtime error already presented in the error dialog. */
   juce::String lastPresentedError;

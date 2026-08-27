@@ -1227,10 +1227,10 @@ int main() {
                          groupedGraph.findNode(groupedOutput)->inputs.front().id);
     const auto grouped = groupedGraph.createGroup({first, second});
     passed &= expect(grouped.accepted &&
-                         groupedGraph.setGroupCopies(grouped.groupId, 2).accepted &&
-                         groupedGraph.groupCopyStatus(grouped.groupId).active,
-                     "explicit group interface activates compatible copies");
-    const auto prepared = groupedGraph.withInvisibleCopiesMaterialized();
+                         groupedGraph.setGroupRepeats(grouped.groupId, 2).accepted &&
+                         groupedGraph.groupRepeatStatus(grouped.groupId).active,
+                     "explicit group interface activates compatible repeats");
+    const auto prepared = groupedGraph.withInvisibleRepeatsMaterialized();
     int convolutionCount = 0;
     bool hasBoundaryHub = false;
     for (const auto &node : prepared.getNodes()) {
@@ -1240,7 +1240,7 @@ int main() {
           hasBoundaryHub || openyourbox::graph::isGroupBoundaryType(node.type);
     }
     passed &= expect(convolutionCount == 4 && !hasBoundaryHub,
-                     "runtime graph unrolls copies and removes boundary hubs");
+                     "runtime graph unrolls repeats and removes boundary hubs");
     passed &= expect(LiveGraphEngine::compile(prepared, options).succeeded(),
                      "flattened explicit group compiles in the live engine");
     const auto trainRequest = groupedGraph.createTrainRequest();
@@ -1250,7 +1250,7 @@ int main() {
                 std::string::npos &&
             trainRequest->graphFragment.find("group_output") ==
                 std::string::npos,
-        "training materializes active copies without editor-only hubs");
+        "training materializes active repeats without editor-only hubs");
     const auto freezeRequest =
         groupedGraph.createFreezeRequest({first, second});
     passed &= expect(
@@ -1312,7 +1312,7 @@ int main() {
     for (int mode = 0; mode <= 2; ++mode) {
       passed &= expect(modesGraph.setProperty(utility1, "mode", mode),
                        "fork utility mode can be set");
-      const auto prepared = modesGraph.withInvisibleCopiesMaterialized();
+      const auto prepared = modesGraph.withInvisibleRepeatsMaterialized();
       const auto compiled = LiveGraphEngine::compile(prepared, options);
       if (!compiled.succeeded())
         std::cerr << "fork mode " << mode
@@ -1359,7 +1359,7 @@ int main() {
                     hubFork.findNode(audioOut2)->inputs.front().id);
     const auto stack2 = hubFork.createGroup({body2.groupId, join2});
     passed &= expect(stack2.accepted, "hub-fork residual stack groups");
-    const auto hubPrepared = hubFork.withInvisibleCopiesMaterialized();
+    const auto hubPrepared = hubFork.withInvisibleRepeatsMaterialized();
     const auto hubCompiled = LiveGraphEngine::compile(hubPrepared, options);
     if (!hubCompiled.succeeded())
       std::cerr << "hub-fork residual failed: " << hubCompiled.error.message
@@ -1422,10 +1422,10 @@ int main() {
     const auto stack =
         residualGraph.createGroup({utility1, body.groupId, utility2});
     passed &= expect(stack.accepted, "utility residual stack groups");
-    passed &= expect(residualGraph.setGroupCopies(stack.groupId, 2).accepted &&
-                         residualGraph.groupCopyStatus(stack.groupId).active,
+    passed &= expect(residualGraph.setGroupRepeats(stack.groupId, 2).accepted &&
+                         residualGraph.groupRepeatStatus(stack.groupId).active,
                      "utility residual stack activates N=2");
-    const auto prepared = residualGraph.withInvisibleCopiesMaterialized();
+    const auto prepared = residualGraph.withInvisibleRepeatsMaterialized();
     bool hasBoundary = false;
     for (const auto &node : prepared.getNodes())
       hasBoundary =
@@ -1434,27 +1434,27 @@ int main() {
     passed &= expect(!hasBoundary && residualCompiled.succeeded(),
                      "nested residual stack compiles without a directed cycle");
 
-    openyourbox::graph::NodeGraph nestedCopies;
+    openyourbox::graph::NodeGraph nestedRepeats;
     const auto nestedIn =
-        nestedCopies.addNode(NodeType::audioInput, {0.0f, 0.0f});
+        nestedRepeats.addNode(NodeType::audioInput, {0.0f, 0.0f});
     const auto nestedAct =
-        nestedCopies.addNode(NodeType::activation, {200.0f, 40.0f});
+        nestedRepeats.addNode(NodeType::activation, {200.0f, 40.0f});
     const auto nestedConv =
-        nestedCopies.addNode(NodeType::convolution, {320.0f, 40.0f});
+        nestedRepeats.addNode(NodeType::convolution, {320.0f, 40.0f});
     const auto nestedJoin =
-        nestedCopies.addNode(NodeType::merge, {460.0f, 0.0f});
+        nestedRepeats.addNode(NodeType::merge, {460.0f, 0.0f});
     const auto nestedOut =
-        nestedCopies.addNode(NodeType::audioOutput, {620.0f, 0.0f});
-    nestedCopies.setProperty(nestedJoin, "inputs", 2);
-    nestedCopies.connect(nestedCopies.findNode(nestedAct)->outputs.front().id,
-                         nestedCopies.findNode(nestedConv)->inputs.front().id);
-    const auto nestedBody = nestedCopies.createGroup({nestedAct, nestedConv});
-    passed &= expect(nestedBody.accepted, "nested-copy residual body groups");
+        nestedRepeats.addNode(NodeType::audioOutput, {620.0f, 0.0f});
+    nestedRepeats.setProperty(nestedJoin, "inputs", 2);
+    nestedRepeats.connect(nestedRepeats.findNode(nestedAct)->outputs.front().id,
+                         nestedRepeats.findNode(nestedConv)->inputs.front().id);
+    const auto nestedBody = nestedRepeats.createGroup({nestedAct, nestedConv});
+    passed &= expect(nestedBody.accepted, "nested-repeat residual body groups");
     std::int32_t nestedBodyIn = 0;
     std::int32_t nestedBodyOut = 0;
-    if (const auto *group = nestedCopies.findGroup(nestedBody.groupId)) {
+    if (const auto *group = nestedRepeats.findGroup(nestedBody.groupId)) {
       for (const auto memberId : group->memberIds) {
-        const auto *member = nestedCopies.findNode(memberId);
+        const auto *member = nestedRepeats.findNode(memberId);
         if (member == nullptr)
           continue;
         if (member->type == NodeType::groupInput)
@@ -1463,35 +1463,35 @@ int main() {
           nestedBodyOut = memberId;
       }
     }
-    const auto *nestedBodyInNode = nestedCopies.findNode(nestedBodyIn);
-    const auto *nestedBodyOutNode = nestedCopies.findNode(nestedBodyOut);
-    const auto *nestedActNode = nestedCopies.findNode(nestedAct);
-    const auto *nestedConvNode = nestedCopies.findNode(nestedConv);
-    const auto *nestedJoinNode = nestedCopies.findNode(nestedJoin);
+    const auto *nestedBodyInNode = nestedRepeats.findNode(nestedBodyIn);
+    const auto *nestedBodyOutNode = nestedRepeats.findNode(nestedBodyOut);
+    const auto *nestedActNode = nestedRepeats.findNode(nestedAct);
+    const auto *nestedConvNode = nestedRepeats.findNode(nestedConv);
+    const auto *nestedJoinNode = nestedRepeats.findNode(nestedJoin);
     passed &= expect(
         nestedBodyInNode != nullptr && nestedBodyOutNode != nullptr &&
             nestedActNode != nullptr && nestedConvNode != nullptr &&
             nestedJoinNode != nullptr &&
-            nestedCopies
+            nestedRepeats
                 .connect(nestedBodyInNode->outputs.front().id,
                          nestedActNode->inputs.front().id)
                 .accepted &&
-            nestedCopies
+            nestedRepeats
                 .connect(nestedConvNode->outputs.front().id,
                          nestedBodyOutNode->inputs.front().id)
                 .accepted &&
-            nestedCopies
+            nestedRepeats
                 .connect(nestedBodyOutNode->outputs.front().id,
                          nestedJoinNode->inputs.front().id)
                 .accepted,
-        "nested-copy layer through-path and join");
+        "nested-repeat layer through-path and join");
     const auto nestedStack =
-        nestedCopies.createGroup({nestedBody.groupId, nestedJoin});
+        nestedRepeats.createGroup({nestedBody.groupId, nestedJoin});
     std::int32_t nestedStackIn = 0;
     std::int32_t nestedStackOut = 0;
-    if (const auto *group = nestedCopies.findGroup(nestedStack.groupId)) {
+    if (const auto *group = nestedRepeats.findGroup(nestedStack.groupId)) {
       for (const auto memberId : group->memberIds) {
-        const auto *member = nestedCopies.findNode(memberId);
+        const auto *member = nestedRepeats.findNode(memberId);
         if (member == nullptr)
           continue;
         if (member->type == NodeType::groupInput)
@@ -1500,42 +1500,42 @@ int main() {
           nestedStackOut = memberId;
       }
     }
-    const auto *nestedStackInNode = nestedCopies.findNode(nestedStackIn);
-    const auto *nestedStackOutNode = nestedCopies.findNode(nestedStackOut);
-    const auto *stackBodyInNode = nestedCopies.findNode(nestedBodyIn);
-    const auto *stackJoinNode = nestedCopies.findNode(nestedJoin);
+    const auto *nestedStackInNode = nestedRepeats.findNode(nestedStackIn);
+    const auto *nestedStackOutNode = nestedRepeats.findNode(nestedStackOut);
+    const auto *stackBodyInNode = nestedRepeats.findNode(nestedBodyIn);
+    const auto *stackJoinNode = nestedRepeats.findNode(nestedJoin);
     passed &= expect(
         nestedStack.accepted && nestedStackInNode != nullptr &&
             nestedStackOutNode != nullptr && stackBodyInNode != nullptr &&
             stackJoinNode != nullptr && stackJoinNode->inputs.size() >= 2 &&
-            nestedCopies
+            nestedRepeats
                 .connect(nestedStackInNode->outputs.front().id,
                          stackBodyInNode->inputs.front().id)
                 .accepted &&
-            nestedCopies
+            nestedRepeats
                 .connect(nestedStackInNode->outputs.front().id,
                          stackJoinNode->inputs[1].id)
                 .accepted &&
-            nestedCopies
+            nestedRepeats
                 .connect(stackJoinNode->outputs.front().id,
                          nestedStackOutNode->inputs.front().id)
                 .accepted &&
-            nestedCopies
-                .connect(nestedCopies.findNode(nestedIn)->outputs.front().id,
+            nestedRepeats
+                .connect(nestedRepeats.findNode(nestedIn)->outputs.front().id,
                          nestedStackInNode->inputs.front().id)
                 .accepted &&
-            nestedCopies
+            nestedRepeats
                 .connect(nestedStackOutNode->outputs.front().id,
-                         nestedCopies.findNode(nestedOut)->inputs.front().id)
+                         nestedRepeats.findNode(nestedOut)->inputs.front().id)
                 .accepted,
-        "nested-copy stack Group Input fans out into layer and skip");
+        "nested-repeat stack Group Input fans out into layer and skip");
     passed &= expect(
-        nestedCopies.setGroupCopies(nestedBody.groupId, 2).accepted &&
-            nestedCopies.groupCopyStatus(nestedBody.groupId).active &&
-            nestedCopies.setGroupCopies(nestedStack.groupId, 3).accepted &&
-            nestedCopies.groupCopyStatus(nestedStack.groupId).active,
+        nestedRepeats.setGroupRepeats(nestedBody.groupId, 2).accepted &&
+            nestedRepeats.groupRepeatStatus(nestedBody.groupId).active &&
+            nestedRepeats.setGroupRepeats(nestedStack.groupId, 3).accepted &&
+            nestedRepeats.groupRepeatStatus(nestedStack.groupId).active,
         "ResidualLayer N=2 inside ResidualStack N=3 activates");
-    const auto nestedPrepared = nestedCopies.withInvisibleCopiesMaterialized();
+    const auto nestedPrepared = nestedRepeats.withInvisibleRepeatsMaterialized();
     int nestedActs = 0;
     int nestedConvs = 0;
     int nestedJoins = 0;
@@ -1554,11 +1554,11 @@ int main() {
     const auto nestedCompiled =
         LiveGraphEngine::compile(nestedPrepared, options);
     if (!nestedCompiled.succeeded())
-      std::cerr << "nested residual copies failed: "
+      std::cerr << "nested residual repeats failed: "
                 << nestedCompiled.error.message << '\n';
     passed &= expect(!nestedHasBoundary && nestedActs == 6 && nestedConvs == 6 &&
                          nestedJoins == 3 && nestedCompiled.succeeded(),
-                     "nested residual copies compile without a directed cycle");
+                     "nested residual repeats compile without a directed cycle");
 
     openyourbox::graph::NodeGraph sameUtility;
     const auto sameIn =

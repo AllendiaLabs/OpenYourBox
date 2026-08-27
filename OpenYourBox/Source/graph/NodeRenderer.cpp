@@ -328,9 +328,9 @@ void beginPropertyRow(const char *label) {
  * @brief Draws a property label, optional expanded-value info icon, and a
  *        full-width value row beneath.
  * @param label Property label text.
- * @param expandedInfo Hierarchical expanded-copy preview, or empty.
+ * @param expandedInfo Hierarchical expanded-repeat preview, or empty.
  */
-void beginCopyListPropertyRow(const char *label,
+void beginRepeatListPropertyRow(const char *label,
                               const std::string &expandedInfo) {
   ImGui::TextUnformatted(label);
   if (!expandedInfo.empty()) {
@@ -341,13 +341,13 @@ void beginCopyListPropertyRow(const char *label,
 }
 
 /**
- * @brief Ancestor copy counts using each group's effective (chainable) copies.
+ * @brief Ancestor repeat counts using each group's effective (chainable) repeats.
  * @param graph Graph document.
  * @param nodeId Leaf or hub node.
  * @return Outer→inner vector; empty when @p nodeId has no parent group.
  */
 std::vector<int>
-ancestorRuntimeCopyCounts(const openyourbox::graph::NodeGraph &graph,
+ancestorRuntimeRepeatCounts(const openyourbox::graph::NodeGraph &graph,
                           std::int32_t nodeId) {
   const auto *node = graph.findNode(nodeId);
   if (node == nullptr)
@@ -358,8 +358,8 @@ ancestorRuntimeCopyCounts(const openyourbox::graph::NodeGraph &graph,
   while (parent.has_value()) {
     if (!visiting.insert(*parent).second)
       break;
-    const auto status = graph.groupCopyStatus(*parent);
-    innerToOuter.push_back(std::max(1, status.effectiveCopies));
+    const auto status = graph.groupRepeatStatus(*parent);
+    innerToOuter.push_back(std::max(1, status.effectiveRepeats));
     const auto *group = graph.findGroup(*parent);
     if (group == nullptr)
       break;
@@ -372,13 +372,13 @@ ancestorRuntimeCopyCounts(const openyourbox::graph::NodeGraph &graph,
 /**
  * @brief Draws a pin caption, hiding the shape behind a hover info icon.
  *
- * The caption never inlines the shape, including for a single copy and for
+ * The caption never inlines the shape, including for a single repeat and for
  * pins that are not inside a group. The info icon is omitted only when no
  * concrete shape is known yet.
  * @param kind Input or output direction (affects arrows).
  * @param label Pin name.
- * @param inlineShape Shape shown in the info tooltip when there is no copy list.
- * @param expandedShapes Nested copy-shape preview, or empty to use @p inlineShape.
+ * @param inlineShape Shape shown in the info tooltip when there is no repeat list.
+ * @param expandedShapes Nested repeat-shape preview, or empty to use @p inlineShape.
  */
 void drawPinCaption(openyourbox::graph::PinKind kind, const char *label,
                     const openyourbox::graph::ShapeSignature &inlineShape,
@@ -403,14 +403,14 @@ void drawPinCaption(openyourbox::graph::PinKind kind, const char *label,
 }
 
 /**
- * @brief Shape tooltip text for @p pin, including a single copy or no group.
- * @param pin Endpoint whose @c copyShapes may be populated.
- * @param copyCounts Outer→inner counts used to nest a multi-copy list.
+ * @brief Shape tooltip text for @p pin, including a single repeat or no group.
+ * @param pin Endpoint whose @c repeatShapes may be populated.
+ * @param repeatCounts Outer→inner counts used to nest a multi-repeat list.
  */
 std::string pinExpandedShapeInfo(const openyourbox::graph::Pin &pin,
-                                 const std::vector<int> &copyCounts) {
-  return openyourbox::graph::formatShapeCopyList(pin.copyShapes, pin.shape,
-                                                 copyCounts);
+                                 const std::vector<int> &repeatCounts) {
+  return openyourbox::graph::formatShapeRepeatList(pin.repeatShapes, pin.shape,
+                                                 repeatCounts);
 }
 
 /**
@@ -954,12 +954,12 @@ void NodeRenderer::renderNode(NodeGraph &graph, GraphNode &node,
   drawNodeDivider();
 
   if (node.type != NodeType::groupInput) {
-    const auto pinCopyCounts = ancestorRuntimeCopyCounts(graph, node.id);
+    const auto pinRepeatCounts = ancestorRuntimeRepeatCounts(graph, node.id);
     for (const auto &pin : node.inputs) {
     ed::BeginPin(ed::PinId(editorIdentifier(pin.id)), ed::PinKind::Input);
     ImGui::PushID(pin.id);
     drawPinCaption(PinKind::input, pin.label.c_str(), pin.shape,
-                   pinExpandedShapeInfo(pin, pinCopyCounts));
+                   pinExpandedShapeInfo(pin, pinRepeatCounts));
     ImGui::PopID();
     ed::EndPin();
     }
@@ -1025,10 +1025,10 @@ void NodeRenderer::renderNode(NodeGraph &graph, GraphNode &node,
     }
     ImGui::PushID(property.key.c_str());
     if (const auto hint =
-            graph.groupCopyPropertyHint(node.id, property.key);
+            graph.groupRepeatPropertyHint(node.id, property.key);
         hint.has_value()) {
       ImGui::TextColored(ImVec4(1.0f, 0.72f, 0.18f, 1.0f),
-                         "! Copy shape");
+                         "! Repeat shape");
       if (ImGui::IsItemHovered()) {
         ImGui::BeginTooltip();
         ImGui::PushTextWrapPos(ImGui::GetFontSize() * 30.0f);
@@ -1060,21 +1060,21 @@ void NodeRenderer::renderNode(NodeGraph &graph, GraphNode &node,
       ImGui::PopID();
       continue;
     }
-    const auto copyCount = graph.effectiveCopyCount(node.id);
-    const auto ancestorCounts = graph.ancestorCopyCounts(node.id);
+    const auto repeatCount = graph.effectiveRepeatCount(node.id);
+    const auto ancestorCounts = graph.ancestorRepeatCounts(node.id);
     const auto listEdit =
-        propertySupportsCopyValueList(property) &&
-        (copyCount > 1 || propertySupportsPreserveIn(property) ||
-         property.preserveInBound || property.copyListInvalid);
+        propertySupportsRepeatValueList(property) &&
+        (repeatCount > 1 || propertySupportsPreserveIn(property) ||
+         property.preserveInBound || property.repeatListInvalid);
     if (!listEdit)
       beginPropertyRow(property.label.c_str());
     if (listEdit) {
       constexpr float handleWidth = 18.0f;
       const auto expandedInfo =
-          copyCount > 1 ? formatExpandedPropertyCopyList(
-                              property, copyCount, ancestorCounts)
+          repeatCount > 1 ? formatExpandedPropertyRepeatList(
+                              property, repeatCount, ancestorCounts)
                         : std::string{};
-      beginCopyListPropertyRow(property.label.c_str(), expandedInfo);
+      beginRepeatListPropertyRow(property.label.c_str(), expandedInfo);
       const auto fieldHeight = ImGui::GetFrameHeight();
       const auto fieldOrigin = ImGui::GetCursorScreenPos();
       ImGui::GetWindowDrawList()->AddRectFilled(
@@ -1092,12 +1092,12 @@ void NodeRenderer::renderNode(NodeGraph &graph, GraphNode &node,
           const auto span = property.floatMaximum - property.floatMinimum;
           const auto stepPerTick =
               ImGui::GetIO().KeyShift ? span / 2000.0f : span / 200.0f;
-          auto values = property.copyFloatValues;
+          auto values = property.repeatFloatValues;
           if (values.empty())
             values.push_back(property.floatValue);
           for (auto &item : values)
             item += static_cast<float>(dragSteps) * stepPerTick;
-          if (graph.setFloatPropertyCopyValues(node.id, property.key, values)) {
+          if (graph.setFloatPropertyRepeatValues(node.id, property.key, values)) {
             mutatedThisFrame = true;
             recompileThisFrame = true;
             if (callbacks.floatPropertyChanged)
@@ -1105,12 +1105,12 @@ void NodeRenderer::renderNode(NodeGraph &graph, GraphNode &node,
                                              property.floatValue);
           }
         } else if (!property.preserveInBound) {
-          auto values = property.copyIntValues;
+          auto values = property.repeatIntValues;
           if (values.empty())
             values.push_back(property.value);
           for (auto &item : values)
             item += dragSteps;
-          if (graph.setPropertyCopyValues(node.id, property.key, values)) {
+          if (graph.setPropertyRepeatValues(node.id, property.key, values)) {
             mutatedThisFrame = true;
             recompileThisFrame = true;
             if (callbacks.propertyChanged)
@@ -1124,16 +1124,16 @@ void NodeRenderer::renderNode(NodeGraph &graph, GraphNode &node,
       ImGui::SetNextItemWidth(nodeBodyWidth - handleWidth);
       const auto bufferKey = std::to_string(node.id) + ":" + property.key;
       auto &buffer = propertyListBuffers[bufferKey];
-      const auto widgetId = ImGui::GetID("##copyList");
+      const auto widgetId = ImGui::GetID("##repeatList");
       if (ImGui::GetActiveID() != widgetId) {
-        const auto formatted = formatAuthoredPropertyCopyList(property);
+        const auto formatted = formatAuthoredPropertyRepeatList(property);
         std::snprintf(buffer.data(), buffer.size(), "%s", formatted.c_str());
       }
-      ImGui::InputText("##copyList", buffer.data(), buffer.size());
+      ImGui::InputText("##repeatList", buffer.data(), buffer.size());
       ImGui::PopStyleVar();
       ImGui::PopStyleColor();
       if (ImGui::IsItemDeactivatedAfterEdit()) {
-        const auto parsed = parsePropertyCopyList(
+        const auto parsed = parsePropertyRepeatList(
             property, ancestorCounts, buffer.data(),
             propertySupportsPreserveIn(property));
         if (!parsed.accepted) {
@@ -1141,7 +1141,7 @@ void NodeRenderer::renderNode(NodeGraph &graph, GraphNode &node,
           transientMessageDeadline = ImGui::GetTime() + 2.5;
           if (callbacks.showMessage)
             callbacks.showMessage(transientMessage);
-          const auto formatted = formatAuthoredPropertyCopyList(property);
+          const auto formatted = formatAuthoredPropertyRepeatList(property);
           std::snprintf(buffer.data(), buffer.size(), "%s", formatted.c_str());
         } else if (parsed.preserveIn) {
           if (graph.setPropertyPreserveIn(node.id, property.key,
@@ -1158,7 +1158,7 @@ void NodeRenderer::renderNode(NodeGraph &graph, GraphNode &node,
               callbacks.showMessage(transientMessage);
           }
         } else if (property.kind == PropertyKind::real) {
-          if (graph.setFloatPropertyCopyValues(node.id, property.key,
+          if (graph.setFloatPropertyRepeatValues(node.id, property.key,
                                                parsed.floatValues)) {
             mutatedThisFrame = true;
             recompileThisFrame = true;
@@ -1166,7 +1166,7 @@ void NodeRenderer::renderNode(NodeGraph &graph, GraphNode &node,
               callbacks.floatPropertyChanged(node.id, property.key,
                                              property.floatValue);
           }
-        } else if (graph.setPropertyCopyValues(node.id, property.key,
+        } else if (graph.setPropertyRepeatValues(node.id, property.key,
                                                parsed.intValues)) {
           mutatedThisFrame = true;
           recompileThisFrame = true;
@@ -1180,9 +1180,9 @@ void NodeRenderer::renderNode(NodeGraph &graph, GraphNode &node,
             callbacks.showMessage(transientMessage);
         }
       }
-      if (property.copyListInvalid && !property.copyListInvalidMessage.empty()) {
+      if (property.repeatListInvalid && !property.repeatListInvalidMessage.empty()) {
         ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.38f, 0.38f, 1.0f));
-        ImGui::TextWrapped("%s", property.copyListInvalidMessage.c_str());
+        ImGui::TextWrapped("%s", property.repeatListInvalidMessage.c_str());
         ImGui::PopStyleColor();
       }
       ImGui::PopID();
@@ -1440,10 +1440,10 @@ void NodeRenderer::renderNode(NodeGraph &graph, GraphNode &node,
         std::snprintf(seedBuffer.data(), seedBuffer.size(), "%d", appliedSeed);
       }
       mutatedThisFrame = true;
-      // N>1 copies store independent seeds in copySlots; recompile so every
-      // materialized copy rebuilds from its own slot instead of only reseeding
+      // N>1 repeats store independent seeds in repeatSlots; recompile so every
+      // materialized repeat rebuilds from its own slot instead of only reseeding
       // the visible template node.
-      if (graph.effectiveCopyCount(node.id) > 1)
+      if (graph.effectiveRepeatCount(node.id) > 1)
         recompileThisFrame = true;
       callbacks.randomizeNode(node.id, appliedSeed);
     }
@@ -1480,12 +1480,12 @@ void NodeRenderer::renderNode(NodeGraph &graph, GraphNode &node,
   }
 
   if (node.type != NodeType::groupOutput) {
-    const auto pinCopyCounts = ancestorRuntimeCopyCounts(graph, node.id);
+    const auto pinRepeatCounts = ancestorRuntimeRepeatCounts(graph, node.id);
     for (const auto &pin : node.outputs) {
     ed::BeginPin(ed::PinId(editorIdentifier(pin.id)), ed::PinKind::Output);
     ImGui::PushID(pin.id);
     drawPinCaption(PinKind::output, pin.label.c_str(), pin.shape,
-                   pinExpandedShapeInfo(pin, pinCopyCounts));
+                   pinExpandedShapeInfo(pin, pinRepeatCounts));
     ImGui::PopID();
     ed::PinPivotAlignment(ImVec2(1.0f, 0.5f));
     ed::EndPin();
@@ -1582,10 +1582,10 @@ void NodeRenderer::renderGroup(NodeGraph &graph, GraphGroup &group,
 
   auto &nameBuffer = groupNameBuffers[group.id];
   if (nameBuffer[0] == '\0') {
-    const auto copyCount =
+    const auto nameByteCount =
         std::min(group.name.size(), nameBuffer.size() - 1);
-    std::memcpy(nameBuffer.data(), group.name.data(), copyCount);
-    nameBuffer[copyCount] = '\0';
+    std::memcpy(nameBuffer.data(), group.name.data(), nameByteCount);
+    nameBuffer[nameByteCount] = '\0';
   }
   ImGui::SetNextItemWidth(140.0f);
   if (ImGui::InputText("##groupName", nameBuffer.data(), nameBuffer.size())) {
@@ -1593,10 +1593,10 @@ void NodeRenderer::renderGroup(NodeGraph &graph, GraphGroup &group,
       mutatedThisFrame = true;
   }
   ImGui::SameLine();
-  int copies = group.copies;
+  int repeats = group.repeats;
   ImGui::SetNextItemWidth(48.0f);
-  if (ImGui::InputInt("##copies", &copies, 0, 0)) {
-    const auto result = graph.setGroupCopies(group.id, copies);
+  if (ImGui::InputInt("##repeats", &repeats, 0, 0)) {
+    const auto result = graph.setGroupRepeats(group.id, repeats);
     if (result.accepted) {
       mutatedThisFrame = true;
       recompileThisFrame = true;
@@ -1609,13 +1609,13 @@ void NodeRenderer::renderGroup(NodeGraph &graph, GraphGroup &group,
     }
   }
   ImGui::SameLine();
-  ImGui::TextDisabled("copies");
-  const auto copyStatus = graph.groupCopyStatus(group.id);
-  if (!copyStatus.active) {
+  ImGui::TextDisabled("repeats");
+  const auto repeatStatus = graph.groupRepeatStatus(group.id);
+  if (!repeatStatus.active) {
     ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.72f, 0.18f, 1.0f));
     ImGui::TextWrapped("Requested %d; effective 1",
-                       copyStatus.requestedCopies);
-    ImGui::TextWrapped("%s", copyStatus.message.c_str());
+                       repeatStatus.requestedRepeats);
+    ImGui::TextWrapped("%s", repeatStatus.message.c_str());
     ImGui::PopStyleColor();
   }
   if (ImGui::Button("Randomize Weights", ImVec2(-FLT_MIN, 0.0f))) {
@@ -1647,19 +1647,19 @@ void NodeRenderer::renderGroup(NodeGraph &graph, GraphGroup &group,
                  port.kind == PinKind::input ? ed::PinKind::Input
                                              : ed::PinKind::Output);
     ImGui::PushID(pinId);
-    // Collapsed boxes fold this group's own serial copies and any nested
-    // descendant copy axes to first-in / last-out; ancestor copy axes still
+    // Collapsed boxes fold this group's own serial repeats and any nested
+    // descendant repeat axes to first-in / last-out; ancestor repeat axes still
     // nest as a list.
     ShapeSignature displayShape = port.shape;
     std::string expandedShapes;
     if (const auto *memberPin = graph.findPin(port.memberPinId)) {
-      const auto copyCounts =
-          ancestorRuntimeCopyCounts(graph, port.memberNodeId);
+      const auto repeatCounts =
+          ancestorRuntimeRepeatCounts(graph, port.memberNodeId);
       const bool takeLast = port.kind == PinKind::output;
-      if (takeLast && !memberPin->copyShapes.empty())
-        displayShape = memberPin->copyShapes.back();
+      if (takeLast && !memberPin->repeatShapes.empty())
+        displayShape = memberPin->repeatShapes.back();
       expandedShapes = formatCollapsedGroupPinShapes(
-          memberPin->copyShapes, displayShape, copyCounts, takeLast);
+          memberPin->repeatShapes, displayShape, repeatCounts, takeLast);
     }
     drawPinCaption(port.kind, port.label.c_str(), displayShape, expandedShapes);
     if (port.kind == PinKind::output)

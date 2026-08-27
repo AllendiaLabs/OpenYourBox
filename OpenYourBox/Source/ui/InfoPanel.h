@@ -36,7 +36,7 @@ public:
    * @param sampleRate Current host sample rate.
    * @param parameterCount Number of model parameters.
    * @param buildError Latest asynchronous model error.
-   * @param graphWarning Persistent graph warnings such as inactive copies.
+   * @param graphWarning Persistent graph warnings such as inactive repeats.
    * @param analysis Current analysis panel state; empty `nodeId` hides plots.
    * @param viewChanged Invoked when the user selects a different analysis view.
    * @param viewError Opens the copyable error dialog for @p buildError.
