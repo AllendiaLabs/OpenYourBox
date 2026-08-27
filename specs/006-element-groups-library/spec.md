@@ -17,13 +17,15 @@
 - Q: When the user freezes while a group (or multi-selection) is selected, what should happen? → A: Freeze each freezable member of the selection individually; do not replace the whole selection with one Gold BlackBox; group/selection structure remains with individually frozen elements
 - Q: If several ungrouped boxes are selected, can that selection be saved as one library entry? → A: No — save to library is an action on a single box (Gold or live; element or group), not on a multi-selection
 - Q: When a group is saved to the library and later inserted, should expand/collapse states match the save-time tree? → A: No — always insert with the root group collapsed and nested groups collapsed (Option B)
-- Q: Should a group expose a copy-count (N blocks) parameter? → A: Yes — integer N (default 1); independent weight copies (not shared); materialize N copies on the canvas; wire as a serial chain when I/O shapes allow; refuse/clamp N with a clear message if chaining is illegal; new copies clone the last copy’s parameters/weights; nested groups each have their own N; library save includes N and all materialized copies
+- Q: Should a group expose a copy-count (N blocks) parameter? → A: Yes — integer requested N (default 1); independent runtime copies (not shared), invisibly materialized as a serial chain when the explicit interface, path, and shapes allow; retain requested N but clamp effective runtime copies to 1 with a clear message while illegal; new copies clone the last copy’s parameters/weights; nested groups each have their own N; project and library persistence include requested N and all copy state
+- Implemented interface refinement: Every group owns mandatory, non-removable **Group Input** and **Group Output** hubs. Their variable lane counts explicitly declare the group interface instead of inferring it from dangling member pins. Existing saved groups are migrated to equivalent hubs and lanes on load.
+- Implemented copies refinement: The authored/requested N persists even while unsafe. Runtime effective copies clamp to 1 until the declared lane counts match, a Group Input-to-Group Output path exists, and paired shapes are serially compatible; the requested N reactivates automatically after the user repairs the interface, path, or indicated model properties. The editor provides actionable diagnostics but never changes model parameters automatically.
 
 ## User Scenarios & Testing *(mandatory)*
 
 ### User Story 1 - Group Elements and Nested Subgroups (Priority: P1)
 
-A sound designer building a large graph selects several related elements (for example a Conv1D plus an activation and a residual branch) and groups them into a single named box. They can place additional elements inside that group, and can also create subgroups inside an existing group so the architecture stays hierarchical and readable. External cables into and out of the group remain meaningful: the group exposes the connections needed to wire it into the rest of the graph without losing the internal wiring.
+A sound designer building a large graph selects several related elements (for example a Conv1D plus an activation and a residual branch) and groups them into a single named box. They can place additional elements inside that group, and can also create subgroups inside an existing group so the architecture stays hierarchical and readable. Every group contains mandatory **Group Input** and **Group Output** hubs whose variable lane counts explicitly declare its external interface. External cables route through those hubs without losing the internal wiring.
 
 **Why this priority**: Grouping is the foundation for collapse/expand and for saving reusable compound boxes. Without durable groups and subgroups, the other stories cannot deliver value.
 
@@ -38,34 +40,38 @@ A sound designer building a large graph selects several related elements (for ex
 5. **Given** a graph containing nested groups, **When** the project/plugin state is saved and reloaded, **Then** group hierarchy, names, membership, and internal/external connections are restored unchanged
 6. **Given** a group, **When** the user ungroups it, **Then** members return to the parent scope (or top-level canvas) with their connections preserved
 7. **Given** a group (collapsed or expanded) with several freezable live members selected via the group, **When** the user chooses Freeze, **Then** each freezable member becomes its own Gold box in place, the group container remains, and the selection is not replaced by a single Gold BlackBox
+8. **Given** a newly created group, **When** its interior is opened, **Then** it contains exactly one non-removable Group Input hub and one non-removable Group Output hub, each with at least one lane and an editable lane count
+9. **Given** a saved legacy group whose interface was inferred from member pins, **When** it is loaded, **Then** equivalent Group Input/Group Output hubs and lane routing are created without changing the group’s external connectivity
 
 ---
 
 ### User Story 5 - Stack Group Copies (N Blocks) (Priority: P1)
 
-A designer builds one processing block as a group (for example a residual unit). On the group they set a **copies** parameter **N** (like repeated blocks in a deep network). When N increases and the group’s external I/O shapes allow chaining, the graph **materializes** N independent copies on the canvas (each with its own weights/parameters), wired in **series** (copy i outputs → copy i+1 matching inputs). When shapes do not allow a legal chain, raising N is refused or clamped with a clear explanation. Decreasing N removes trailing copies. Nested groups each expose their own N.
+A designer builds one processing block as a group (for example a residual unit). On the group they set a requested **copies** parameter **N** (like repeated blocks in a deep network). When the group has matching declared input/output lanes, a through-path, and compatible paired shapes, the runtime materializes N independent serial copies (each with its own weights/parameters) while the editor continues to show one editable block. If those conditions are not legal, requested N remains stored and visible while effective runtime copies clamp to 1. The request reactivates automatically when the user repairs the interface, path, or model properties identified by diagnostics. The system never changes model parameters automatically.
 
 **Why this priority**: Repeat-count is a core architecture control for deep graphs; it depends on groups existing (US1) and should ship with grouping rather than as a later add-on.
 
-**Independent Test**: Create a chainable group, set N from 1→3, confirm three independent editable copies appear in series with distinct weights after randomizing one copy; set N to an illegal value for a non-chainable group and confirm refusal; save/reload preserves N and all copies.
+**Independent Test**: Create a group with matching Group Input/Group Output lanes and a legal through-path, set N from 1→3, and confirm the runtime uses three independent serial copies. Break one paired shape, confirm requested N remains 3 while effective runtime copies becomes 1 and the implicated property is identified; repair it manually and confirm automatic reactivation. Save/reload preserves the request and independent copy state.
 
 **Acceptance Scenarios**:
 
 1. **Given** a group with default N=1, **When** the user views group parameters, **Then** a copies/N control is visible and editable
-2. **Given** a group whose external I/O shapes allow serial chaining, **When** the user sets N to K (K&gt;1), **Then** the canvas shows K independent copies (separate parameters/weights), wired in series, and external graph cables attach to the first copy’s inputs and last copy’s outputs as appropriate
+2. **Given** a group whose declared lane counts, through-path, and paired shapes allow serial chaining, **When** the user sets N to K (K&gt;1), **Then** runtime processing uses K independent copies (separate parameters/weights), wired in series, while the canvas keeps one editable representation; external graph cables attach to the first runtime copy’s inputs and last runtime copy’s outputs as appropriate
 3. **Given** N&gt;1, **When** the user randomizes or edits weights on copy 2 only, **Then** other copies are unchanged
 4. **Given** N=K&gt;1, **When** the user sets N to K+1, **Then** the new trailing copy is initialized by cloning the previous last copy’s structure and parameters/weights
 5. **Given** N=K&gt;1, **When** the user sets N to a smaller value, **Then** trailing copies are removed and remaining wiring stays consistent
-6. **Given** a group whose I/O cannot form a legal serial chain for N&gt;1, **When** the user attempts N&gt;1, **Then** the change is refused or clamped with a clear message and the graph is not partially corrupted
+6. **Given** a group whose interface, path, or shapes cannot form a legal serial chain for N&gt;1, **When** the user requests N&gt;1, **Then** requested N is persisted, effective runtime copies clamps to 1, and a clear diagnostic explains the blocking condition without partial graph corruption
 7. **Given** nested groups each with their own N, **When** the user changes an inner group’s N, **Then** only that group’s copies update
-8. **Given** a group with N&gt;1, **When** the project is saved and reloaded, **Then** N and all materialized copies (structure, links, parameters) are restored
-9. **Given** a group with N&gt;1 saved to the user box library and later inserted, **Then** the library entry restores N and all copies (insert still respects collapsed-group presentation rules)
+8. **Given** a group with requested N&gt;1, **When** the project is saved and reloaded, **Then** requested N and all independent per-copy state are restored, and effective runtime copies is derived from the restored graph
+9. **Given** a group with requested N&gt;1 saved to the user box library and later inserted, **Then** the library entry restores requested N and all copy state (insert still respects collapsed-group presentation rules)
+10. **Given** an inactive request N&gt;1, **When** the user manually repairs the declared lanes, through-path, or incompatible shape-driving property, **Then** effective runtime copies automatically returns to N without re-entering the request
+11. **Given** a shape incompatibility blocks copies, **When** the group and implicated element properties are displayed, **Then** the UI identifies the incompatible lane shapes and highlights candidate properties with actionable guidance, but does not modify any parameter
 
 ---
 
 ### User Story 2 - Expand and Collapse Groups in the UI (Priority: P1)
 
-While editing, the designer collapses a group so it appears as a single compact box on the canvas (hiding internal elements and cables). They expand it again when they need to inspect or edit the interior. Nested groups can be collapsed independently so only the currently relevant branch is expanded. Collapsed groups still show enough information (name and external ports) to stay connectable and identifiable in the larger graph.
+While editing, the designer collapses a group so it appears as a single compact box on the canvas (hiding internal elements and cables). They expand it again when they need to inspect or edit the interior. Nested groups can be collapsed independently so only the currently relevant branch is expanded. Collapsed groups expose the lanes explicitly declared by their Group Input and Group Output hubs, so they remain connectable and identifiable without inferring ports from dangling member pins.
 
 **Why this priority**: Collapse/expand is the primary usability payoff of grouping on dense neural graphs; it is independently valuable even before the library exists.
 
@@ -130,8 +136,10 @@ From the element/menu area of the plugin, the user opens their box library, scan
 - What happens if the user deletes a group that still has members? Ungroup/delete-group behavior preserves members on the parent canvas unless the user explicitly chooses a destructive delete-all-members action (if offered), which requires confirmation.
 - How does the system handle very deep nesting? Nesting is allowed; if a practical depth limit is enforced for stability, exceeding it is refused with a clear message (default target: at least 5 levels deep supported).
 - What happens if the user sets N very large? A practical upper bound may clamp N with a clear message (implementation safety); default product intent supports useful deep stacks (at least N=8 in guided tests).
-- What happens to collapse when N&gt;1? Collapse still applies to the group container presentation; materialized copies remain members of the repeat structure and follow the same collapse rules as other group content.
-- What if mid-chain copies are manually rewired in a way that breaks serial topology? Subsequent N changes re-validate chainability; illegal N updates are refused until the user fixes shapes/wiring (or the product re-applies serial wiring on N change—prefer re-assert serial chain between copies on successful N update).
+- What happens to collapse when N&gt;1? Collapse still applies to the group container presentation. Runtime copies remain invisible; collapsing or opening the one editable block does not change the effective runtime count.
+- What if the declared input and output lane counts differ, no directed path connects the hubs, or paired lane shapes cannot chain? Requested N remains persisted, but effective runtime copies is 1. The group shows the reason and relevant shape values; candidate shape-driving properties are highlighted where available. Once the user repairs the condition, N reactivates automatically.
+- Can the system repair an incompatible model automatically? No. Diagnostics may suggest properties such as channels/features, latent size, stride, or band count (including using `in` where supported), but parameter edits remain exclusively user-authored.
+- Can a Group Input or Group Output hub be removed, moved out, grouped independently, frozen, analyzed, or saved alone? No. The two editor-only hubs are mandatory structural members and can only disappear when their owning group is ungrouped; lane reduction is refused when it would remove a connected lane.
 
 ## Requirements *(mandatory)*
 
@@ -143,6 +151,9 @@ From the element/menu area of the plugin, the user opens their box library, scan
 - **FR-002**: Users MUST be able to create nested subgroups inside an existing group.
 - **FR-003**: Users MUST be able to add elements to a group, remove elements from a group, rename a group, and ungroup without losing member connections that remain valid.
 - **FR-004**: Group membership and hierarchy MUST persist across project/plugin save and load.
+- **FR-004a**: Each group MUST contain one mandatory, non-removable **Group Input** hub and one mandatory, non-removable **Group Output** hub. Each hub MUST expose a user-editable lane count of at least one; shrinking MUST be refused if it would remove a connected lane.
+- **FR-004b**: Group external ports MUST be declared by the boundary hubs and their lane order, replacing inference from unconnected/dangling member pins. Group Input lanes route outside inputs into the group and Group Output lanes route group results to the outside.
+- **FR-004c**: On loading or importing a legacy group without boundary hubs, the system MUST create both hubs, preserve each previously inferred interface port as a lane, and reroute links so external connectivity is retained.
 - **FR-005**: Users MUST be able to collapse a group so it appears as a single box that hides internal members and internal cables while still exposing the group’s name and external connection points.
 - **FR-006**: Users MUST be able to expand a collapsed group to reveal and edit its contents.
 - **FR-007**: Nested groups MUST support independent expand/collapse states.
@@ -156,19 +167,23 @@ From the element/menu area of the plugin, the user opens their box library, scan
 - **FR-014**: The user box library MUST persist in local user data across plugin sessions (distinct from the training sample library used for Train workflows).
 - **FR-015**: Illegal grouping moves (cycles, nesting a group into its descendant) MUST be refused with a clear user-visible reason and no partial corruption of the graph.
 - **FR-016**: Library insert of an entry that cannot be reconstructed (e.g., missing element type) MUST fail safely with a clear message without corrupting the current graph.
-- **FR-017**: Each group MUST expose an integer **copies** parameter N (default 1, N ≥ 1) controlling how many times the group’s block is instantiated.
-- **FR-017a**: For N &gt; 1, the system MUST **materialize** N **independent** copies on the canvas (separate parameters and weights—not shared across copies) and MUST wire them as a **serial chain** when external I/O shapes allow (copy i outputs to copy i+1 matching inputs). Outside-world cables MUST connect to the first copy’s inputs and the last copy’s outputs as appropriate.
-- **FR-017b**: If serial chaining is not shape-legal for the requested N, the system MUST refuse or clamp N with a clear user-visible reason and MUST NOT leave a partially corrupted chain.
+- **FR-017**: Each group MUST expose and persist an integer requested **copies** parameter N (default 1, N ≥ 1) controlling how many runtime instances are desired.
+- **FR-017a**: For an active N &gt; 1, the runtime MUST materialize N **independent** copies (separate parameters and weights—not shared across copies) and wire them as a **serial chain** while the editor shows one editable group block. Outside-world cables MUST connect to the first runtime copy’s inputs and the last runtime copy’s outputs as appropriate.
+- **FR-017b**: N &gt; 1 is active only when the group declares equal, nonzero Group Input and Group Output lane counts, contains a directed path from the input hub to the output hub, and each output lane shape is compatible with its paired input lane shape. Otherwise the requested N MUST remain stored while effective runtime copies clamps to 1, with no partial/orphan runtime chain.
 - **FR-017c**: When N increases, new trailing copies MUST be initialized by cloning the previous last copy’s structure and parameters/weights. When N decreases, trailing copies MUST be removed safely.
-- **FR-017d**: Nested groups MUST each have their own independent N. Freeze and library save/load MUST treat all materialized copy members as normal freezable/saveable graph content (per-member freeze still applies).
-- **FR-017e**: N and all materialized copies MUST persist across project/plugin save and load and MUST be included when saving a group to the user box library.
+- **FR-017d**: Nested groups MUST each have their own independent requested N. Freeze and library save/load MUST account for all active independent runtime copies and their per-copy state (per-member freeze still applies).
+- **FR-017e**: Requested N and all independent per-copy state MUST persist across project/plugin save and load and MUST be included when saving a group to the user box library.
+- **FR-017f**: Copy validity MUST be derived from current graph state. An inactive requested N MUST reactivate automatically when the user makes the interface, path, and shapes legal, without requiring N to be re-entered.
+- **FR-017g**: An inactive copy request MUST display an actionable group-level diagnostic (requested versus effective count and the blocking lane/path/shape condition) and MUST identify relevant shape-driving element properties where possible.
+- **FR-017h**: Copy validation and diagnostics MUST NOT automatically alter model parameters, links, or interface lane counts to make the request legal; all such model edits remain explicit user actions.
 
 ### Key Entities
 
-- **Group**: A named container of allowed graph members (elements and/or nested groups, including Gold BlackBoxes and non-audio-I/O sources; never Audio I/O); has expand/collapse state, external connection points, membership, and a **copies** count N.
-- **Group Copy Instance**: One materialized independent replica of a group’s block when N &gt; 1; has its own members/weights; participates in the serial chain with sibling copies.
+- **Group**: A named container of allowed graph members (elements and/or nested groups, including Gold BlackBoxes and non-audio-I/O sources; never Audio I/O); has expand/collapse state, mandatory Group Input/Group Output hubs, explicitly declared external lanes, membership, and a requested **copies** count N.
+- **Group Boundary Hub**: A mandatory editor-only Group Input or Group Output node owned by exactly one group. It has a variable positive lane count, may be repositioned within its owner, cannot be removed or moved out of that group, and is flattened out of runtime materialization after defining the interface.
+- **Group Copy Instance**: One runtime-materialized independent replica of a group’s block when effective copies &gt; 1; has its own parameters/weights, participates in the serial chain with sibling copies, and is not drawn as a duplicate canvas box.
 - **Graph Element (Box)**: A single processing or I/O node on the canvas with typed ports and parameters; may be saved alone to the library.
-- **User Box Library Entry**: A named, reusable snapshot of either one element or one group hierarchy, including parameters and (for groups) internal structure, connections, N, and all materialized copies; stored in the user’s local library catalog.
+- **User Box Library Entry**: A named, reusable snapshot of either one element or one group hierarchy, including parameters and (for groups) internal structure, connections, explicit boundary hubs/lanes, requested N, and independent per-copy state; stored in the user’s local library catalog.
 - **User Box Library**: The per-user catalog of saved entries, browsable and editable inside the plugin, independent of any open project’s canvas and independent of the training sample library.
 
 ## Success Criteria *(mandatory)*
@@ -182,9 +197,11 @@ From the element/menu area of the plugin, the user opens their box library, scan
 - **SC-005**: At least 90% of first-time test users successfully complete “group → collapse → expand → save to library → insert from library” without assistance beyond in-UI labels.
 - **SC-006**: Nested expand/collapse works for at least 3 levels of depth without loss of editability for currently expanded scopes.
 - **SC-008**: Freezing a selected group with M freezable live members results in M individual Gold boxes (or fewer if some are skipped as non-freezable), never a single Gold box standing in for the entire group.
-- **SC-009**: On a chainable group, a user can set copies N from 1 to at least 8 and see N independent serially wired copies on the canvas; editing weights on one copy does not change the others.
-- **SC-010**: Attempting N &gt; 1 on a non-chainable group is refused or clamped with an explanatory message in 100% of guided tests, with no partial/orphan copy nodes left behind.
+- **SC-009**: On a chainable group, a user can set copies N from 1 to at least 8 and obtain N independent serial runtime copies from one editable canvas representation; copy-specific weights remain independent.
+- **SC-010**: Requesting N &gt; 1 on a non-chainable group retains the requested value, reports effective runtime copies as 1 with an explanatory and actionable message in 100% of guided tests, and leaves no partial/orphan runtime copy nodes.
 - **SC-011**: After save/reload (and after box-library save/insert of a group with N &gt; 1), N and all copy instances match the pre-save structure and parameter fidelity.
+- **SC-012**: Every new or migrated group has one Group Input and one Group Output hub, and legacy external connections survive migration with 100% connectivity fidelity.
+- **SC-013**: In guided tests, repairing an inactive copy request reactivates the stored N automatically, and no model parameter changes unless the user edits that parameter.
 
 ## Assumptions
 
@@ -193,12 +210,14 @@ From the element/menu area of the plugin, the user opens their box library, scan
 - Audio Input and Audio Output stay at project graph scope and are never members of groups or contents of user box library entries; other box kinds (including Gold BlackBoxes and non-audio-I/O sources such as Knob/XY) may be grouped and saved.
 - Group copies use **independent** weights/parameters (not shared). Serial chaining is the only v1 topology for N &gt; 1; residual-around-stack and parallel fan-out are out of scope unless added later.
 - Default N is 1. New copies clone the last copy. Nested groups each own their N. A practical max N may be enforced for stability with a clear message.
+- Requested N is authored state; effective runtime copies is derived state. Unsafe requests remain authored but execute once until the graph becomes legal, at which point they reactivate automatically.
 - “Parameters” saved with a box include the user-facing configuration values of each element (and, for weighted elements, the current weight/bias state when those parameters already exist), so re-inserted boxes sound/behave like the saved originals under the same inputs. Saving a Gold BlackBox preserves enough state to restore that frozen box on insert.
 - The user box library is local to the machine/user profile for v1; cloud sync and marketplace publishing of boxes are out of scope (marketplace remains a later phase).
 - The user box library is separate from the Training Library (sample pairs/clips used for Train); naming and UI placement should keep the two catalogs distinguishable.
 - Grouping requires at least two members; saving to the library is always a per-box action on one element or one group (never a raw multi-selection).
 - Library inserts of groups always place the root and nested groups collapsed; expand/collapse state inside an open project still persists via project/plugin save (FR-009) after the user changes it on the canvas.
-- External ports of a group are derived from connections that cross the group boundary (or equivalent clear aggregation); users do not need a separate “port definition” workflow for v1 beyond what grouping naturally exposes.
+- External ports of a group are explicitly declared by mandatory Group Input and Group Output hubs. Group creation seeds their lanes from current boundary-crossing cables; legacy load migrates previously inferred dangling-pin interfaces. Thereafter users control the variable lane counts directly.
+- Shape diagnostics are advisory and actionable only. The system does not silently change channels, features, latent size, stride, band count, or any other model parameter to activate copies.
 - Built-in element menu behavior remains the source of stock element types; the user library is an additional catalog for user-saved boxes.
 - Groups, collapse/expand, and the user box library MUST reuse the plugin’s existing embedded node-editor UI capabilities as far as practical (native group/collapse patterns and standard in-plugin list/menu patterns for the library) instead of introducing a separate parallel UI surface for these flows.
 - Sharing library files between machines via manual export/import is deferred unless already trivial; v1 success is defined by persistence on the same user environment.

@@ -33,7 +33,11 @@ enum class NodeType {
   variationalBottleneck,
   noiseSynthesizer,
   convTranspose,
-  batchNorm
+  batchNorm,
+  /** Editor-only source hub declaring a group's external input lanes. */
+  groupInput,
+  /** Editor-only sink hub declaring a group's external output lanes. */
+  groupOutput
 };
 
 /** @brief Train recipe selected in the unified Train panel. */
@@ -146,6 +150,11 @@ inline bool isFixedIoType(NodeType type) noexcept {
   return type == NodeType::audioInput || type == NodeType::audioOutput;
 }
 
+/** @brief Returns true for editor-only Group Input and Group Output hubs. */
+inline bool isGroupBoundaryType(NodeType type) noexcept {
+  return type == NodeType::groupInput || type == NodeType::groupOutput;
+}
+
 /** @brief Returns true for Knob Input and XY Trackpad source elements. */
 inline bool isConditioningSourceType(NodeType type) noexcept {
   return type == NodeType::knobInput || type == NodeType::xyTrackpad;
@@ -153,7 +162,8 @@ inline bool isConditioningSourceType(NodeType type) noexcept {
 
 /** @brief Returns true for nodes that never participate in train arm/absorb. */
 inline bool isControlSourceType(NodeType type) noexcept {
-  return isFixedIoType(type) || isConditioningSourceType(type);
+  return isFixedIoType(type) || isConditioningSourceType(type) ||
+         isGroupBoundaryType(type);
 }
 
 /** @brief Returns true for live elements that own trainable parameters. */
@@ -877,6 +887,34 @@ struct GraphGroup {
   float viewZoom = 1.0f;
 };
 
+/**
+ * @brief One shape-driving property implicated by an inactive copy request.
+ */
+struct GroupCopyPropertyHint {
+  /** @brief Element containing the candidate property. */
+  std::int32_t nodeId = 0;
+  /** @brief Canonical property key such as `channels` or `features`. */
+  std::string propertyKey;
+  /** @brief User-facing explanation for highlighting this property. */
+  std::string message;
+};
+
+/**
+ * @brief Derived validity and diagnostics for a group's requested copies.
+ */
+struct GroupCopyStatus {
+  /** @brief User-authored copy count stored on the group. */
+  int requestedCopies = defaultGroupCopies;
+  /** @brief Count safe to materialize; one while the request is inactive. */
+  int effectiveCopies = defaultGroupCopies;
+  /** @brief True when the requested count can be chained in series. */
+  bool active = true;
+  /** @brief Persistent user-facing explanation when inactive. */
+  std::string message;
+  /** @brief Candidate parameters that can make the chain shape-compatible. */
+  std::vector<GroupCopyPropertyHint> propertyHints;
+};
+
 /** @brief Outcome of a group create/membership/copies mutation. */
 struct GroupActionResult {
   /** @brief True when the graph was mutated. */
@@ -1241,7 +1279,7 @@ inline bool propertySupportsCopyValueList(const NodeProperty &property) noexcept
       property.kind != PropertyKind::real)
     return false;
   return property.key != "residual" && property.key != "weight_norm" &&
-         property.key != "inputs";
+         property.key != "inputs" && property.key != "ports";
 }
 
 /**

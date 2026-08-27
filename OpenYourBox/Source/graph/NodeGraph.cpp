@@ -139,26 +139,6 @@ void appendSerialChainPorts(
 }
 
 /**
- * @brief User-facing reason when copies cannot form a serial stack.
- * @param inputs Chainable external inputs.
- * @param outputs Chainable external outputs.
- * @return Empty when pairing is legal.
- */
-std::string serialChainRefusal(
-    const std::vector<openyourbox::graph::GroupBoundaryPort> &inputs,
-    const std::vector<openyourbox::graph::GroupBoundaryPort> &outputs) {
-  if (inputs.empty() || outputs.empty() || inputs.size() != outputs.size())
-    return "Copies requires matching external inputs and outputs that can "
-           "chain in series";
-  for (std::size_t index = 0; index < inputs.size(); ++index) {
-    if (!outputs[index].shape.isCompatibleWith(inputs[index].shape))
-      return "Copies cannot chain: group outputs are not compatible with "
-             "group inputs";
-  }
-  return {};
-}
-
-/**
  * @brief Returns the parent group of a node or nested group.
  * @param graph Graph owning membership.
  * @param memberId Node or group identifier.
@@ -544,6 +524,13 @@ int resolvePinChannels(const openyourbox::graph::NodeGraph &graph,
     return openyourbox::graph::hostIoChannelsFromChoice(
         readNodeProperty(*node, "channels",
                          openyourbox::graph::hostIoChoiceFromChannels(2)));
+  case NodeType::groupInput:
+  case NodeType::groupOutput:
+    for (std::size_t index = 0; index < node->outputs.size(); ++index) {
+      if (node->outputs[index].id == pinId && index < node->inputs.size())
+        return resolvePinChannels(graph, node->inputs[index].id, visiting);
+    }
+    return 0;
   case NodeType::linear: {
     const auto incoming =
         node->inputs.empty()
@@ -1206,7 +1193,7 @@ void refreshOutputCopyShapes(openyourbox::graph::NodeGraph &graph) {
   }
   bool anyMultiCopy = false;
   for (const auto &group : graph.getGroups()) {
-    if (group.copies > 1) {
+    if (graph.groupCopyStatus(group.id).effectiveCopies > 1) {
       anyMultiCopy = true;
       break;
     }
@@ -1232,7 +1219,7 @@ void refreshOutputCopyShapes(openyourbox::graph::NodeGraph &graph) {
   }
 
   for (auto &node : graph.getNodes()) {
-    const auto copies = graph.effectiveCopyCount(node.id);
+    const auto copies = graph.effectiveRuntimeCopyCount(node.id);
     if (copies <= 1)
       continue;
     for (std::size_t pinIndex = 0; pinIndex < node.outputs.size(); ++pinIndex) {
@@ -1259,6 +1246,21 @@ void refreshOutputCopyShapes(openyourbox::graph::NodeGraph &graph) {
           continue;
         pin.copyShapes[static_cast<std::size_t>(slot)] =
             found->second->inputs[pinIndex].shape;
+      }
+    }
+  }
+  for (auto &node : graph.getNodes()) {
+    if (node.type != openyourbox::graph::NodeType::groupOutput)
+      continue;
+    const auto laneCount = std::min(node.inputs.size(), node.outputs.size());
+    for (std::size_t index = 0; index < laneCount; ++index) {
+      for (const auto &link : graph.getLinks()) {
+        if (link.destinationPinId != node.inputs[index].id)
+          continue;
+        const auto *source = graph.findPin(link.sourcePinId);
+        if (source != nullptr && !source->copyShapes.empty())
+          node.outputs[index].copyShapes = source->copyShapes;
+        break;
       }
     }
   }
@@ -1302,6 +1304,14 @@ void applyNodePinShapes(openyourbox::graph::NodeGraph &graph,
   };
 
   switch (node.type) {
+  case NodeType::groupInput:
+  case NodeType::groupOutput: {
+    inheritInputs();
+    const auto laneCount = std::min(node.inputs.size(), node.outputs.size());
+    for (std::size_t index = 0; index < laneCount; ++index)
+      node.outputs[index].shape = node.inputs[index].shape;
+    break;
+  }
   case NodeType::pqmfAnalysis: {
     const auto nBand =
         std::max(2, readNodeProperty(node, "n_band", defaultPqmfBands));
@@ -1530,6 +1540,10 @@ const char *nodeTypeName(openyourbox::graph::NodeType type) noexcept {
     return "conv_transpose1d";
   case NodeType::batchNorm:
     return "batch_norm";
+  case NodeType::groupInput:
+    return "group_input";
+  case NodeType::groupOutput:
+    return "group_output";
   }
   return "tcn";
 }
@@ -1567,6 +1581,10 @@ openyourbox::graph::NodeType nodeTypeFromName(const juce::String &name) {
     return NodeType::variationalBottleneck;
   if (name == "noise_synthesizer")
     return NodeType::noiseSynthesizer;
+  if (name == "group_input")
+    return NodeType::groupInput;
+  if (name == "group_output")
+    return NodeType::groupOutput;
   return NodeType::tcn;
 }
 
@@ -1575,7 +1593,7 @@ openyourbox::graph::NodeType nodeTypeFromName(const juce::String &name) {
  * @param name ValueTree `type` token.
  */
 bool isKnownPersistedNodeType(const juce::String &name) {
-  static const std::array<const char *, 21> known{
+  static const std::array<const char *, 23> known{
       "audio_input",
       "audio_output",
       "linear",
@@ -1596,6 +1614,8 @@ bool isKnownPersistedNodeType(const juce::String &name) {
       "batch_norm",
       "variational_bottleneck",
       "noise_synthesizer",
+      "group_input",
+      "group_output",
       "tcn"};
   for (const auto *token : known) {
     if (name == token)
@@ -1985,6 +2005,8 @@ void refreshCopySlotsForGroup(openyourbox::graph::NodeGraph &graph,
                               std::int32_t groupId) {
   for (const auto nodeId : graph.collectLeafNodeIds(groupId)) {
     if (auto *node = graph.findNode(nodeId)) {
+      if (openyourbox::graph::isGroupBoundaryType(node->type))
+        continue;
       const auto copies = graph.effectiveCopyCount(nodeId);
       openyourbox::graph::ensureCopySlotCount(*node, copies);
       openyourbox::graph::ensureNodePropertyCopyCounts(*node, copies);
@@ -2163,7 +2185,8 @@ std::int32_t NodeGraph::addNode(NodeType type, juce::Point<float> position,
           group->memberIds.end())
         group->memberIds.push_back(id);
     }
-    if (auto *created = findNode(id)) {
+    if (auto *created = findNode(id);
+        created != nullptr && !isGroupBoundaryType(created->type)) {
       const auto copies = effectiveCopyCount(id);
       ensureCopySlotCount(*created, copies);
       ensureNodePropertyCopyCounts(*created, copies);
@@ -2196,7 +2219,8 @@ void NodeGraph::ensureFixedHostIo() {
 std::optional<std::int32_t>
 NodeGraph::insertNodeOnLink(std::int32_t linkId, NodeType type,
                             juce::Point<float> position) {
-  if (isFixedIoType(type) || type == NodeType::blackBox ||
+  if (isFixedIoType(type) || isGroupBoundaryType(type) ||
+      type == NodeType::blackBox ||
       isConditioningSourceType(type))
     return std::nullopt;
   const auto *link = findLink(linkId);
@@ -2240,7 +2264,8 @@ NodeGraph::insertNodeOnLink(std::int32_t linkId, NodeType type,
 std::optional<std::int32_t>
 NodeGraph::attachNodeToPin(std::int32_t pinId, NodeType type,
                            juce::Point<float> position) {
-  if (isFixedIoType(type) || type == NodeType::blackBox)
+  if (isFixedIoType(type) || isGroupBoundaryType(type) ||
+      type == NodeType::blackBox)
     return std::nullopt;
   const auto resolvedPinId = resolveCollapsedPin(pinId);
   const auto *pin = findPin(resolvedPinId);
@@ -2284,6 +2309,7 @@ NodeGraph::attachNodeToPin(std::int32_t pinId, NodeType type,
 bool NodeGraph::removeNode(std::int32_t nodeId) {
   const auto *node = findNode(nodeId);
   if (node == nullptr || isFixedIoType(node->type) ||
+      isGroupBoundaryType(node->type) ||
       (node->state == NodeState::frozenGold &&
        node->type != NodeType::blackBox))
     return false;
@@ -2446,6 +2472,179 @@ int NodeGraph::effectiveCopyCount(std::int32_t nodeId) const {
     parent = group->parentGroupId;
   }
   return std::max(1, count);
+}
+
+GroupCopyStatus NodeGraph::groupCopyStatus(std::int32_t groupId) const {
+  GroupCopyStatus status;
+  const auto *group = findGroup(groupId);
+  if (group == nullptr) {
+    status.active = false;
+    status.message = "Group no longer exists";
+    return status;
+  }
+  status.requestedCopies =
+      std::clamp(group->copies, 1, maximumGroupCopies);
+  if (status.requestedCopies == 1)
+    return status;
+
+  std::vector<GroupBoundaryPort> inputs;
+  std::vector<GroupBoundaryPort> outputs;
+  appendSerialChainPorts(*this, groupId, inputs, outputs);
+  if (inputs.empty() || outputs.empty() || inputs.size() != outputs.size()) {
+    status.active = false;
+    status.message = "Requested " + std::to_string(status.requestedCopies) +
+                     " copies are inactive: declare the same number of Group "
+                     "Input and Group Output lanes";
+    return status;
+  }
+
+  const auto *inputHub = findNode(inputs.front().memberNodeId);
+  const auto *outputHub = findNode(outputs.front().memberNodeId);
+  bool hasThroughPath = inputHub != nullptr && outputHub != nullptr;
+  if (hasThroughPath) {
+    std::queue<std::int32_t> pending;
+    std::unordered_set<std::int32_t> visited;
+    pending.push(inputHub->id);
+    hasThroughPath = false;
+    while (!pending.empty()) {
+      const auto current = pending.front();
+      pending.pop();
+      if (!visited.insert(current).second)
+        continue;
+      if (current == outputHub->id) {
+        hasThroughPath = true;
+        break;
+      }
+      for (const auto &link : links) {
+        const auto source = findNodeForPin(link.sourcePinId);
+        const auto destination = findNodeForPin(link.destinationPinId);
+        if (source.has_value() && destination.has_value() &&
+            *source == current)
+          pending.push(*destination);
+      }
+    }
+  }
+  if (!hasThroughPath) {
+    status.active = false;
+    status.message = "Requested " + std::to_string(status.requestedCopies) +
+                     " copies are inactive: connect Group Input through the "
+                     "group to Group Output";
+    return status;
+  }
+
+  for (std::size_t index = 0; index < inputs.size(); ++index) {
+    if (outputs[index].shape.isCompatibleWith(inputs[index].shape))
+      continue;
+    status.active = false;
+    const auto outputShape = outputs[index].shape.displayLabel();
+    const auto inputShape = inputs[index].shape.displayLabel();
+    status.message =
+        "Requested " + std::to_string(status.requestedCopies) +
+        " copies are inactive: Output " + std::to_string(index + 1) + " (" +
+        (outputShape.empty() ? "unspecified" : outputShape) +
+        ") cannot feed Input " + std::to_string(index + 1) + " (" +
+        (inputShape.empty() ? "unspecified" : inputShape) + ")";
+
+    std::queue<std::int32_t> pending;
+    std::unordered_set<std::int32_t> visited;
+    if (outputHub != nullptr &&
+        index < outputHub->inputs.size()) {
+      for (const auto &link : links) {
+        if (link.destinationPinId != outputHub->inputs[index].id)
+          continue;
+        if (const auto source = findNodeForPin(link.sourcePinId);
+            source.has_value())
+          pending.push(*source);
+      }
+    }
+    while (!pending.empty()) {
+      const auto current = pending.front();
+      pending.pop();
+      if (!visited.insert(current).second)
+        continue;
+      const auto *node = findNode(current);
+      if (node == nullptr || node->type == NodeType::groupInput)
+        continue;
+      for (const auto &property : node->properties) {
+        const bool channels =
+            property.key == "channels" || property.key == "features" ||
+            property.key == "latent_size";
+        const bool rate =
+            property.key == "stride" || property.key == "n_band";
+        if ((!channels && !rate) ||
+            (outputs[index].shape.channels ==
+                 inputs[index].shape.channels &&
+             channels) ||
+            (outputs[index].shape.temporalRate ==
+                 inputs[index].shape.temporalRate &&
+             outputs[index].shape.nBand == inputs[index].shape.nBand && rate))
+          continue;
+        GroupCopyPropertyHint hint;
+        hint.nodeId = node->id;
+        hint.propertyKey = property.key;
+        hint.message = status.message;
+        if (propertySupportsPreserveIn(property))
+          hint.message += "; use 'in' to preserve the incoming width";
+        status.propertyHints.push_back(std::move(hint));
+      }
+      for (const auto &link : links) {
+        const auto destination = findNodeForPin(link.destinationPinId);
+        if (!destination.has_value() || *destination != current)
+          continue;
+        if (const auto source = findNodeForPin(link.sourcePinId);
+            source.has_value())
+          pending.push(*source);
+      }
+    }
+    return status;
+  }
+
+  status.effectiveCopies = status.requestedCopies;
+  return status;
+}
+
+int NodeGraph::effectiveRuntimeCopyCount(std::int32_t nodeId) const {
+  const auto *node = findNode(nodeId);
+  if (node == nullptr)
+    return 1;
+  int count = 1;
+  auto parent = node->parentGroupId;
+  std::unordered_set<std::int32_t> visiting;
+  while (parent.has_value()) {
+    if (!visiting.insert(*parent).second)
+      break;
+    const auto status = groupCopyStatus(*parent);
+    count *= std::max(1, status.effectiveCopies);
+    const auto *group = findGroup(*parent);
+    if (group == nullptr)
+      break;
+    parent = group->parentGroupId;
+  }
+  return std::max(1, count);
+}
+
+std::optional<std::string>
+NodeGraph::groupCopyPropertyHint(std::int32_t nodeId,
+                                 const std::string &propertyKey) const {
+  const auto *node = findNode(nodeId);
+  if (node == nullptr)
+    return std::nullopt;
+  auto parent = node->parentGroupId;
+  std::unordered_set<std::int32_t> visiting;
+  while (parent.has_value()) {
+    if (!visiting.insert(*parent).second)
+      break;
+    const auto status = groupCopyStatus(*parent);
+    for (const auto &hint : status.propertyHints) {
+      if (hint.nodeId == nodeId && hint.propertyKey == propertyKey)
+        return hint.message;
+    }
+    const auto *group = findGroup(*parent);
+    if (group == nullptr)
+      break;
+    parent = group->parentGroupId;
+  }
+  return std::nullopt;
 }
 
 std::vector<int> NodeGraph::ancestorCopyCounts(std::int32_t nodeId) const {
@@ -2670,6 +2869,41 @@ NodeGraph::groupBoundaryPorts(std::int32_t groupId) const {
 
 std::vector<GroupBoundaryPort>
 NodeGraph::groupInterfacePorts(std::int32_t groupId) const {
+  const auto *group = findGroup(groupId);
+  if (group == nullptr)
+    return {};
+  const GraphNode *inputHub = nullptr;
+  const GraphNode *outputHub = nullptr;
+  for (const auto memberId : group->memberIds) {
+    const auto *member = findNode(memberId);
+    if (member == nullptr)
+      continue;
+    if (member->type == NodeType::groupInput)
+      inputHub = member;
+    else if (member->type == NodeType::groupOutput)
+      outputHub = member;
+  }
+  if (inputHub != nullptr || outputHub != nullptr) {
+    std::vector<GroupBoundaryPort> explicitPorts;
+    if (inputHub != nullptr) {
+      for (std::size_t index = 0; index < inputHub->inputs.size(); ++index) {
+        const auto &pin = inputHub->inputs[index];
+        explicitPorts.push_back({pin.id, inputHub->id, PinKind::input, pin.shape,
+                                 "Input " + std::to_string(index + 1) + " " +
+                                     pin.label});
+      }
+    }
+    if (outputHub != nullptr) {
+      for (std::size_t index = 0; index < outputHub->outputs.size(); ++index) {
+        const auto &pin = outputHub->outputs[index];
+        explicitPorts.push_back(
+            {pin.id, outputHub->id, PinKind::output, pin.shape,
+             "Output " + std::to_string(index + 1) + " " + pin.label});
+      }
+    }
+    return explicitPorts;
+  }
+
   std::unordered_set<std::int32_t> leaves;
   for (const auto id : collectLeafNodeIds(groupId))
     leaves.insert(id);
@@ -2834,6 +3068,81 @@ bool NodeGraph::toggleGroupCollapsed(std::int32_t groupId) {
   return true;
 }
 
+void NodeGraph::ensureGroupBoundaryNodes(std::int32_t groupId,
+                                         bool preserveInferredPorts) {
+  auto *group = findGroup(groupId);
+  if (group == nullptr)
+    return;
+  for (const auto memberId : group->memberIds) {
+    const auto *member = findNode(memberId);
+    if (member != nullptr && isGroupBoundaryType(member->type))
+      return;
+  }
+
+  auto declared = preserveInferredPorts ? groupInterfacePorts(groupId)
+                                        : groupBoundaryPorts(groupId);
+  std::vector<GroupBoundaryPort> inputs;
+  std::vector<GroupBoundaryPort> outputs;
+  for (const auto &port : declared) {
+    if (port.kind == PinKind::input)
+      inputs.push_back(port);
+    else
+      outputs.push_back(port);
+  }
+
+  std::unordered_set<std::int32_t> leaves;
+  for (const auto leaf : collectLeafNodeIds(groupId))
+    leaves.insert(leaf);
+
+  const auto inputId =
+      addNode(NodeType::groupInput, {16.0f, 72.0f}, groupId);
+  const auto outputId = addNode(
+      NodeType::groupOutput,
+      {std::max(16.0f, group->size.x - 196.0f), 72.0f}, groupId);
+  auto *inputHub = findNode(inputId);
+  auto *outputHub = findNode(outputId);
+  if (inputHub == nullptr || outputHub == nullptr)
+    return;
+  setGroupBoundaryPortCount(*inputHub,
+                            std::max(1, static_cast<int>(inputs.size())));
+  setGroupBoundaryPortCount(*outputHub,
+                            std::max(1, static_cast<int>(outputs.size())));
+
+  for (std::size_t index = 0; index < inputs.size(); ++index) {
+    const auto memberPin = inputs[index].memberPinId;
+    if (const auto *pin = findPin(memberPin); pin != nullptr) {
+      inputHub->inputs[index].label = pin->label;
+      inputHub->outputs[index].label = pin->label;
+    }
+    for (auto &link : links) {
+      if (link.destinationPinId != memberPin)
+        continue;
+      const auto source = findNodeForPin(link.sourcePinId);
+      if (source.has_value() && leaves.count(*source) == 0)
+        link.destinationPinId = inputHub->inputs[index].id;
+    }
+    links.push_back(
+        {nextLinkId++, inputHub->outputs[index].id, memberPin});
+  }
+  for (std::size_t index = 0; index < outputs.size(); ++index) {
+    const auto memberPin = outputs[index].memberPinId;
+    if (const auto *pin = findPin(memberPin); pin != nullptr) {
+      outputHub->inputs[index].label = pin->label;
+      outputHub->outputs[index].label = pin->label;
+    }
+    for (auto &link : links) {
+      if (link.sourcePinId != memberPin)
+        continue;
+      const auto destination = findNodeForPin(link.destinationPinId);
+      if (destination.has_value() && leaves.count(*destination) == 0)
+        link.sourcePinId = outputHub->outputs[index].id;
+    }
+    links.push_back(
+        {nextLinkId++, memberPin, outputHub->inputs[index].id});
+  }
+  refreshPropagatedPinShapes(*this);
+}
+
 GroupActionResult
 NodeGraph::createGroup(const std::vector<std::int32_t> &memberIds) {
   std::vector<std::int32_t> unique;
@@ -2848,8 +3157,9 @@ NodeGraph::createGroup(const std::vector<std::int32_t> &memberIds) {
     const auto *group = findGroup(id);
     if (node == nullptr && group == nullptr)
       return {false, "Selection includes an unknown box", 0};
-    if (node != nullptr && isFixedIoType(node->type))
-      return {false, "Audio Input and Audio Output cannot join a group", 0};
+    if (node != nullptr &&
+        (isFixedIoType(node->type) || isGroupBoundaryType(node->type)))
+      return {false, "Audio and group boundary boxes cannot join a group", 0};
     const auto parent = parentGroupOf(*this, id);
     if (!parentInitialized) {
       sharedParent = parent;
@@ -2921,6 +3231,7 @@ NodeGraph::createGroup(const std::vector<std::int32_t> &memberIds) {
   }
   for (std::size_t index = 0; index < unique.size(); ++index)
     storeWorldPosition(*this, unique[index], memberWorlds[index], group.id);
+  ensureGroupBoundaryNodes(group.id, false);
   refreshCopySlotsForGroup(*this, group.id);
   return {true, {}, group.id};
 }
@@ -2930,6 +3241,17 @@ GroupActionResult NodeGraph::ungroup(std::int32_t groupId) {
   if (group == nullptr)
     return {false, "Group no longer exists", 0};
   const auto parent = group->parentGroupId;
+  std::vector<std::int32_t> boundaryIds;
+  for (const auto memberId : group->memberIds) {
+    const auto *member = findNode(memberId);
+    if (member != nullptr && isGroupBoundaryType(member->type))
+      boundaryIds.push_back(memberId);
+  }
+  for (const auto boundaryId : boundaryIds)
+    spliceGroupBoundaryNode(boundaryId);
+  group = findGroup(groupId);
+  if (group == nullptr)
+    return {false, "Group no longer exists", 0};
   const auto members = group->memberIds;
   std::vector<juce::Point<float>> memberWorlds;
   memberWorlds.reserve(members.size());
@@ -3010,8 +3332,8 @@ GroupActionResult NodeGraph::addToGroup(std::int32_t groupId,
   if (memberId == groupId)
     return {false, "A group cannot contain itself", 0};
   if (const auto *node = findNode(memberId)) {
-    if (isFixedIoType(node->type))
-      return {false, "Audio Input and Audio Output cannot join a group", 0};
+    if (isFixedIoType(node->type) || isGroupBoundaryType(node->type))
+      return {false, "Audio and group boundary boxes cannot join a group", 0};
   } else if (findGroup(memberId) == nullptr) {
     return {false, "Drop source is not a graph box", 0};
   }
@@ -3038,6 +3360,9 @@ GroupActionResult NodeGraph::addToGroup(std::int32_t groupId,
 }
 
 GroupActionResult NodeGraph::removeFromGroup(std::int32_t memberId) {
+  if (const auto *node = findNode(memberId);
+      node != nullptr && isGroupBoundaryType(node->type))
+    return {false, "Group Input and Group Output cannot leave their group", 0};
   const auto parent = parentGroupOf(*this, memberId);
   if (!parent.has_value())
     return {false, "Box is not inside a group", 0};
@@ -3070,6 +3395,7 @@ std::vector<std::int32_t> NodeGraph::expandSelectionToFreezableLeaves(
   const auto appendNode = [&](std::int32_t nodeId) {
     const auto *node = findNode(nodeId);
     if (node == nullptr || isFixedIoType(node->type) ||
+        isGroupBoundaryType(node->type) ||
         isConditioningSourceType(node->type) ||
         node->state != NodeState::liveBlue)
       return;
@@ -3091,21 +3417,15 @@ GroupActionResult NodeGraph::setGroupCopies(std::int32_t groupId, int copies) {
   auto *group = findGroup(groupId);
   if (group == nullptr)
     return {false, "Group no longer exists", 0};
-  if (copies < 1)
-    copies = 1;
+  copies = std::clamp(copies, 1, maximumGroupCopies);
   if (copies == group->copies)
-    return {true, {}, groupId};
-  if (copies > 1) {
-    std::vector<GroupBoundaryPort> inputs;
-    std::vector<GroupBoundaryPort> outputs;
-    appendSerialChainPorts(*this, groupId, inputs, outputs);
-    if (const auto message = serialChainRefusal(inputs, outputs);
-        !message.empty())
-      return {false, message, 0};
-  }
+    return {true, groupCopyStatus(groupId).message, groupId};
   group->copies = copies;
   refreshCopySlotsForGroup(*this, groupId);
   refreshPropagatedPinShapes(*this);
+  const auto status = groupCopyStatus(groupId);
+  if (!status.active)
+    return {true, status.message, groupId};
   const auto warning = firstIncompatibleLinkMessage(*this);
   return {true, warning, groupId};
 }
@@ -3168,7 +3488,12 @@ NodeGraph NodeGraph::withInvisibleCopiesMaterialized(
     auto *group = expanded.findGroup(groupId);
     if (group == nullptr || group->copies <= 1)
       continue;
-    const auto copies = group->copies;
+    const auto copyStatus = expanded.groupCopyStatus(groupId);
+    if (!copyStatus.active || copyStatus.effectiveCopies <= 1) {
+      group->copies = 1;
+      continue;
+    }
+    const auto copies = copyStatus.effectiveCopies;
     const auto templateNodes = expanded.collectLeafNodeIds(groupId);
     if (templateNodes.empty())
       continue;
@@ -3324,6 +3649,7 @@ NodeGraph NodeGraph::withInvisibleCopiesMaterialized(
     }
     group->copies = 1;
   }
+  expanded.flattenGroupBoundaryNodes();
   return expanded;
 }
 
@@ -3465,6 +3791,12 @@ bool NodeGraph::setProperty(std::int32_t nodeId, const std::string &key,
   const auto previousCopyValues = property->copyIntValues;
   const auto previousPreserveIn = property->preserveInBound;
   const auto previousInvalid = property->copyListInvalid;
+  if (key == "ports" && isGroupBoundaryType(node->type)) {
+    if (!setGroupBoundaryPortCount(*node, value))
+      return false;
+    refreshPropagatedPinShapes(*this);
+    return true;
+  }
   property->setValue(value);
 
   const auto syncCopyValues = [&]() {
@@ -3786,6 +4118,7 @@ NodeGraph::freezeSelection(const std::vector<std::int32_t> &selectedNodeIds,
   for (const auto nodeId : selectedNodeIds) {
     const auto *node = findNode(nodeId);
     if (node == nullptr || isFixedIoType(node->type) ||
+        isGroupBoundaryType(node->type) ||
         isConditioningSourceType(node->type) ||
         node->state != NodeState::liveBlue)
       return std::nullopt;
@@ -3911,11 +4244,23 @@ bool NodeGraph::unfreeze(std::int32_t nodeId) {
 
 std::optional<FreezeSelectionRequest> NodeGraph::createFreezeRequest(
     const std::vector<std::int32_t> &selectedNodeIds) const {
+  const auto hasBoundary = std::any_of(
+      nodes.begin(), nodes.end(),
+      [](const GraphNode &node) { return isGroupBoundaryType(node.type); });
+  if (hasBoundary) {
+    NodeGraph prepared;
+    prepared.restoreFromValueTree(toValueTree());
+    for (auto &group : prepared.groups)
+      group.copies = 1;
+    prepared.flattenGroupBoundaryNodes();
+    return prepared.createFreezeRequest(selectedNodeIds);
+  }
   if (!selectionIsConnected(selectedNodeIds))
     return std::nullopt;
   for (const auto nodeId : selectedNodeIds) {
     const auto *node = findNode(nodeId);
     if (node == nullptr || isFixedIoType(node->type) ||
+        isGroupBoundaryType(node->type) ||
         isConditioningSourceType(node->type) ||
         node->state != NodeState::liveBlue)
       return std::nullopt;
@@ -4104,6 +4449,11 @@ bool NodeGraph::isFixedIoNode(std::int32_t nodeId) const noexcept {
   return node != nullptr && isFixedIoType(node->type);
 }
 
+bool NodeGraph::isGroupBoundaryNode(std::int32_t nodeId) const noexcept {
+  const auto *node = findNode(nodeId);
+  return node != nullptr && isGroupBoundaryType(node->type);
+}
+
 std::optional<std::int32_t>
 NodeGraph::findNodeForPin(std::int32_t pinId) const noexcept {
   pinId = resolveCollapsedPin(pinId);
@@ -4124,7 +4474,7 @@ const ViewportState &NodeGraph::getViewport() const noexcept {
 
 juce::ValueTree NodeGraph::toValueTree() const {
   juce::ValueTree tree{"GraphDocument"};
-  tree.setProperty("version", 2, nullptr);
+  tree.setProperty("version", 3, nullptr);
   tree.setProperty("panX", viewport.pan.x, nullptr);
   tree.setProperty("panY", viewport.pan.y, nullptr);
   tree.setProperty("zoom", viewport.zoom, nullptr);
@@ -4224,15 +4574,24 @@ bool NodeGraph::restoreFromValueTree(const juce::ValueTree &tree) {
         viewport.stickySpine.push_back(id);
     }
   }
-  for (auto &node : nodes)
-    validateAuthoredCopyLists(node.id);
-
   links.erase(std::remove_if(links.begin(), links.end(),
                              [this](const GraphLink &link) {
                                return findPin(link.sourcePinId) == nullptr ||
                                       findPin(link.destinationPinId) == nullptr;
                              }),
               links.end());
+  std::vector<std::int32_t> groupsByDepth;
+  groupsByDepth.reserve(groups.size());
+  for (const auto &group : groups)
+    groupsByDepth.push_back(group.id);
+  std::sort(groupsByDepth.begin(), groupsByDepth.end(),
+            [this](std::int32_t left, std::int32_t right) {
+              return groupDepth(*this, left) > groupDepth(*this, right);
+            });
+  for (const auto groupId : groupsByDepth)
+    ensureGroupBoundaryNodes(groupId, true);
+  for (auto &node : nodes)
+    validateAuthoredCopyLists(node.id);
   ensureFixedHostIo();
   refreshAllMergeOutputShapes(*this);
   for (auto &node : nodes) {
@@ -4260,8 +4619,8 @@ juce::ValueTree NodeGraph::exportBox(std::int32_t boxId,
   tree.setProperty("version", 1, nullptr);
   tree.setProperty("rootId", boxId, nullptr);
   if (const auto *node = findNode(boxId)) {
-    if (isFixedIoType(node->type)) {
-      error = "Audio Input and Audio Output cannot be saved to the box library";
+    if (isFixedIoType(node->type) || isGroupBoundaryType(node->type)) {
+      error = "Audio and group boundary boxes cannot be saved independently";
       return {};
     }
     auto cloned = nodeToTree(*node);
@@ -4373,6 +4732,15 @@ NodeGraph::importBox(const juce::ValueTree &snapshot, juce::Point<float> positio
   const auto backup = toValueTree();
   const auto originalRoot = static_cast<std::int32_t>(snapshot["rootId"]);
   const auto requestedRoot = nestedRootId != 0 ? nestedRootId : originalRoot;
+  for (const auto child : snapshot) {
+    if (!child.hasType("Node") ||
+        static_cast<std::int32_t>(child["id"]) != requestedRoot)
+      continue;
+    if (isGroupBoundaryType(nodeTypeFromName(child["type"].toString()))) {
+      error = "Group Input and Group Output cannot be inserted independently";
+      return std::nullopt;
+    }
+  }
   std::unordered_set<std::int32_t> keepNodes;
   std::unordered_set<std::int32_t> keepGroups;
   collectSnapshotSubtree(snapshot, requestedRoot, keepNodes, keepGroups);
@@ -4479,6 +4847,10 @@ NodeGraph::importBox(const juce::ValueTree &snapshot, juce::Point<float> positio
   }
   const auto newRoot = rootFound->second;
 
+  std::vector<std::int32_t> importedGroupIds;
+  importedGroupIds.reserve(importedGroups.size());
+  for (const auto &group : importedGroups)
+    importedGroupIds.push_back(group.id);
   for (auto &node : importedNodes) {
     if (node.id == newRoot)
       node.position = position;
@@ -4492,6 +4864,12 @@ NodeGraph::importBox(const juce::ValueTree &snapshot, juce::Point<float> positio
   for (const auto &link : importedLinks)
     links.push_back(link);
 
+  std::sort(importedGroupIds.begin(), importedGroupIds.end(),
+            [this](std::int32_t left, std::int32_t right) {
+              return groupDepth(*this, left) > groupDepth(*this, right);
+            });
+  for (const auto groupId : importedGroupIds)
+    ensureGroupBoundaryNodes(groupId, true);
   refreshAllMergeOutputShapes(*this);
   return newRoot;
 }
@@ -4617,6 +4995,28 @@ GraphNode NodeGraph::makeNode(NodeType type, juce::Point<float> position) {
                                        PropertyKind::choice,
                                        {"Mono", "Mirrored", "Stereo"}));
     applyHostIoChannels(node);
+    break;
+  case NodeType::groupInput:
+    node.label = "Group Input";
+    node.detail = "Declared group inputs";
+    addInput("in 1");
+    addOutput("out 1");
+    node.inputs.front().shape = flexibleTensorShape();
+    node.outputs.front().shape = flexibleTensorShape();
+    node.properties.push_back(property("ports", "Inputs", 1,
+                                       minimumPositiveProperty,
+                                       unlimitedPropertyMaximum));
+    break;
+  case NodeType::groupOutput:
+    node.label = "Group Output";
+    node.detail = "Declared group outputs";
+    addInput("in 1");
+    addOutput("out 1");
+    node.inputs.front().shape = flexibleTensorShape();
+    node.outputs.front().shape = flexibleTensorShape();
+    node.properties.push_back(property("ports", "Outputs", 1,
+                                       minimumPositiveProperty,
+                                       unlimitedPropertyMaximum));
     break;
   case NodeType::linear:
     node.label = "Linear";
@@ -4866,6 +5266,113 @@ void NodeGraph::setMixerInputCount(GraphNode &node, int inputCount) {
         "in " + std::to_string(index + 1);
 }
 
+bool NodeGraph::setGroupBoundaryPortCount(GraphNode &node, int portCount) {
+  if (!isGroupBoundaryType(node.type))
+    return false;
+  const auto count = std::max(1, portCount);
+  const auto oldCount =
+      static_cast<int>(std::min(node.inputs.size(), node.outputs.size()));
+  if (count < oldCount) {
+    for (int index = count; index < oldCount; ++index) {
+      const auto inputId = node.inputs[static_cast<std::size_t>(index)].id;
+      const auto outputId = node.outputs[static_cast<std::size_t>(index)].id;
+      if (isPinConnected(inputId) || isPinConnected(outputId))
+        return false;
+    }
+  }
+  while (static_cast<int>(node.inputs.size()) > count)
+    node.inputs.pop_back();
+  while (static_cast<int>(node.outputs.size()) > count)
+    node.outputs.pop_back();
+  while (static_cast<int>(node.inputs.size()) < count) {
+    const auto index = static_cast<int>(node.inputs.size()) + 1;
+    node.inputs.push_back({nextPinId++, "in " + std::to_string(index),
+                           PinKind::input, flexibleTensorShape()});
+  }
+  while (static_cast<int>(node.outputs.size()) < count) {
+    const auto index = static_cast<int>(node.outputs.size()) + 1;
+    node.outputs.push_back({nextPinId++, "out " + std::to_string(index),
+                            PinKind::output, flexibleTensorShape()});
+  }
+  for (auto &property : node.properties) {
+    if (property.key == "ports")
+      property.setValue(count);
+  }
+  return true;
+}
+
+void NodeGraph::spliceGroupBoundaryNode(std::int32_t nodeId) {
+  const auto *node = findNode(nodeId);
+  if (node == nullptr || !isGroupBoundaryType(node->type))
+    return;
+  const auto parent = node->parentGroupId;
+  const auto inputs = node->inputs;
+  const auto outputs = node->outputs;
+  std::unordered_set<std::int32_t> incidentPins;
+  for (const auto &pin : inputs)
+    incidentPins.insert(pin.id);
+  for (const auto &pin : outputs)
+    incidentPins.insert(pin.id);
+
+  std::vector<GraphLink> bypasses;
+  const auto laneCount = std::min(inputs.size(), outputs.size());
+  for (std::size_t index = 0; index < laneCount; ++index) {
+    std::vector<std::int32_t> sources;
+    std::vector<std::int32_t> destinations;
+    for (const auto &link : links) {
+      if (link.destinationPinId == inputs[index].id)
+        sources.push_back(link.sourcePinId);
+      if (link.sourcePinId == outputs[index].id)
+        destinations.push_back(link.destinationPinId);
+    }
+    for (const auto sourcePin : sources) {
+      for (const auto destinationPin : destinations) {
+        if (sourcePin == destinationPin)
+          continue;
+        const auto duplicate = std::any_of(
+            links.begin(), links.end(),
+            [sourcePin, destinationPin](const GraphLink &link) {
+              return link.sourcePinId == sourcePin &&
+                     link.destinationPinId == destinationPin;
+            });
+        if (!duplicate)
+          bypasses.push_back({nextLinkId++, sourcePin, destinationPin});
+      }
+    }
+  }
+  links.erase(std::remove_if(links.begin(), links.end(),
+                             [&incidentPins](const GraphLink &link) {
+                               return incidentPins.count(link.sourcePinId) != 0 ||
+                                      incidentPins.count(link.destinationPinId) !=
+                                          0;
+                             }),
+              links.end());
+  links.insert(links.end(), bypasses.begin(), bypasses.end());
+  if (parent.has_value()) {
+    if (auto *group = findGroup(*parent)) {
+      group->memberIds.erase(
+          std::remove(group->memberIds.begin(), group->memberIds.end(), nodeId),
+          group->memberIds.end());
+    }
+  }
+  nodes.erase(std::remove_if(nodes.begin(), nodes.end(),
+                             [nodeId](const GraphNode &candidate) {
+                               return candidate.id == nodeId;
+                             }),
+              nodes.end());
+}
+
+void NodeGraph::flattenGroupBoundaryNodes() {
+  std::vector<std::int32_t> boundaryIds;
+  for (const auto &node : nodes) {
+    if (isGroupBoundaryType(node.type))
+      boundaryIds.push_back(node.id);
+  }
+  for (const auto nodeId : boundaryIds)
+    spliceGroupBoundaryNode(nodeId);
+  refreshPropagatedPinShapesCore(*this);
+}
+
 bool NodeGraph::wouldCreateCycle(std::int32_t sourceNodeId,
                                  std::int32_t destinationNodeId) const {
   std::queue<std::int32_t> pending;
@@ -4939,6 +5446,7 @@ std::vector<std::vector<std::int32_t>> NodeGraph::partitionFreezeChains(
   for (const auto id : selectedNodeIds) {
     const auto *node = findNode(id);
     if (node == nullptr || isFixedIoType(node->type) ||
+        isGroupBoundaryType(node->type) ||
         isConditioningSourceType(node->type) ||
         node->state != NodeState::liveBlue)
       return {};
@@ -5046,11 +5554,18 @@ bool NodeGraph::clearWeightsToSeed(std::int32_t nodeId, std::int32_t seed) {
 }
 
 std::optional<TrainJobRequest> NodeGraph::createTrainRequest() const {
+  const auto hasBoundary = std::any_of(
+      nodes.begin(), nodes.end(),
+      [](const GraphNode &node) { return isGroupBoundaryType(node.type); });
   for (const auto &group : groups) {
     if (group.copies > 1) {
       auto expanded = withInvisibleCopiesMaterialized();
       return expanded.createTrainRequest();
     }
+  }
+  if (hasBoundary) {
+    auto prepared = withInvisibleCopiesMaterialized();
+    return prepared.createTrainRequest();
   }
   const auto armed = getArmedTrainableNodeIds();
   if (armed.empty())

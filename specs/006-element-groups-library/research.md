@@ -11,13 +11,14 @@
 - Fully custom non-ImGui group widgets: rejected — contradicts clarification preference for imgui-node-editor.
 - Subgraph replacement nodes only (always collapsed): rejected — blocks expanded editing of interiors.
 
-## Decision 2: Collapse is presentation-only with derived external ports
+## Decision 2: Collapse is presentation-only with explicit external ports
 
-**Decision**: When `collapsed == true`, `NodeRenderer` skips drawing member nodes/links that are fully inside the collapsed subtree and draws a compact group node (still via node-editor node APIs) showing the group name and **derived external ports**: one pin per link that crosses the group boundary (same type/shape as the underlying member pin). Expanding restores member drawing and prior layout. `LiveGraphPublisher` / audio always compile the **full** flat topology of members regardless of collapse. Project save persists each group’s `collapsed` flag (FR-009). Library **insert** forces root + all nested groups to `collapsed = true` (FR-012a); does not restore save-time expand state into the library payload as authoritative.
+**Decision**: Each group contains one mandatory editor-only **Group Input** hub and one mandatory editor-only **Group Output** hub. Their positive, variable lane counts explicitly declare the ordered external interface; ports are no longer inferred from dangling member pins. The hubs cannot be deleted, moved out of their owner, frozen, analyzed, or saved/inserted independently. Shrinking a hub is refused if it would remove a connected lane. When `collapsed == true`, `NodeRenderer` skips drawing member nodes/links and draws a compact group node exposing these declared lanes. `LiveGraphPublisher` / audio compiles the full topology after boundary hubs are flattened into direct connections. Project save persists each group’s `collapsed` flag (FR-009). Library **insert** forces root + all nested groups to `collapsed = true` (FR-012a).
 
-**Rationale**: Spec FR-005–008, FR-012a; SC-003. imgui-node-editor cannot hide internals with external pins natively.
+**Rationale**: Explicit hubs make the interface intentional and stable when internal wiring changes, while retaining the one-canvas-at-a-time editor model. Spec FR-004a–004c, FR-005–008, FR-012a; SC-003.
 
 **Alternatives considered**:
+- Derive group ports continuously from unconnected/dangling member pins: rejected — accidental wiring edits silently redefine the public interface and make copy-chain validity unstable.
 - Literally remove members from the graph while collapsed: rejected — breaks audio and identity.
 - Keep drawing members off-canvas: rejected — still costly and confuses selection/freeze.
 - Store expand state in library entries and restore on insert: rejected — clarify Option B.
@@ -73,13 +74,34 @@
 **Alternatives considered**:
 - Unlimited depth with no guard: risk UI/stack issues; soft cap with message is enough.
 
-## Decision 8: Group copies N = independent serial stack, invisible in the UI
+## Decision 8: Persist requested copies; derive safe runtime copies
 
-**Decision**: Each `GraphGroup` has integer `copies` N (default 1). For N > 1 the live engine **unrolls** N independent serial copies of the group’s processing chain (separate weights/parameters—not shared). The editor **does not draw** cloned elements: users edit one visible chain; each member stores a `copySlots` vector holding every copy’s seed/weights/artifact. External cables attach to the first copy’s inputs and last copy’s outputs. If chaining is illegal, refuse/clamp N with a clear message. Increasing N clones the last slot; decreasing N drops trailing slots. Nested groups each have their own N (slot count is the product of ancestor N). Persist N and slots in project state. Collapse remains presentation-only.
+**Decision**: Each `GraphGroup::copies` stores the user-authored/requested N (default 1). `groupCopyStatus` derives an effective runtime count: requested N only becomes effective when Group Input and Group Output declare the same nonzero lane count, a directed path exists from the input hub to the output hub, and every output lane shape can feed its paired input lane shape. Otherwise effective runtime copies is 1 while requested N remains unchanged and persisted. The live engine unrolls the effective count into independent serial copies (separate weights/parameters—not shared); the editor does not draw clones, and each member retains per-copy values/artifacts. Increasing requested N clones the last slot and decreasing it drops trailing slots. Nested effective counts multiply. Because validity is recomputed from current graph state, a stored request reactivates automatically as soon as the user makes the interface, path, and shapes legal.
 
-**Rationale**: Spec FR-017–FR-017e plus later product note that copies must not appear as extra canvas boxes (TODO group UX). Independent weights still required for training.
+**Rationale**: Preserving intent avoids losing an architecture setting during temporary edits, while clamping only runtime expansion prevents invalid graph publication. Spec FR-017–FR-017h plus the product requirement that copies not appear as extra canvas boxes. Independent weights remain required for training.
 
 **Alternatives considered**:
+- Reject the N edit or overwrite N with 1 when currently invalid: rejected — loses user intent and prevents automatic reactivation after repair.
 - Shared weights across repeats: rejected by clarify.
 - Materialize copies as extra visible nodes: rejected — clutters the graph and duplicates UI.
 - Parallel or residual stack topologies in v1: deferred.
+
+## Decision 9: Actionable copy diagnostics, never automatic model edits
+
+**Decision**: An inactive request reports requested N, effective runtime count 1, and the specific interface/path/shape failure. Shape failures include paired lane labels and shape values. Reverse traversal from the affected Group Output lane identifies candidate shape-driving properties (for example `channels`, `features`, `latent_size`, `stride`, and `n_band`); the property UI highlights them and suggests `in` preservation where supported. Validation and diagnostics never rewrite model properties, links, or lane counts. The user chooses and performs every repair.
+
+**Rationale**: A safe clamp without repair guidance is difficult to resolve, but automatic parameter tuning could change model architecture or sound without consent. Explicit hints preserve user control and allow the already stored N to reactivate naturally.
+
+**Alternatives considered**:
+- Automatically force output dimensions/rates to match the group input: rejected — ambiguous in branched graphs and violates authored model intent.
+- Show only a generic “cannot chain” warning: rejected — does not identify the lane or properties the user can inspect.
+
+## Decision 10: Migrate legacy inferred interfaces on load/import
+
+**Decision**: Graph document version 3 persists the boundary hub node types. During project restore and box-library import, process groups deepest-first. Any group without boundary hubs receives both hubs; each prior inferred interface pin becomes a corresponding lane, external links are redirected to the hub’s outside pin, and an internal link joins the hub to the former member pin. New groups seed hubs from cables crossing the newly created boundary. Every hub has at least one lane even when no interface was previously inferred.
+
+**Rationale**: Existing projects and library entries must retain connectivity while moving from incidental dangling-pin inference to explicit interfaces. Deepest-first conversion keeps nested boundaries coherent.
+
+**Alternatives considered**:
+- Require users to redraw legacy group interfaces: rejected — destructive migration and poor project compatibility.
+- Keep a permanent mixed inferred/explicit mode: rejected — creates two interface semantics and inconsistent copy validation.

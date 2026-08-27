@@ -7,6 +7,7 @@
 #include <queue>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace {
@@ -20,6 +21,55 @@ bool expect(bool condition, const char *message) {
   if (!condition)
     std::cerr << "FAIL: " << message << '\n';
   return condition;
+}
+
+/**
+ * @brief Finds one direct fixed interface hub in a group.
+ * @param graph Graph containing the group.
+ * @param groupId Group whose direct members are inspected.
+ * @param type Boundary type to find.
+ * @return Hub id, or zero when absent.
+ */
+std::int32_t findBoundary(const openyourbox::graph::NodeGraph &graph,
+                          std::int32_t groupId,
+                          openyourbox::graph::NodeType type) {
+  const auto *group = graph.findGroup(groupId);
+  if (group == nullptr)
+    return 0;
+  for (const auto memberId : group->memberIds) {
+    const auto *node = graph.findNode(memberId);
+    if (node != nullptr && node->type == type)
+      return node->id;
+  }
+  return 0;
+}
+
+/**
+ * @brief Connects the first declared lane around an existing member chain.
+ * @param graph Graph to mutate.
+ * @param groupId Group owning its mandatory hubs.
+ * @param firstNodeId First processing node in the chain.
+ * @param lastNodeId Last processing node in the chain.
+ * @return True when both internal boundary links were accepted.
+ */
+bool connectDeclaredThrough(openyourbox::graph::NodeGraph &graph,
+                            std::int32_t groupId, std::int32_t firstNodeId,
+                            std::int32_t lastNodeId) {
+  using openyourbox::graph::NodeType;
+  const auto inputId = findBoundary(graph, groupId, NodeType::groupInput);
+  const auto outputId = findBoundary(graph, groupId, NodeType::groupOutput);
+  const auto *input = graph.findNode(inputId);
+  const auto *output = graph.findNode(outputId);
+  const auto *first = graph.findNode(firstNodeId);
+  const auto *last = graph.findNode(lastNodeId);
+  if (input == nullptr || output == nullptr || first == nullptr ||
+      last == nullptr || input->outputs.empty() || output->inputs.empty() ||
+      first->inputs.empty() || last->outputs.empty())
+    return false;
+  return graph.connect(input->outputs.front().id, first->inputs.front().id)
+             .accepted &&
+         graph.connect(last->outputs.front().id, output->inputs.front().id)
+             .accepted;
 }
 } // namespace
 
@@ -94,6 +144,18 @@ int main() {
   const auto *group = graph.findGroup(created.groupId);
   passed &= expect(group != nullptr && !group->collapsed && group->copies == 1,
                    "new groups start expanded with N=1");
+  const auto groupInput =
+      findBoundary(graph, created.groupId, NodeType::groupInput);
+  const auto groupOutput =
+      findBoundary(graph, created.groupId, NodeType::groupOutput);
+  passed &= expect(groupInput != 0 && groupOutput != 0,
+                   "new groups receive explicit input and output hubs");
+  passed &= expect(!graph.removeNode(groupInput) &&
+                       !graph.removeFromGroup(groupOutput).accepted,
+                   "group boundary hubs cannot be removed");
+  juce::String boundarySaveError;
+  passed &= expect(!graph.exportBox(groupInput, boundarySaveError).isValid(),
+                   "group boundary hubs cannot be saved independently");
   passed &= expect(group != nullptr && group->size.x >= 160.0f &&
                        group->size.y >= 120.0f,
                    "new groups fit their members");
@@ -238,8 +300,8 @@ int main() {
     passed &= expect(visited == static_cast<int>(expanded.getNodes().size()),
                      "unrolled copies must remain acyclic");
   }
-  passed &= expect(graph.getNodes().size() == 4,
-                   "UI graph must not show copied elements");
+  passed &= expect(graph.getNodes().size() == 6,
+                   "UI graph shows one template plus its two boundary hubs");
 
   const auto illegal = graph.createGroup({convA});
   passed &= expect(!illegal.accepted, "grouping requires two members");
@@ -288,17 +350,17 @@ int main() {
     bool hasInternalOutput = false;
     for (const auto &port : ports) {
       if (port.kind == openyourbox::graph::PinKind::input &&
-          port.memberNodeId == convA)
+          port.memberNodeId == groupInput)
         hasInput = true;
       if (port.kind == openyourbox::graph::PinKind::output &&
-          port.memberNodeId == convB)
+          port.memberNodeId == groupOutput)
         hasOutput = true;
       if (port.kind == openyourbox::graph::PinKind::output &&
           port.memberNodeId == convA)
         hasInternalOutput = true;
     }
     passed &= expect(hasInput && hasOutput,
-                     "group I/O pins mediate external member ports");
+                     "group I/O pins come from explicit boundary hubs");
     passed &= expect(!hasInternalOutput,
                      "internally wired member outputs are not group I/O");
     passed &= expect(graph.innermostVisibleGroupOf(convA) == created.groupId,
@@ -365,6 +427,68 @@ int main() {
                                 1.5f) < 0.01f,
                    "group inner camera survives round-trip");
 
+  {
+    auto legacyTree = tree.createCopy();
+    std::unordered_set<std::int32_t> boundaryPins;
+    boundaryPins.reserve(4);
+    for (const auto boundaryId : {groupInput, groupOutput}) {
+      const auto *boundary = graph.findNode(boundaryId);
+      if (boundary == nullptr)
+        continue;
+      for (const auto &pin : boundary->inputs)
+        boundaryPins.insert(pin.id);
+      for (const auto &pin : boundary->outputs)
+        boundaryPins.insert(pin.id);
+    }
+    for (int index = legacyTree.getNumChildren() - 1; index >= 0; --index) {
+      auto child = legacyTree.getChild(index);
+      if (child.hasType("Node")) {
+        const auto type = child["type"].toString();
+        if (type == "group_input" || type == "group_output")
+          legacyTree.removeChild(index, nullptr);
+      } else if (child.hasType("Link")) {
+        const auto source = static_cast<std::int32_t>(child["sourcePin"]);
+        const auto destination =
+            static_cast<std::int32_t>(child["destinationPin"]);
+        if (boundaryPins.count(source) != 0 ||
+            boundaryPins.count(destination) != 0)
+          legacyTree.removeChild(index, nullptr);
+      } else if (child.hasType("Group") &&
+                 static_cast<std::int32_t>(child["id"]) == created.groupId) {
+        for (int memberIndex = child.getNumChildren() - 1; memberIndex >= 0;
+             --memberIndex) {
+          const auto member = child.getChild(memberIndex);
+          const auto memberId = static_cast<std::int32_t>(member["id"]);
+          if (memberId == groupInput || memberId == groupOutput)
+            child.removeChild(memberIndex, nullptr);
+        }
+      }
+    }
+    juce::ValueTree legacyInputLink{"Link"};
+    legacyInputLink.setProperty("id", 90001, nullptr);
+    legacyInputLink.setProperty(
+        "sourcePin", graph.findNode(input)->outputs.front().id, nullptr);
+    legacyInputLink.setProperty(
+        "destinationPin", graph.findNode(convA)->inputs.front().id, nullptr);
+    legacyTree.appendChild(legacyInputLink, nullptr);
+    juce::ValueTree legacyOutputLink{"Link"};
+    legacyOutputLink.setProperty("id", 90002, nullptr);
+    legacyOutputLink.setProperty(
+        "sourcePin", graph.findNode(convB)->outputs.front().id, nullptr);
+    legacyOutputLink.setProperty(
+        "destinationPin", graph.findNode(output)->inputs.front().id, nullptr);
+    legacyTree.appendChild(legacyOutputLink, nullptr);
+
+    NodeGraph migrated;
+    passed &= expect(migrated.restoreFromValueTree(legacyTree),
+                     "legacy inferred-interface document migrates");
+    passed &= expect(
+        findBoundary(migrated, created.groupId, NodeType::groupInput) != 0 &&
+            findBoundary(migrated, created.groupId, NodeType::groupOutput) != 0 &&
+            migrated.groupInterfacePorts(created.groupId).size() == 2,
+        "legacy migration creates explicit hubs and preserves two lanes");
+  }
+
   graph.getViewport().focusedGroupId = created.groupId;
   const auto focusedTree = graph.toValueTree();
   NodeGraph focusedRestore;
@@ -404,9 +528,12 @@ int main() {
                        "TCN audio out to TCN audio in");
       const auto grouped = tcnGraph.createGroup({first, second});
       passed &= expect(grouped.accepted, "TCN chain must group");
+      passed &= expect(connectDeclaredThrough(tcnGraph, grouped.groupId, first,
+                                              second),
+                       "TCN chain connects to its declared boundary");
       const auto tcnCopies = tcnGraph.setGroupCopies(grouped.groupId, 3);
       passed &= expect(tcnCopies.accepted,
-                       "TCN chain must accept copies without host I/O cables");
+                       "TCN chain stores requested copies without host cables");
       const auto unrolled = tcnGraph.withInvisibleCopiesMaterialized();
       int tcnCount = 0;
       int controlFeeds = 0;
@@ -444,9 +571,131 @@ int main() {
     const auto right = knobs.addNode(NodeType::knobInput, {80.0f, 0.0f});
     const auto grouped = knobs.createGroup({left, right});
     passed &= expect(grouped.accepted, "two knobs may group");
-    const auto refused = knobs.setGroupCopies(grouped.groupId, 2);
-    passed &= expect(!refused.accepted,
-                     "knobs without a through-path must refuse copies");
+    const auto requested = knobs.setGroupCopies(grouped.groupId, 2);
+    const auto status = knobs.groupCopyStatus(grouped.groupId);
+    passed &= expect(requested.accepted && !status.active &&
+                         status.requestedCopies == 2 &&
+                         status.effectiveCopies == 1,
+                     "invalid requested N persists while one copy runs");
+    const auto unrolled = knobs.withInvisibleCopiesMaterialized();
+    int knobCount = 0;
+    for (const auto &node : unrolled.getNodes()) {
+      if (node.type == NodeType::knobInput)
+        ++knobCount;
+    }
+    passed &= expect(knobCount == 2,
+                     "inactive copies do not materialize in execution");
+  }
+
+  {
+    NodeGraph residual;
+    const auto body =
+        residual.addNode(NodeType::activation, {160.0f, 0.0f});
+    const auto add = residual.addNode(NodeType::merge, {340.0f, 0.0f});
+    const auto grouped = residual.createGroup({body, add});
+    passed &= expect(grouped.accepted, "residual fixture groups");
+    const auto inputId =
+        findBoundary(residual, grouped.groupId, NodeType::groupInput);
+    const auto outputId =
+        findBoundary(residual, grouped.groupId, NodeType::groupOutput);
+    const auto *inputHub = residual.findNode(inputId);
+    const auto *outputHub = residual.findNode(outputId);
+    const auto *bodyNode = residual.findNode(body);
+    const auto *addNode = residual.findNode(add);
+    if (inputHub != nullptr && outputHub != nullptr && bodyNode != nullptr &&
+        addNode != nullptr && addNode->inputs.size() >= 2) {
+      passed &= expect(
+          residual
+                  .connect(inputHub->outputs.front().id,
+                           bodyNode->inputs.front().id)
+                  .accepted &&
+              residual
+                  .connect(bodyNode->outputs.front().id,
+                           addNode->inputs.front().id)
+                  .accepted &&
+              residual
+                  .connect(inputHub->outputs.front().id, addNode->inputs[1].id)
+                  .accepted &&
+              residual
+                  .connect(addNode->outputs.front().id,
+                           outputHub->inputs.front().id)
+                  .accepted,
+          "declared input fans out into an acyclic residual join");
+    }
+    passed &= expect(residual.setGroupCopies(grouped.groupId, 2).accepted &&
+                         residual.groupCopyStatus(grouped.groupId).active,
+                     "residual group activates serial copies");
+    const auto expanded = residual.withInvisibleCopiesMaterialized();
+    bool hasBoundary = false;
+    for (const auto &node : expanded.getNodes())
+      hasBoundary =
+          hasBoundary || openyourbox::graph::isGroupBoundaryType(node.type);
+    passed &= expect(!hasBoundary,
+                     "execution graph flattens editor-only boundary hubs");
+  }
+
+  {
+    NodeGraph interfaceGraph;
+    const auto first =
+        interfaceGraph.addNode(NodeType::activation, {120.0f, 0.0f});
+    const auto second =
+        interfaceGraph.addNode(NodeType::activation, {260.0f, 0.0f});
+    const auto grouped = interfaceGraph.createGroup({first, second});
+    const auto inputId =
+        findBoundary(interfaceGraph, grouped.groupId, NodeType::groupInput);
+    passed &= expect(interfaceGraph.setProperty(inputId, "ports", 2),
+                     "Group Input can add a declared lane");
+    const auto *inputHub = interfaceGraph.findNode(inputId);
+    passed &= expect(inputHub != nullptr && inputHub->inputs.size() == 2 &&
+                         inputHub->outputs.size() == 2,
+                     "boundary lane count resizes paired pins");
+    if (inputHub != nullptr) {
+      passed &= expect(
+          interfaceGraph
+              .connect(inputHub->outputs[1].id,
+                       interfaceGraph.findNode(first)->inputs.front().id)
+              .accepted,
+          "new boundary lane can feed group processing");
+      passed &= expect(!interfaceGraph.setProperty(inputId, "ports", 1),
+                       "connected boundary lanes cannot be removed");
+      std::int32_t laneLink = 0;
+      for (const auto &link : interfaceGraph.getLinks()) {
+        if (link.sourcePinId == inputHub->outputs[1].id)
+          laneLink = link.id;
+      }
+      passed &= expect(laneLink != 0 && interfaceGraph.removeLink(laneLink) &&
+                           interfaceGraph.setProperty(inputId, "ports", 1),
+                       "disconnected trailing boundary lanes can be removed");
+    }
+  }
+
+  {
+    NodeGraph mismatch;
+    const auto input =
+        mismatch.addNode(NodeType::audioInput, {0.0f, 0.0f});
+    const auto linear = mismatch.addNode(NodeType::linear, {120.0f, 0.0f});
+    const auto inside =
+        mismatch.addNode(NodeType::activation, {240.0f, 0.0f});
+    const auto outside =
+        mismatch.addNode(NodeType::activation, {420.0f, 0.0f});
+    mismatch.setProperty(linear, "features", 4);
+    mismatch.connect(mismatch.findNode(input)->outputs.front().id,
+                     mismatch.findNode(linear)->inputs.front().id);
+    mismatch.connect(mismatch.findNode(linear)->outputs.front().id,
+                     mismatch.findNode(inside)->inputs.front().id);
+    mismatch.connect(mismatch.findNode(inside)->outputs.front().id,
+                     mismatch.findNode(outside)->inputs.front().id);
+    const auto grouped = mismatch.createGroup({linear, inside});
+    mismatch.setGroupCopies(grouped.groupId, 3);
+    const auto status = mismatch.groupCopyStatus(grouped.groupId);
+    const auto hint = mismatch.groupCopyPropertyHint(linear, "features");
+    passed &= expect(!status.active && status.effectiveCopies == 1 &&
+                         hint.has_value() &&
+                         hint->find("use 'in'") != std::string::npos,
+                     "shape mismatch flags the property that can preserve input");
+    passed &= expect(mismatch.setPropertyPreserveIn(linear, "features", 1) &&
+                         mismatch.groupCopyStatus(grouped.groupId).active,
+                     "fixing the flagged property automatically activates N");
   }
 
   {
@@ -540,6 +789,9 @@ int main() {
                        "element-randomize linear to activation");
     const auto grouped = elementRandomize.createGroup({linearId, actId});
     passed &= expect(grouped.accepted, "element-randomize fixture groups");
+    passed &= expect(connectDeclaredThrough(elementRandomize, grouped.groupId,
+                                            linearId, actId),
+                     "element-randomize chain connects to its boundary");
     auto *linear = elementRandomize.findNode(linearId);
     passed &= expect(linear != nullptr, "element-randomize linear exists");
     if (linear != nullptr) {

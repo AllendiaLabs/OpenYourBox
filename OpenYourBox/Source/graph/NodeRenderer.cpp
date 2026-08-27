@@ -483,7 +483,8 @@ void NodeRenderer::render(NodeGraph &graph,
     for (const auto linkId : selectedLinkIds)
       ed::DeleteLink(ed::LinkId(editorIdentifier(linkId)));
     for (const auto nodeId : selectedNodeIds) {
-      if (!graph.isFixedIoNode(nodeId))
+      if (!graph.isFixedIoNode(nodeId) &&
+          !graph.isGroupBoundaryNode(nodeId))
         ed::DeleteNode(ed::NodeId(editorIdentifier(nodeId)));
     }
     for (const auto groupId : selectedGroupIds)
@@ -843,7 +844,8 @@ void NodeRenderer::renderNode(NodeGraph &graph, GraphNode &node,
   ImGui::TextUnformatted(node.label.c_str());
   drawNodeDivider();
 
-  for (const auto &pin : node.inputs) {
+  if (node.type != NodeType::groupInput) {
+    for (const auto &pin : node.inputs) {
     ed::BeginPin(ed::PinId(editorIdentifier(pin.id)), ed::PinKind::Input);
     const auto shapeLabel = pin.shape.displayLabel();
     if (!shapeLabel.empty())
@@ -851,6 +853,7 @@ void NodeRenderer::renderNode(NodeGraph &graph, GraphNode &node,
     else
       ImGui::Text("<- %s", pin.label.c_str());
     ed::EndPin();
+    }
   }
 
   ImGui::TextDisabled("%s", node.detail.c_str());
@@ -912,6 +915,19 @@ void NodeRenderer::renderNode(NodeGraph &graph, GraphNode &node,
       continue;
     }
     ImGui::PushID(property.key.c_str());
+    if (const auto hint =
+            graph.groupCopyPropertyHint(node.id, property.key);
+        hint.has_value()) {
+      ImGui::TextColored(ImVec4(1.0f, 0.72f, 0.18f, 1.0f),
+                         "! Copy shape");
+      if (ImGui::IsItemHovered()) {
+        ImGui::BeginTooltip();
+        ImGui::PushTextWrapPos(ImGui::GetFontSize() * 30.0f);
+        ImGui::TextUnformatted(hint->c_str());
+        ImGui::PopTextWrapPos();
+        ImGui::EndTooltip();
+      }
+    }
     auto value = property.value;
     bool changed = false;
     int dragSteps = 0;
@@ -1355,7 +1371,8 @@ void NodeRenderer::renderNode(NodeGraph &graph, GraphNode &node,
     ImGui::Text("Inference: %.3f ms", node.metrics->inferenceTimeMilliseconds);
   }
 
-  for (const auto &pin : node.outputs) {
+  if (node.type != NodeType::groupOutput) {
+    for (const auto &pin : node.outputs) {
     ed::BeginPin(ed::PinId(editorIdentifier(pin.id)), ed::PinKind::Output);
     const auto shapeLabel =
         formatShapeCopyList(pin.copyShapes, pin.shape);
@@ -1365,9 +1382,11 @@ void NodeRenderer::renderNode(NodeGraph &graph, GraphNode &node,
       ImGui::Text("%s ->", pin.label.c_str());
     ed::PinPivotAlignment(ImVec2(1.0f, 0.5f));
     ed::EndPin();
+    }
   }
 
-  if (ImGui::SmallButton("Analyze") && callbacks.analysisRequested)
+  if (!isGroupBoundaryType(node.type) && ImGui::SmallButton("Analyze") &&
+      callbacks.analysisRequested)
     callbacks.analysisRequested(node.id);
 
   ImGui::PopTextWrapPos();
@@ -1484,6 +1503,14 @@ void NodeRenderer::renderGroup(NodeGraph &graph, GraphGroup &group,
   }
   ImGui::SameLine();
   ImGui::TextDisabled("copies");
+  const auto copyStatus = graph.groupCopyStatus(group.id);
+  if (!copyStatus.active) {
+    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.72f, 0.18f, 1.0f));
+    ImGui::TextWrapped("Requested %d; effective 1",
+                       copyStatus.requestedCopies);
+    ImGui::TextWrapped("%s", copyStatus.message.c_str());
+    ImGui::PopStyleColor();
+  }
   if (ImGui::Button("Randomize Weights", ImVec2(-FLT_MIN, 0.0f))) {
     if (graph.randomizeGroupWeights(group.id)) {
       for (const auto leaf : graph.collectLeafNodeIds(group.id)) {
@@ -1612,6 +1639,7 @@ void NodeRenderer::handleDeletion(NodeGraph &graph) {
     }
     const auto *node = graph.findNode(id);
     if (node == nullptr || graph.isFixedIoNode(id) ||
+        graph.isGroupBoundaryNode(id) ||
         (node->state == NodeState::frozenGold &&
          node->type != NodeType::blackBox)) {
       ed::RejectDeletedItem();
@@ -1667,12 +1695,13 @@ void NodeRenderer::handleContextMenus(NodeGraph &graph,
     std::vector<std::int32_t> freezeIds;
     freezeIds.reserve(selectedNodeIds.size() + selectedGroupIds.size() + 2);
     for (const auto id : selectedNodeIds) {
-      if (!graph.isFixedIoNode(id))
+      if (!graph.isFixedIoNode(id) && !graph.isGroupBoundaryNode(id))
         freezeIds.push_back(id);
     }
     for (const auto id : selectedGroupIds)
       freezeIds.push_back(id);
     if (contextNodeId != 0 && !graph.isFixedIoNode(contextNodeId) &&
+        !graph.isGroupBoundaryNode(contextNodeId) &&
         std::find(freezeIds.begin(), freezeIds.end(), contextNodeId) ==
             freezeIds.end())
       freezeIds.push_back(contextNodeId);
@@ -1697,6 +1726,7 @@ void NodeRenderer::handleContextMenus(NodeGraph &graph,
           callbacks.freezeSelection)
         callbacks.freezeSelection(freezeIds);
       if (node != nullptr && !graph.isFixedIoNode(contextNodeId) &&
+          !graph.isGroupBoundaryNode(contextNodeId) &&
           ImGui::MenuItem("Delete")) {
         mutatedThisFrame = graph.removeNode(contextNodeId) || mutatedThisFrame;
         recompileThisFrame = mutatedThisFrame || recompileThisFrame;
@@ -1755,7 +1785,8 @@ void NodeRenderer::handleContextMenus(NodeGraph &graph,
     }
     if (group != nullptr && ImGui::MenuItem("Open"))
       setCanvasFocus(graph, contextGroupId);
-    if (node != nullptr && node->parentGroupId.has_value() &&
+    if (node != nullptr && !graph.isGroupBoundaryNode(contextNodeId) &&
+        node->parentGroupId.has_value() &&
         ImGui::MenuItem("Remove from Group")) {
       mutatedThisFrame =
           graph.removeFromGroup(contextNodeId).accepted || mutatedThisFrame;
@@ -1776,7 +1807,9 @@ void NodeRenderer::handleContextMenus(NodeGraph &graph,
           (contextNodeId != 0 && selectedNodeIds.size() == 1 &&
            selectedGroupIds.empty() && selectedNodeIds.front() == contextNodeId));
     const bool saveIo =
-        node != nullptr && graph.isFixedIoNode(contextNodeId);
+        node != nullptr &&
+        (graph.isFixedIoNode(contextNodeId) ||
+         graph.isGroupBoundaryNode(contextNodeId));
     if (saveTarget != 0 && activeBoxLibrary != nullptr) {
       if (saveMulti)
         ImGui::BeginDisabled();
@@ -2373,7 +2406,7 @@ void NodeRenderer::renderProjectStructureItem(NodeGraph &graph,
       else
         setCanvasFocus(graph, std::nullopt);
     }
-    if (!isFixedIoType(node->type) &&
+    if (!isFixedIoType(node->type) && !isGroupBoundaryType(node->type) &&
         ImGui::BeginPopupContextItem("ProjectStructureNode")) {
       if (ImGui::MenuItem("Save to Box Library...")) {
         pendingSaveBoxId = boxId;

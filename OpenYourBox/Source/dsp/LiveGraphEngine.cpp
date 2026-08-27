@@ -1312,6 +1312,8 @@ void LiveGraphRuntime::executeElement(std::size_t index,
   case openyourbox::graph::NodeType::audioInput:
   case openyourbox::graph::NodeType::knobInput:
   case openyourbox::graph::NodeType::xyTrackpad:
+  case openyourbox::graph::NodeType::groupInput:
+  case openyourbox::graph::NodeType::groupOutput:
     break;
   }
 
@@ -1512,6 +1514,10 @@ LiveGraphEngine::compile(const graph::NodeGraph &graphDocument,
     } else if (node.type == NodeType::audioOutput) {
       outputNodeId = node.id;
       ++outputNodeCount;
+    } else if (graph::isGroupBoundaryType(node.type)) {
+      return failure(
+          LiveGraphErrorCode::invalidGraph, node.id,
+          "Group Input/Output hubs must be removed before live compilation");
     }
 
     const auto addPin = [&](const graph::Pin &pin, graph::PinKind kind) {
@@ -1593,9 +1599,24 @@ LiveGraphEngine::compile(const graph::NodeGraph &graphDocument,
         ready.push(destination);
     }
   }
-  if (topologicalIds.size() != nodes.size())
-    return failure(LiveGraphErrorCode::cycle, 0,
-                   "Graph contains a directed cycle");
+  if (topologicalIds.size() != nodes.size()) {
+    std::unordered_set<std::int32_t> ordered(topologicalIds.begin(),
+                                             topologicalIds.end());
+    std::string detail = "Graph contains a directed cycle involving";
+    int named = 0;
+    for (const auto &node : nodes) {
+      if (ordered.count(node.id) != 0)
+        continue;
+      detail += named == 0 ? " " : ", ";
+      detail += node.label.empty() ? ("#" + std::to_string(node.id))
+                                   : node.label;
+      if (++named >= 6)
+        break;
+    }
+    if (named == 0)
+      detail = "Graph contains a directed cycle";
+    return failure(LiveGraphErrorCode::cycle, 0, detail);
+  }
 
   std::unordered_set<std::int32_t> fromInput;
   std::queue<std::int32_t> traversal;
@@ -2231,6 +2252,11 @@ LiveGraphEngine::compile(const graph::NodeGraph &graphDocument,
         randomizeElementWeights(element, node.seed);
         break;
       }
+      case NodeType::groupInput:
+      case NodeType::groupOutput:
+        return failure(
+            LiveGraphErrorCode::invalidGraph, node.id,
+            "Group Input/Output hubs must be removed before live compilation");
       }
 
       std::uint64_t upstreamReceptiveField = 1;

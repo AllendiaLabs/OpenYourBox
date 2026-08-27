@@ -1210,6 +1210,277 @@ int main() {
   passed &= expect(growthCompiled.succeeded(),
                    "Control TCN with growth 8, residual, and PReLU must compile");
 
+  {
+    openyourbox::graph::NodeGraph groupedGraph;
+    const auto groupedInput = groupedGraph.addNode(
+        openyourbox::graph::NodeType::audioInput, {0.0f, 0.0f});
+    const auto first = groupedGraph.addNode(
+        openyourbox::graph::NodeType::convolution, {140.0f, 0.0f});
+    const auto second = groupedGraph.addNode(
+        openyourbox::graph::NodeType::convolution, {280.0f, 0.0f});
+    const auto groupedOutput = groupedGraph.addNode(
+        openyourbox::graph::NodeType::audioOutput, {420.0f, 0.0f});
+    groupedGraph.connect(groupedGraph.findNode(groupedInput)->outputs.front().id,
+                         groupedGraph.findNode(first)->inputs.front().id);
+    groupedGraph.connect(groupedGraph.findNode(first)->outputs.front().id,
+                         groupedGraph.findNode(second)->inputs.front().id);
+    groupedGraph.connect(groupedGraph.findNode(second)->outputs.front().id,
+                         groupedGraph.findNode(groupedOutput)->inputs.front().id);
+    const auto grouped = groupedGraph.createGroup({first, second});
+    passed &= expect(grouped.accepted &&
+                         groupedGraph.setGroupCopies(grouped.groupId, 2).accepted &&
+                         groupedGraph.groupCopyStatus(grouped.groupId).active,
+                     "explicit group interface activates compatible copies");
+    const auto prepared = groupedGraph.withInvisibleCopiesMaterialized();
+    int convolutionCount = 0;
+    bool hasBoundaryHub = false;
+    for (const auto &node : prepared.getNodes()) {
+      if (node.type == openyourbox::graph::NodeType::convolution)
+        ++convolutionCount;
+      hasBoundaryHub =
+          hasBoundaryHub || openyourbox::graph::isGroupBoundaryType(node.type);
+    }
+    passed &= expect(convolutionCount == 4 && !hasBoundaryHub,
+                     "runtime graph unrolls copies and removes boundary hubs");
+    passed &= expect(LiveGraphEngine::compile(prepared, options).succeeded(),
+                     "flattened explicit group compiles in the live engine");
+    const auto trainRequest = groupedGraph.createTrainRequest();
+    passed &= expect(
+        trainRequest.has_value() && trainRequest->armedNodeIds.size() == 4 &&
+            trainRequest->graphFragment.find("group_input") ==
+                std::string::npos &&
+            trainRequest->graphFragment.find("group_output") ==
+                std::string::npos,
+        "training materializes active copies without editor-only hubs");
+    const auto freezeRequest =
+        groupedGraph.createFreezeRequest({first, second});
+    passed &= expect(
+        freezeRequest.has_value() &&
+            freezeRequest->graphFragment.find("group_input") ==
+                std::string::npos &&
+            freezeRequest->graphFragment.find("group_output") ==
+                std::string::npos,
+        "freeze requests flatten editor-only boundary hubs");
+  }
+
+  {
+    using openyourbox::graph::NodeType;
+    openyourbox::graph::NodeGraph modesGraph;
+    const auto audioIn =
+        modesGraph.addNode(NodeType::audioInput, {0.0f, 0.0f});
+    const auto utility1 =
+        modesGraph.addNode(NodeType::merge, {120.0f, 0.0f});
+    const auto bodyAct =
+        modesGraph.addNode(NodeType::activation, {240.0f, 40.0f});
+    const auto bodyConv =
+        modesGraph.addNode(NodeType::convolution, {360.0f, 40.0f});
+    const auto utility2 =
+        modesGraph.addNode(NodeType::merge, {480.0f, 0.0f});
+    const auto audioOut =
+        modesGraph.addNode(NodeType::audioOutput, {620.0f, 0.0f});
+    modesGraph.setProperty(utility1, "inputs", 1);
+    modesGraph.setProperty(utility2, "inputs", 2);
+    modesGraph.connect(modesGraph.findNode(bodyAct)->outputs.front().id,
+                       modesGraph.findNode(bodyConv)->inputs.front().id);
+    const auto body = modesGraph.createGroup({bodyAct, bodyConv});
+    std::int32_t bodyIn = 0;
+    std::int32_t bodyOut = 0;
+    if (const auto *group = modesGraph.findGroup(body.groupId)) {
+      for (const auto memberId : group->memberIds) {
+        const auto *member = modesGraph.findNode(memberId);
+        if (member == nullptr)
+          continue;
+        if (member->type == NodeType::groupInput)
+          bodyIn = memberId;
+        if (member->type == NodeType::groupOutput)
+          bodyOut = memberId;
+      }
+    }
+    // Group the residual first, then wire through stack hubs (UI order).
+    modesGraph.connect(modesGraph.findNode(audioIn)->outputs.front().id,
+                       modesGraph.findNode(utility1)->inputs.front().id);
+    modesGraph.connect(modesGraph.findNode(utility1)->outputs.front().id,
+                       modesGraph.findNode(bodyIn)->inputs.front().id);
+    modesGraph.connect(modesGraph.findNode(bodyOut)->outputs.front().id,
+                       modesGraph.findNode(utility2)->inputs.front().id);
+    modesGraph.connect(modesGraph.findNode(utility1)->outputs.front().id,
+                       modesGraph.findNode(utility2)->inputs[1].id);
+    modesGraph.connect(modesGraph.findNode(utility2)->outputs.front().id,
+                       modesGraph.findNode(audioOut)->inputs.front().id);
+    const auto stack =
+        modesGraph.createGroup({utility1, body.groupId, utility2});
+    passed &= expect(stack.accepted, "mode residual stack groups");
+    for (int mode = 0; mode <= 2; ++mode) {
+      passed &= expect(modesGraph.setProperty(utility1, "mode", mode),
+                       "fork utility mode can be set");
+      const auto prepared = modesGraph.withInvisibleCopiesMaterialized();
+      const auto compiled = LiveGraphEngine::compile(prepared, options);
+      if (!compiled.succeeded())
+        std::cerr << "fork mode " << mode
+                  << " failed: " << compiled.error.message << '\n';
+      passed &= expect(compiled.succeeded(),
+                       "fork utility residual compiles in every mode");
+    }
+
+    // Prefer forking from Group Input (no Utility fork at all).
+    openyourbox::graph::NodeGraph hubFork;
+    const auto audioIn2 =
+        hubFork.addNode(NodeType::audioInput, {0.0f, 0.0f});
+    const auto bodyAct2 =
+        hubFork.addNode(NodeType::activation, {200.0f, 40.0f});
+    const auto bodyConv2 =
+        hubFork.addNode(NodeType::convolution, {320.0f, 40.0f});
+    const auto join2 = hubFork.addNode(NodeType::merge, {460.0f, 0.0f});
+    const auto audioOut2 =
+        hubFork.addNode(NodeType::audioOutput, {600.0f, 0.0f});
+    hubFork.setProperty(join2, "inputs", 2);
+    hubFork.connect(hubFork.findNode(bodyAct2)->outputs.front().id,
+                    hubFork.findNode(bodyConv2)->inputs.front().id);
+    const auto body2 = hubFork.createGroup({bodyAct2, bodyConv2});
+    std::int32_t nestedIn = 0;
+    std::int32_t nestedOut = 0;
+    if (const auto *group = hubFork.findGroup(body2.groupId)) {
+      for (const auto memberId : group->memberIds) {
+        const auto *member = hubFork.findNode(memberId);
+        if (member == nullptr)
+          continue;
+        if (member->type == NodeType::groupInput)
+          nestedIn = memberId;
+        if (member->type == NodeType::groupOutput)
+          nestedOut = memberId;
+      }
+    }
+    hubFork.connect(hubFork.findNode(audioIn2)->outputs.front().id,
+                    hubFork.findNode(nestedIn)->inputs.front().id);
+    hubFork.connect(hubFork.findNode(nestedOut)->outputs.front().id,
+                    hubFork.findNode(join2)->inputs.front().id);
+    hubFork.connect(hubFork.findNode(audioIn2)->outputs.front().id,
+                    hubFork.findNode(join2)->inputs[1].id);
+    hubFork.connect(hubFork.findNode(join2)->outputs.front().id,
+                    hubFork.findNode(audioOut2)->inputs.front().id);
+    const auto stack2 = hubFork.createGroup({body2.groupId, join2});
+    passed &= expect(stack2.accepted, "hub-fork residual stack groups");
+    const auto hubPrepared = hubFork.withInvisibleCopiesMaterialized();
+    const auto hubCompiled = LiveGraphEngine::compile(hubPrepared, options);
+    if (!hubCompiled.succeeded())
+      std::cerr << "hub-fork residual failed: " << hubCompiled.error.message
+                << '\n';
+    passed &= expect(hubCompiled.succeeded(),
+                     "Group Input fan-out residual compiles");
+  }
+
+  {
+    using openyourbox::graph::NodeType;
+    openyourbox::graph::NodeGraph residualGraph;
+    const auto audioIn =
+        residualGraph.addNode(NodeType::audioInput, {0.0f, 0.0f});
+    const auto utility1 =
+        residualGraph.addNode(NodeType::merge, {120.0f, 0.0f});
+    const auto bodyAct =
+        residualGraph.addNode(NodeType::activation, {240.0f, 40.0f});
+    const auto bodyConv =
+        residualGraph.addNode(NodeType::convolution, {360.0f, 40.0f});
+    const auto utility2 =
+        residualGraph.addNode(NodeType::merge, {480.0f, 0.0f});
+    const auto audioOut =
+        residualGraph.addNode(NodeType::audioOutput, {620.0f, 0.0f});
+    residualGraph.setProperty(utility1, "inputs", 1);
+    residualGraph.setProperty(utility2, "inputs", 2);
+    residualGraph.connect(residualGraph.findNode(bodyAct)->outputs.front().id,
+                          residualGraph.findNode(bodyConv)->inputs.front().id);
+    const auto body = residualGraph.createGroup({bodyAct, bodyConv});
+    passed &= expect(body.accepted, "nested residual body groups");
+    std::int32_t bodyIn = 0;
+    std::int32_t bodyOut = 0;
+    if (const auto *group = residualGraph.findGroup(body.groupId)) {
+      for (const auto memberId : group->memberIds) {
+        const auto *member = residualGraph.findNode(memberId);
+        if (member == nullptr)
+          continue;
+        if (member->type == NodeType::groupInput)
+          bodyIn = memberId;
+        if (member->type == NodeType::groupOutput)
+          bodyOut = memberId;
+      }
+    }
+    residualGraph.connect(residualGraph.findNode(audioIn)->outputs.front().id,
+                          residualGraph.findNode(utility1)->inputs.front().id);
+    const auto bodyFeed =
+        residualGraph.connect(residualGraph.findNode(utility1)->outputs.front().id,
+                              residualGraph.findNode(bodyIn)->inputs.front().id);
+    const auto bodyJoin =
+        residualGraph.connect(residualGraph.findNode(bodyOut)->outputs.front().id,
+                              residualGraph.findNode(utility2)->inputs.front().id);
+    const auto skip =
+        residualGraph.connect(residualGraph.findNode(utility1)->outputs.front().id,
+                              residualGraph.findNode(utility2)->inputs[1].id);
+    passed &= expect(bodyFeed.accepted && bodyJoin.accepted && skip.accepted,
+                     "utility residual fork/join connects");
+    if (!skip.accepted)
+      std::cerr << "skip refused: " << skip.message << '\n';
+    residualGraph.connect(residualGraph.findNode(utility2)->outputs.front().id,
+                          residualGraph.findNode(audioOut)->inputs.front().id);
+    const auto stack =
+        residualGraph.createGroup({utility1, body.groupId, utility2});
+    passed &= expect(stack.accepted, "utility residual stack groups");
+    passed &= expect(residualGraph.setGroupCopies(stack.groupId, 2).accepted &&
+                         residualGraph.groupCopyStatus(stack.groupId).active,
+                     "utility residual stack activates N=2");
+    const auto prepared = residualGraph.withInvisibleCopiesMaterialized();
+    bool hasBoundary = false;
+    for (const auto &node : prepared.getNodes())
+      hasBoundary =
+          hasBoundary || openyourbox::graph::isGroupBoundaryType(node.type);
+    const auto residualCompiled = LiveGraphEngine::compile(prepared, options);
+    passed &= expect(!hasBoundary && residualCompiled.succeeded(),
+                     "nested residual stack compiles without a directed cycle");
+
+    openyourbox::graph::NodeGraph sameUtility;
+    const auto sameIn =
+        sameUtility.addNode(NodeType::audioInput, {0.0f, 0.0f});
+    const auto sameUtil =
+        sameUtility.addNode(NodeType::merge, {120.0f, 0.0f});
+    const auto sameAct =
+        sameUtility.addNode(NodeType::activation, {240.0f, 0.0f});
+    const auto sameConv =
+        sameUtility.addNode(NodeType::convolution, {360.0f, 0.0f});
+    const auto sameOut =
+        sameUtility.addNode(NodeType::audioOutput, {520.0f, 0.0f});
+    sameUtility.setProperty(sameUtil, "inputs", 2);
+    sameUtility.connect(sameUtility.findNode(sameAct)->outputs.front().id,
+                        sameUtility.findNode(sameConv)->inputs.front().id);
+    const auto bodyGroup = sameUtility.createGroup({sameAct, sameConv});
+    passed &= expect(bodyGroup.accepted, "same-utility body groups");
+    std::int32_t sameBodyIn = 0;
+    std::int32_t sameBodyOut = 0;
+    if (const auto *group = sameUtility.findGroup(bodyGroup.groupId)) {
+      for (const auto memberId : group->memberIds) {
+        const auto *member = sameUtility.findNode(memberId);
+        if (member == nullptr)
+          continue;
+        if (member->type == NodeType::groupInput)
+          sameBodyIn = memberId;
+        if (member->type == NodeType::groupOutput)
+          sameBodyOut = memberId;
+      }
+    }
+    sameUtility.connect(sameUtility.findNode(sameIn)->outputs.front().id,
+                        sameUtility.findNode(sameUtil)->inputs.front().id);
+    sameUtility.connect(sameUtility.findNode(sameUtil)->outputs.front().id,
+                        sameUtility.findNode(sameBodyIn)->inputs.front().id);
+    sameUtility.connect(sameUtility.findNode(sameBodyIn)->outputs.front().id,
+                        sameUtility.findNode(sameAct)->inputs.front().id);
+    sameUtility.connect(sameUtility.findNode(sameConv)->outputs.front().id,
+                        sameUtility.findNode(sameBodyOut)->inputs.front().id);
+    const auto cyclic = sameUtility.connect(
+        sameUtility.findNode(sameBodyOut)->outputs.front().id,
+        sameUtility.findNode(sameUtil)->inputs[1].id);
+    passed &= expect(!cyclic.accepted,
+                     "same Utility cannot be both residual fork and join");
+    sameUtility.connect(sameUtility.findNode(sameUtil)->outputs.front().id,
+                        sameUtility.findNode(sameOut)->inputs.front().id);
+  }
+
   openyourbox::graph::NodeGraph trainGraph;
   const auto trainIn =
       trainGraph.addNode(openyourbox::graph::NodeType::audioInput, {0.0f, 0.0f});

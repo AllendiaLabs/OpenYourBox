@@ -322,7 +322,10 @@ public:
   groupBoundaryPorts(std::int32_t groupId) const;
 
   /**
-   * @brief Pins that form a group's external I/O (unconnected internally).
+   * @brief Explicit Group Input/Output pins that form the external interface.
+   *
+   * Legacy groups without hubs temporarily fall back to inferred unconnected
+   * leaf pins while they are migrated during restore.
    * @param groupId Target group.
    */
   [[nodiscard]] std::vector<GroupBoundaryPort>
@@ -347,6 +350,29 @@ public:
    * @param nodeId Candidate node.
    */
   [[nodiscard]] int effectiveCopyCount(std::int32_t nodeId) const;
+
+  /**
+   * @brief Product of currently chainable ancestor copy counts.
+   * @param nodeId Candidate node.
+   * @return Runtime copy product, using one for every inactive request.
+   */
+  [[nodiscard]] int effectiveRuntimeCopyCount(std::int32_t nodeId) const;
+
+  /**
+   * @brief Evaluates a group's requested serial copies without mutating it.
+   * @param groupId Target group.
+   * @return Effective count and actionable diagnostics.
+   */
+  [[nodiscard]] GroupCopyStatus groupCopyStatus(std::int32_t groupId) const;
+
+  /**
+   * @brief Returns the inactive-copy hint affecting one property, if any.
+   * @param nodeId Element containing the property.
+   * @param propertyKey Canonical property key.
+   */
+  [[nodiscard]] std::optional<std::string>
+  groupCopyPropertyHint(std::int32_t nodeId,
+                        const std::string &propertyKey) const;
 
   /**
    * @brief Ancestor copy counts from outermost group to the node's parent.
@@ -591,6 +617,9 @@ public:
   /** @brief Returns true for the undeletable host audio boundary nodes. */
   [[nodiscard]] bool isFixedIoNode(std::int32_t nodeId) const noexcept;
 
+  /** @brief Returns true for a non-removable Group Input/Output hub. */
+  [[nodiscard]] bool isGroupBoundaryNode(std::int32_t nodeId) const noexcept;
+
   /** @brief Returns the node that owns a pin, or no value. */
   [[nodiscard]] std::optional<std::int32_t>
   findNodeForPin(std::int32_t pinId) const noexcept;
@@ -661,6 +690,28 @@ private:
    * @param inputCount Requested input port count (minimum 1).
    */
   void setMixerInputCount(GraphNode &node, int inputCount);
+  /**
+   * @brief Resizes paired lanes on a Group Input/Output hub.
+   * @param node Boundary hub to update.
+   * @param portCount Requested lane count (minimum one).
+   * @return False when shrinking would remove a connected lane.
+   */
+  bool setGroupBoundaryPortCount(GraphNode &node, int portCount);
+  /**
+   * @brief Adds fixed boundary hubs and routes a new or legacy group through them.
+   * @param groupId Group requiring an explicit interface.
+   * @param preserveInferredPorts True to preserve every legacy inferred port;
+   *        false to declare only currently crossing cables.
+   */
+  void ensureGroupBoundaryNodes(std::int32_t groupId,
+                                bool preserveInferredPorts);
+  /**
+   * @brief Splices paired lanes through one boundary hub and removes it.
+   * @param nodeId Group Input/Output node to dissolve.
+   */
+  void spliceGroupBoundaryNode(std::int32_t nodeId);
+  /** @brief Removes editor-only hubs by splicing every paired lane. */
+  void flattenGroupBoundaryNodes();
   /** @brief Tests whether a candidate edge would introduce a directed cycle. */
   bool wouldCreateCycle(std::int32_t sourceNodeId,
                         std::int32_t destinationNodeId) const;

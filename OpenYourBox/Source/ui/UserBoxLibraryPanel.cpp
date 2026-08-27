@@ -331,7 +331,9 @@ void UserBoxLibraryPanel::renderSnapshotMembers(
   for (const auto child : snapshot) {
     if (child.hasType("Group"))
       groups.emplace(static_cast<std::int32_t>(child["id"]), child);
-    else if (child.hasType("Node"))
+    else if (child.hasType("Node") &&
+             child["type"].toString() != "group_input" &&
+             child["type"].toString() != "group_output")
       nodeLabels.emplace(static_cast<std::int32_t>(child["id"]),
                          child["label"].toString());
   }
@@ -350,7 +352,9 @@ void UserBoxLibraryPanel::renderSnapshotMembers(
       row.label = group->second.getProperty("name", "Group").toString();
     } else {
       const auto label = nodeLabels.find(row.id);
-      row.label = label != nodeLabels.end() ? label->second : juce::String("Element");
+      if (label == nodeLabels.end())
+        continue;
+      row.label = label->second;
     }
     rows.push_back(std::move(row));
   }

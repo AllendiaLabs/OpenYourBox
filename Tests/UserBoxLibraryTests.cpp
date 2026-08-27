@@ -91,6 +91,24 @@ int main() {
 
   const auto grouped = graph.createGroup({convA, convB});
   passed &= expect(grouped.accepted, "two processing nodes must group");
+  std::int32_t boundaryId = 0;
+  if (const auto *group = graph.findGroup(grouped.groupId)) {
+    for (const auto memberId : group->memberIds) {
+      const auto *member = graph.findNode(memberId);
+      if (member != nullptr &&
+          openyourbox::graph::isGroupBoundaryType(member->type)) {
+        boundaryId = memberId;
+        break;
+      }
+    }
+  }
+  error.clear();
+  passed &= expect(
+      boundaryId != 0 &&
+          !library
+               .saveBox(graph, boundaryId, "Boundary", {}, false, error)
+               .has_value(),
+      "group boundary hubs cannot be saved as standalone boxes");
   graph.setGroupCopies(grouped.groupId, 3);
   error.clear();
   const auto savedGroup =
@@ -159,12 +177,26 @@ int main() {
                      "inserted groups restore copies N");
     passed &= expect(placed.getGroups().size() == 1,
                      "library original is not mutated into extra groups");
+    int boundaryCount = 0;
+    if (placedGroup != nullptr) {
+      for (const auto memberId : placedGroup->memberIds) {
+        const auto *member = placed.findNode(memberId);
+        if (member != nullptr &&
+            openyourbox::graph::isGroupBoundaryType(member->type))
+          ++boundaryCount;
+      }
+    }
+    passed &= expect(boundaryCount == 2,
+                     "inserted groups restore explicit input/output hubs");
 
     juce::String snapError;
     auto snapshot = reloaded.loadEntrySnapshot(g1->id, snapError);
     std::int32_t nestedId = 0;
     for (const auto child : snapshot) {
       if (!child.hasType("Node"))
+        continue;
+      const auto type = child["type"].toString();
+      if (type == "group_input" || type == "group_output")
         continue;
       nestedId = static_cast<std::int32_t>(child["id"]);
       break;
