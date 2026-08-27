@@ -31,6 +31,8 @@ void configureDownConv(NodeGraph &graph, std::int32_t id, int stride, int channe
   graph.setProperty(id, "channels", channels);
   graph.setProperty(id, "kernel_size", kernelSize);
   graph.setProperty(id, "dilation", 1);
+  // Encoder path matches acids-rave v1 (BN, not weight_norm).
+  graph.setProperty(id, "weight_norm", 0);
 }
 
 void configureUpConv(NodeGraph &graph, std::int32_t id, int stride, int channels,
@@ -39,6 +41,8 @@ void configureUpConv(NodeGraph &graph, std::int32_t id, int stride, int channels
   graph.setProperty(id, "channels", channels);
   graph.setProperty(id, "kernel_size", kernelSize);
   graph.setProperty(id, "dilation", 1);
+  // Decoder CNN matches acids-rave v1 ``blocks.normalization.mode = weight_norm``.
+  graph.setProperty(id, "weight_norm", 1);
 }
 } // namespace
 

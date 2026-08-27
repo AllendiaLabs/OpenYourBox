@@ -1646,6 +1646,40 @@ int main() {
   }
 
   {
+    openyourbox::graph::NodeGraph originalLayout;
+    const auto layoutError = openyourbox::graph::insertRaveLayout(
+        originalLayout, openyourbox::graph::RaveLayoutId::original, 1);
+    passed &= expect(layoutError.empty(),
+                     layoutError.empty()
+                         ? "original RAVE layout must insert"
+                         : layoutError.c_str());
+    bool sawDecoderWeightNorm = false;
+    bool sawEncoderConv = false;
+    for (const auto &node : originalLayout.getNodes()) {
+      int weightNorm = -1;
+      for (const auto &property : node.properties) {
+        if (property.key == "weight_norm")
+          weightNorm = property.value;
+      }
+      if (node.type == openyourbox::graph::NodeType::convolution) {
+        sawEncoderConv = true;
+        passed &= expect(weightNorm == 0,
+                         "original encoder Conv1D must leave weight_norm off");
+      }
+      if (node.type == openyourbox::graph::NodeType::convTranspose) {
+        sawDecoderWeightNorm = true;
+        passed &= expect(weightNorm == 1,
+                         "original decoder ConvTranspose must enable "
+                         "weight_norm");
+      }
+    }
+    passed &= expect(sawEncoderConv,
+                     "original RAVE layout must include encoder Conv1D");
+    passed &= expect(sawDecoderWeightNorm,
+                     "original RAVE layout decoder must set weight_norm");
+  }
+
+  {
     openyourbox::graph::NodeGraph oddGraph;
     oddGraph.ensureFixedHostIo();
     const auto linear = oddGraph.addNode(

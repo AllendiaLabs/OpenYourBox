@@ -637,6 +637,30 @@ class VariationalBottleneckParityTests(unittest.TestCase):
         keep_low = int((cumulative >= 0.5).nonzero()[0]) + 1
         self.assertGreaterEqual(keep_high, keep_low)
 
+    def test_weight_norm_property_wraps_and_strips_for_export(self) -> None:
+        """Decoder Conv1d with weight_norm trains as g/v and exports plain weight."""
+        layer = train_worker.CausalConv1d(4, 8, 3, 1, weight_norm=True)
+        self.assertTrue(hasattr(layer.convolution, "weight_g"))
+        self.assertTrue(hasattr(layer.convolution, "weight_v"))
+        plain = train_worker.CausalConv1d(4, 8, 3, 1, weight_norm=False)
+        self.assertFalse(hasattr(plain.convolution, "weight_g"))
+
+        wrapped = train_worker.ConvTransposeLayer(8, 4, 4, 2, 1, weight_norm=True)
+        module = torch.nn.Sequential(wrapped)
+        train_worker.strip_weight_norm(module)
+        self.assertFalse(hasattr(wrapped.convolution, "weight_g"))
+        self.assertTrue(hasattr(wrapped.convolution, "weight"))
+        samples = torch.zeros(1, 8, 16)
+        out = wrapped(samples)
+        self.assertEqual(tuple(out.shape[:2]), (1, 4))
+
+        props_on = {"channels": 8, "kernel_size": 3, "dilation": 1, "stride": 1, "weight_norm": 1}
+        props_off = {"channels": 8, "kernel_size": 3, "dilation": 1, "stride": 1, "weight_norm": 0}
+        on = train_worker._make_strided_conv(4, 8, props_on)
+        off = train_worker._make_strided_conv(4, 8, props_off)
+        self.assertTrue(hasattr(on.convolution, "weight_g"))
+        self.assertFalse(hasattr(off.convolution, "weight_g"))
+
     def test_eval_mu_not_sampled_z(self) -> None:
         """Validation μ collection must not use reparameterized samples."""
         torch.manual_seed(2)

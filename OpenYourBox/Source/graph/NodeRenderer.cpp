@@ -866,11 +866,13 @@ void NodeRenderer::renderNode(NodeGraph &graph, GraphNode &node,
     bool changed = false;
     int dragSteps = 0;
     beginPropertyRow(property.label.c_str());
-    if (property.key == "residual") {
-      bool residual = property.value != 0;
-      if (ImGui::Checkbox("##residual", &residual)) {
+    if (property.key == "residual" || property.key == "weight_norm") {
+      bool enabled = property.value != 0;
+      const auto checkboxId =
+          property.key == "residual" ? "##residual" : "##weight_norm";
+      if (ImGui::Checkbox(checkboxId, &enabled)) {
         const auto previous = property.value;
-        property.setValue(residual ? 1 : 0);
+        property.setValue(enabled ? 1 : 0);
         if (!graph.setProperty(node.id, property.key, property.value))
           property.setValue(previous);
         else {

@@ -107,18 +107,26 @@ def _make_bias(features: int, state: int) -> tuple[torch.Tensor, int]:
 
 def _assign_deterministic_weights(module: nn.Module, seed: int) -> None:
     """Copy the live C++ engine's seeded weights into one weighted element."""
+    train_worker = _load_train_worker()
     state = (seed & 0xFFFF_FFFF) ^ 0xA0761D6478BD642F
     with torch.no_grad():
         for layer in module.modules():
-            if not isinstance(layer, nn.Conv1d):
+            if not isinstance(layer, (nn.Conv1d, nn.ConvTranspose1d)):
+                continue
+            # Skip modules that only expose a computed weight_norm view without
+            # owning the underlying Conv parameters (parent wrappers).
+            if not any(
+                name == "weight" or name.startswith("weight_")
+                for name, _ in layer.named_parameters(recurse=False)
+            ):
                 continue
             weight, state = _make_weight(
                 layer.out_channels,
-                layer.in_channels,
+                layer.in_channels // getattr(layer, "groups", 1),
                 layer.kernel_size[0],
                 state,
             )
-            layer.weight.copy_(weight)
+            train_worker.assign_plain_conv_weight(layer, weight)
 
 
 def _assign_tcn_weights(module: "SteerableTCN", seed: int) -> None:
@@ -441,20 +449,11 @@ def build_module(
             channels = output_channels
         elif element_type in {"conv1d", "rate_conv"}:
             output_channels = properties.get("channels", channels)
-            stride = max(1, int(properties.get("stride", 1)))
-            if stride > 1:
-                module = _load_train_worker()._make_strided_conv(
-                    channels,
-                    output_channels,
-                    properties,
-                )
-            else:
-                module = CausalConv1d(
-                    channels,
-                    output_channels,
-                    properties.get("kernel_size", 3),
-                    properties.get("dilation", 1),
-                )
+            module = _load_train_worker()._make_strided_conv(
+                channels,
+                output_channels,
+                properties,
+            )
             _assign_deterministic_weights(module, seed)
             modules.append(module)
             channels = output_channels
@@ -547,6 +546,8 @@ def compile_request(request: dict[str, Any], artifact_dir: Path) -> dict[str, An
         rave_type = isinstance(module, train_worker.RaveGraphModule)
     except Exception:
         rave_type = False
+    if train_worker is not None:
+        train_worker.strip_weight_norm(module)
     conditioned = isinstance(module, ConditionedSequential)
     has_encode_decode = bool(rave_type and getattr(module, "bottleneck_id", None) is not None)
     with torch.inference_mode():

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import copy
 import json
 import math
 import os
@@ -92,22 +93,69 @@ class CausalConv1d(nn.Module):
     """Apply a left-padded causal one-dimensional convolution."""
 
     def __init__(
-        self, input_channels: int, output_channels: int, kernel_size: int, dilation: int
+        self,
+        input_channels: int,
+        output_channels: int,
+        kernel_size: int,
+        dilation: int,
+        weight_norm: bool = False,
     ) -> None:
         """Create a causal convolution with validated dimensions."""
         super().__init__()
         self.left_padding = (kernel_size - 1) * dilation
-        self.convolution = nn.Conv1d(
+        convolution = nn.Conv1d(
             input_channels,
             output_channels,
             kernel_size,
             dilation=dilation,
             bias=False,
         )
+        self.convolution = _maybe_weight_norm(convolution, weight_norm)
 
     def forward(self, samples: torch.Tensor) -> torch.Tensor:
         """Process ``[batch, channels, time]`` samples without future context."""
         return self.convolution(functional.pad(samples, (self.left_padding, 0)))
+
+
+def _weight_norm_requested(properties: dict[str, Any]) -> bool:
+    """Return True when a graph element opts into acids-rave weight normalization."""
+    return bool(int(properties.get("weight_norm", 0)))
+
+
+def _maybe_weight_norm(module: nn.Module, enabled: bool) -> nn.Module:
+    """Wrap ``module`` with ``nn.utils.weight_norm`` when enabled."""
+    if not enabled:
+        return module
+    return nn.utils.weight_norm(module)
+
+
+def strip_weight_norm(module: nn.Module) -> None:
+    """Materialize ``W = g * v / ||v||`` so live/TorchScript see plain ``.weight``.
+
+    Safe to call when no weight-norm hooks are present. Walks every submodule
+    that still exposes ``weight_g`` / ``weight_v``.
+    """
+    for child in list(module.modules()):
+        if not hasattr(child, "weight_g") or not hasattr(child, "weight_v"):
+            continue
+        try:
+            nn.utils.remove_weight_norm(child)
+        except (ValueError, KeyError, AttributeError):
+            continue
+
+
+def assign_plain_conv_weight(layer: nn.Module, weight: torch.Tensor) -> None:
+    """Copy a dense weight into a Conv1d/ConvTranspose1d, including weight-norm."""
+    if hasattr(layer, "weight_v") and hasattr(layer, "weight_g"):
+        with torch.no_grad():
+            layer.weight_v.copy_(weight)
+            # Match torch.nn.utils.weight_norm init: g = ||v|| over dim 0.
+            norms = torch.linalg.vector_norm(
+                weight.reshape(weight.shape[0], -1), ord=2, dim=1
+            )
+            layer.weight_g.copy_(norms.reshape(layer.weight_g.shape))
+        return
+    layer.weight.copy_(weight)
 
 
 class FiLM(nn.Module):
@@ -462,7 +510,14 @@ class RateConvLayer(nn.Module):
     """Causal strided convolution used as a RAVE rate-change element."""
 
     def __init__(
-        self, in_channels: int, out_channels: int, kernel_size: int, stride: int, dilation: int, upsample: bool
+        self,
+        in_channels: int,
+        out_channels: int,
+        kernel_size: int,
+        stride: int,
+        dilation: int,
+        upsample: bool,
+        weight_norm: bool = False,
     ) -> None:
         """Create downsample or upsample convolution."""
         super().__init__()
@@ -471,7 +526,7 @@ class RateConvLayer(nn.Module):
         self.dilation = max(1, int(dilation))
         self.upsample = bool(upsample)
         self.left_padding = (self.kernel_size - 1) * self.dilation
-        self.convolution = nn.Conv1d(
+        convolution = nn.Conv1d(
             in_channels,
             out_channels,
             self.kernel_size,
@@ -479,6 +534,7 @@ class RateConvLayer(nn.Module):
             dilation=self.dilation,
             bias=False,
         )
+        self.convolution = _maybe_weight_norm(convolution, weight_norm)
 
     def forward(self, samples: torch.Tensor) -> torch.Tensor:
         """Apply causal padding then convolution."""
@@ -503,11 +559,20 @@ def _make_strided_conv(
     stride = max(1, int(properties.get("stride", 1)))
     kernel = int(properties.get("kernel_size", 3))
     dilation = int(properties.get("dilation", 1))
+    use_weight_norm = _weight_norm_requested(properties)
     if stride > 1:
         return RateConvLayer(
-            in_channels, out_channels, kernel, stride, dilation, False
+            in_channels,
+            out_channels,
+            kernel,
+            stride,
+            dilation,
+            False,
+            use_weight_norm,
         )
-    return CausalConv1d(in_channels, out_channels, kernel, dilation)
+    return CausalConv1d(
+        in_channels, out_channels, kernel, dilation, use_weight_norm
+    )
 
 
 class ConvTransposeLayer(nn.Module):
@@ -520,6 +585,7 @@ class ConvTransposeLayer(nn.Module):
         kernel_size: int,
         stride: int,
         dilation: int,
+        weight_norm: bool = False,
     ) -> None:
         """Create an upsampling ConvTranspose1d with left causal padding."""
         super().__init__()
@@ -527,7 +593,7 @@ class ConvTransposeLayer(nn.Module):
         self.stride = max(1, int(stride))
         self.dilation = max(1, int(dilation))
         self.left_padding = (self.kernel_size - 1) * self.dilation
-        self.convolution = nn.ConvTranspose1d(
+        convolution = nn.ConvTranspose1d(
             in_channels,
             out_channels,
             self.kernel_size,
@@ -536,6 +602,7 @@ class ConvTransposeLayer(nn.Module):
             dilation=self.dilation,
             bias=False,
         )
+        self.convolution = _maybe_weight_norm(convolution, weight_norm)
 
     def forward(self, samples: torch.Tensor) -> torch.Tensor:
         """Apply causal padding then transposed convolution."""
@@ -553,6 +620,7 @@ def _make_conv_transpose(
         int(properties.get("kernel_size", 3)),
         max(1, int(properties.get("stride", 1))),
         int(properties.get("dilation", 1)),
+        _weight_norm_requested(properties),
     )
 
 
@@ -957,24 +1025,34 @@ def _bottleneck_kl(module: RaveGraphModule) -> torch.Tensor:
 def _export_rave_scripted(module: RaveGraphModule, input_channels: int, path: Path) -> None:
     """Trace forward/encode/decode for a RAVE graph."""
     module.eval()
+    export_module = copy.deepcopy(module)
+    strip_weight_norm(export_module)
     example = torch.zeros(1, input_channels, 256)
     latent_size = 1
-    if module.bottleneck_id is not None:
-        key = str(module.bottleneck_id)
-        if key in module.layers:
-            layer = module.layers[key]
+    if export_module.bottleneck_id is not None:
+        key = str(export_module.bottleneck_id)
+        if key in export_module.layers:
+            layer = export_module.layers[key]
             if isinstance(layer, VariationalBottleneckLayer):
                 latent_size = max(1, int(layer.latent_size))
     latent_example = torch.zeros(1, latent_size, max(1, 256 // 16))
-    mean = module.latent_mean if module.latent_mean is not None else torch.zeros(latent_size)
-    pca = module.latent_pca if module.latent_pca is not None else torch.eye(latent_size)
+    mean = (
+        export_module.latent_mean
+        if export_module.latent_mean is not None
+        else torch.zeros(latent_size)
+    )
+    pca = (
+        export_module.latent_pca
+        if export_module.latent_pca is not None
+        else torch.eye(latent_size)
+    )
     cumulative = (
-        module.cumulative_variance
-        if module.cumulative_variance is not None
+        export_module.cumulative_variance
+        if export_module.cumulative_variance is not None
         else torch.linspace(1.0 / latent_size, 1.0, latent_size)
     )
     ready_flag = torch.tensor(
-        1.0 if getattr(module, "compactness_ready", False) else 0.0
+        1.0 if getattr(export_module, "compactness_ready", False) else 0.0
     )
 
     class Wrapper(nn.Module):
@@ -997,7 +1075,7 @@ def _export_rave_scripted(module: RaveGraphModule, input_channels: int, path: Pa
         def forward(self, audio: torch.Tensor) -> torch.Tensor:
             return self.inner.forward(audio)
 
-    wrapped = Wrapper(module).eval()
+    wrapped = Wrapper(export_module).eval()
     with torch.inference_mode():
         scripted = torch.jit.trace_module(
             wrapped,
@@ -1379,11 +1457,13 @@ def _export_scripted(
     specialise FiLM to a single global value per call.
     """
     module.eval()
+    export_module = copy.deepcopy(module)
+    strip_weight_norm(export_module)
     example_samples = 256
     example_x = torch.zeros(1, input_channels, example_samples)
     example_c = torch.zeros(1, max(1, cond_dim), example_samples)
     with torch.inference_mode():
-        scripted = torch.jit.trace(module, (example_x, example_c), strict=False)
+        scripted = torch.jit.trace(export_module, (example_x, example_c), strict=False)
         scripted = torch.jit.freeze(scripted)
         output = scripted(example_x, example_c)
         if output.dim() != 3:

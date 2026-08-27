@@ -36,3 +36,9 @@
 
 
 - [ ] add leakyrelu negative slope parameter, defaults to .01, rave mostly uses 0.2
+- [ ] add expandable project structure/tree, and save parts of these instead of just saving top level folder: in the library, the saved elements must be expandable as if they were folders, so that the user can choose to insert the whole thing or a subpart
+- [ ] make left and right menus resizable
+- [ ] in top active hierarchy tree, when going back to a parent canva, the children that were once open should stay displayed and clickable for navigating back to them, until branching to somewhere else
+
+- [ ] add keyword to preserve whatever input dim, even across changing dims because of copies if list of the keyword
+- [ ] when a group with N copies is in a group with M copies, which itself is in a group with O copies, its elements display a list of M*N*O parameter values. It should also accept N values, or M*N, or 1 value. The values should be copied under the hood. 

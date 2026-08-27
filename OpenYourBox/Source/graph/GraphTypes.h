@@ -768,7 +768,8 @@ struct NodeProperty {
  * @param property Node property to inspect.
  */
 inline bool propertyKeepsFixedBounds(const NodeProperty &property) noexcept {
-  return property.kind == PropertyKind::choice || property.key == "residual";
+  return property.kind == PropertyKind::choice || property.key == "residual" ||
+         property.key == "weight_norm";
 }
 
 /**
@@ -1202,7 +1203,8 @@ inline bool propertySupportsCopyValueList(const NodeProperty &property) noexcept
   if (property.kind != PropertyKind::integer &&
       property.kind != PropertyKind::real)
     return false;
-  return property.key != "residual" && property.key != "inputs";
+  return property.key != "residual" && property.key != "weight_norm" &&
+         property.key != "inputs";
 }
 
 /**

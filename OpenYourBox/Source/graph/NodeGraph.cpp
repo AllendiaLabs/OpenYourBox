@@ -996,6 +996,20 @@ void normalizeConvolutionProperties(openyourbox::graph::GraphNode &node) {
     ensureInt("kernel_size", "Kernel Size", 3, minimumPositiveProperty);
     ensureInt("dilation", "Dilation", 1, minimumPositiveProperty);
     ensureInt("stride", "Stride", 1, minimumPositiveProperty);
+    {
+      bool hasWeightNorm = false;
+      for (auto &property : node.properties) {
+        if (property.key == "weight_norm") {
+          property.minimum = 0;
+          property.maximum = 1;
+          hasWeightNorm = true;
+          break;
+        }
+      }
+      if (!hasWeightNorm)
+        node.properties.push_back(
+            NodeProperty{"weight_norm", "Weight Norm", 0, 0, 1});
+    }
     for (auto &property : node.properties)
       widenIntegerPropertyBounds(property);
     updateConvTransposeDetail(node);
@@ -1023,6 +1037,20 @@ void normalizeConvolutionProperties(openyourbox::graph::GraphNode &node) {
   ensureInt("kernel_size", "Kernel Size", 3, minimumPositiveProperty);
   ensureInt("dilation", "Dilation", 1, minimumPositiveProperty);
   ensureInt("stride", "Stride", 1, minimumPositiveProperty);
+  {
+    bool hasWeightNorm = false;
+    for (auto &property : node.properties) {
+      if (property.key == "weight_norm") {
+        property.minimum = 0;
+        property.maximum = 1;
+        hasWeightNorm = true;
+        break;
+      }
+    }
+    if (!hasWeightNorm)
+      node.properties.push_back(
+          NodeProperty{"weight_norm", "Weight Norm", 0, 0, 1});
+  }
   for (auto &property : node.properties)
     widenIntegerPropertyBounds(property);
   updateConv1dDetail(node);
@@ -4312,6 +4340,7 @@ GraphNode NodeGraph::makeNode(NodeType type, juce::Point<float> position) {
     node.properties.push_back(property("stride", "Stride", 1,
                                        minimumPositiveProperty,
                                        unlimitedPropertyMaximum));
+    node.properties.push_back(property("weight_norm", "Weight Norm", 0, 0, 1));
     break;
   case NodeType::convTranspose:
     node.label = "ConvTranspose1d";
@@ -4334,6 +4363,7 @@ GraphNode NodeGraph::makeNode(NodeType type, juce::Point<float> position) {
     node.properties.push_back(property("stride", "Stride", 1,
                                        minimumPositiveProperty,
                                        unlimitedPropertyMaximum));
+    node.properties.push_back(property("weight_norm", "Weight Norm", 0, 0, 1));
     break;
   case NodeType::batchNorm:
     node.label = "BatchNorm1d";
