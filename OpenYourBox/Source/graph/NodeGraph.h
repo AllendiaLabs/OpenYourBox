@@ -349,6 +349,19 @@ public:
   [[nodiscard]] int effectiveCopyCount(std::int32_t nodeId) const;
 
   /**
+   * @brief Ancestor copy counts from outermost group to the node's parent.
+   * @param nodeId Candidate node.
+   * @return Outer→inner vector C; empty when the node has no parent group.
+   */
+  [[nodiscard]] std::vector<int> ancestorCopyCounts(std::int32_t nodeId) const;
+
+  /**
+   * @brief Re-tiles or flags authored copy lists after a nest change.
+   * @param nodeId Leaf node whose ancestor copies may have changed.
+   */
+  void validateAuthoredCopyLists(std::int32_t nodeId);
+
+  /**
    * @brief Validates and commits a directed connection.
    * @param firstPinId First endpoint selected by the user.
    * @param secondPinId Second endpoint selected by the user.
@@ -383,20 +396,30 @@ public:
                         float value);
 
   /**
-   * @brief Writes one integer per group copy onto a numeric property.
+   * @brief Writes an authored integer list (length in the nest dividing set).
    * @param nodeId Target node identifier.
    * @param key Canonical property key.
-   * @param values Copy-ordered integers; size must match `effectiveCopyCount`.
+   * @param values Authored integers of legal length L.
    * @return True when the property exists, is list-capable, and was updated.
    */
   bool setPropertyCopyValues(std::int32_t nodeId, const std::string &key,
                              const std::vector<int> &values);
 
   /**
-   * @brief Writes one real per group copy onto a numeric property.
+   * @brief Binds an integer dim/channels/features field to the `in` keyword.
    * @param nodeId Target node identifier.
    * @param key Canonical property key.
-   * @param values Copy-ordered reals; size must match `effectiveCopyCount`.
+   * @param authoredLength Number of `in` tokens (must be in D(C)).
+   * @return True when the field supports binding and the length is legal.
+   */
+  bool setPropertyPreserveIn(std::int32_t nodeId, const std::string &key,
+                             int authoredLength);
+
+  /**
+   * @brief Writes an authored real list (length in the nest dividing set).
+   * @param nodeId Target node identifier.
+   * @param key Canonical property key.
+   * @param values Authored reals of legal length L.
    * @return True when the property exists, is list-capable, and was updated.
    */
   bool setFloatPropertyCopyValues(std::int32_t nodeId, const std::string &key,
@@ -616,12 +639,15 @@ public:
    * @param position Canvas origin for the placed root.
    * @param collapseGroups True to force every imported group collapsed.
    * @param error Receives a user-facing failure.
+   * @param nestedRootId Snapshot node/group id to insert instead of the saved
+   *        root; 0 inserts the snapshot root.
    * @return New root node or group id, or no value on failure.
    */
   std::optional<std::int32_t> importBox(const juce::ValueTree &snapshot,
                                         juce::Point<float> position,
                                         bool collapseGroups,
-                                        juce::String &error);
+                                        juce::String &error,
+                                        std::int32_t nestedRootId = 0);
 
   /** @brief Serializes the graph into compact JSON for worker IPC. */
   [[nodiscard]] std::string toJson() const;

@@ -168,7 +168,16 @@ void OpenYourBoxAudioProcessorEditor::renderFrame() {
   }
   ImGui::Separator();
 
-  ImGui::BeginChild("GraphArea", ImVec2(-340.0f, 0.0f), false,
+  constexpr float splitterWidth = 6.0f;
+  constexpr float minRight = 180.0f;
+  constexpr float maxRight = 520.0f;
+  constexpr float minCanvas = 280.0f;
+  const auto avail = ImGui::GetContentRegionAvail();
+  auto right = std::clamp(rightPanelWidth, minRight, maxRight);
+  right = std::min(right, std::max(minRight, avail.x - minCanvas - splitterWidth));
+  rightPanelWidth = right;
+
+  ImGui::BeginChild("GraphArea", ImVec2(-(right + splitterWidth), 0.0f), false,
                     ImGuiWindowFlags_NoScrollbar);
   openyourbox::graph::NodeRendererCallbacks callbacks;
   callbacks.propertyChanged = [this](std::int32_t nodeId,
@@ -227,8 +236,19 @@ void OpenYourBoxAudioProcessorEditor::renderFrame() {
                       &boxLibrary);
   ImGui::EndChild();
 
-  ImGui::SameLine();
-  ImGui::BeginChild("InfoArea", ImVec2(332.0f, 0.0f), true);
+  ImGui::SameLine(0.0f, 0.0f);
+  ImGui::InvisibleButton("RightPanelSplitter",
+                         ImVec2(splitterWidth, avail.y > 0.0f ? avail.y : 1.0f));
+  if (ImGui::IsItemActive()) {
+    rightPanelWidth = std::clamp(
+        rightPanelWidth - ImGui::GetIO().MouseDelta.x, minRight,
+        std::min(maxRight, avail.x - minCanvas - splitterWidth));
+  }
+  if (ImGui::IsItemHovered() || ImGui::IsItemActive())
+    ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
+
+  ImGui::SameLine(0.0f, 0.0f);
+  ImGui::BeginChild("InfoArea", ImVec2(right, 0.0f), true);
   auto &pairing = audioProcessor.getCapturePairing();
   auto &library = audioProcessor.getTrainingLibrary();
   if (ImGui::BeginTabBar("SideTabs")) {

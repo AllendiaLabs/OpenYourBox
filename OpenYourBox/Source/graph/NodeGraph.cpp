@@ -4,6 +4,7 @@
 #include <array>
 #include <cmath>
 #include <cstring>
+#include <functional>
 #include <limits>
 #include <optional>
 #include <queue>
@@ -259,6 +260,37 @@ void normalizeGainProperty(openyourbox::graph::GraphNode &node) {
 }
 
 /**
+ * @brief Ensures Activation and TCN nodes expose LeakyReLU negative slope.
+ * @param node Loaded or newly created processing node.
+ */
+void normalizeNegativeSlopeProperty(openyourbox::graph::GraphNode &node) {
+  using openyourbox::graph::NodeType;
+  using openyourbox::graph::PropertyKind;
+  if (node.type != NodeType::activation && node.type != NodeType::tcn)
+    return;
+  for (auto &property : node.properties) {
+    if (property.key != "negative_slope")
+      continue;
+    property.kind = PropertyKind::real;
+    property.label = "Negative slope";
+    property.floatMinimum = openyourbox::graph::leakyReluNegativeSlopeMinimum;
+    property.floatMaximum = openyourbox::graph::leakyReluNegativeSlopeMaximum;
+    if (property.floatValue < property.floatMinimum ||
+        property.floatValue > property.floatMaximum)
+      property.floatValue = openyourbox::graph::leakyReluNegativeSlopeDefault;
+    return;
+  }
+  openyourbox::graph::NodeProperty slope;
+  slope.key = "negative_slope";
+  slope.label = "Negative slope";
+  slope.kind = PropertyKind::real;
+  slope.floatValue = openyourbox::graph::leakyReluNegativeSlopeDefault;
+  slope.floatMinimum = openyourbox::graph::leakyReluNegativeSlopeMinimum;
+  slope.floatMaximum = openyourbox::graph::leakyReluNegativeSlopeMaximum;
+  node.properties.push_back(std::move(slope));
+}
+
+/**
  * @brief Ensures Phase 3 TCN/Activation fields exist on loaded nodes.
  * @param node Loaded or newly created processing node.
  */
@@ -371,6 +403,43 @@ int readNodeProperty(const openyourbox::graph::GraphNode &node, const char *key,
 }
 
 /**
+ * @brief Reads a shape-driving integer, honoring `in` bindings and invalid lists.
+ * @param node Graph node to inspect.
+ * @param key Property key (`features` or `channels`).
+ * @param incomingChannels Paired input channel count for `in` resolution.
+ * @param fallback Value returned when the property is absent.
+ * @return Effective integer, or 0 when unresolved/invalid.
+ */
+int readBoundShapeProperty(const openyourbox::graph::GraphNode &node,
+                           const char *key, int incomingChannels,
+                           int fallback = 0) {
+  for (const auto &property : node.properties) {
+    if (property.key != key)
+      continue;
+    if (property.copyListInvalid)
+      return 0;
+    if (property.preserveInBound)
+      return incomingChannels > 0 ? incomingChannels : 0;
+    return property.value > 0 ? property.value : fallback;
+  }
+  return fallback;
+}
+
+/**
+ * @brief Returns true when @p key on @p node is flagged copy-list invalid.
+ * @param node Graph node to inspect.
+ * @param key Property key.
+ */
+bool propertyCopyListIsInvalid(const openyourbox::graph::GraphNode &node,
+                               const char *key) {
+  for (const auto &property : node.properties) {
+    if (property.key == key)
+      return property.copyListInvalid;
+  }
+  return false;
+}
+
+/**
  * @brief Returns the configured Utility operating mode for one node.
  * @param node Utility or legacy mixer node.
  * @return Merge mode index.
@@ -476,16 +545,25 @@ int resolvePinChannels(const openyourbox::graph::NodeGraph &graph,
         readNodeProperty(*node, "channels",
                          openyourbox::graph::hostIoChoiceFromChannels(2)));
   case NodeType::linear: {
-    const auto features = readNodeProperty(*node, "features", 0);
-    return features > 0 ? features : 0;
+    const auto incoming =
+        node->inputs.empty()
+            ? 0
+            : resolvePinChannels(graph, node->inputs.front().id, visiting);
+    return readBoundShapeProperty(*node, "features", incoming, 0);
   }
   case NodeType::convolution: {
-    const auto channels = readNodeProperty(*node, "channels", 0);
-    return channels > 0 ? channels : 0;
+    const auto incoming =
+        node->inputs.empty()
+            ? 0
+            : resolvePinChannels(graph, node->inputs.front().id, visiting);
+    return readBoundShapeProperty(*node, "channels", incoming, 0);
   }
   case NodeType::convTranspose: {
-    const auto channels = readNodeProperty(*node, "channels", 0);
-    return channels > 0 ? channels : 0;
+    const auto incoming =
+        node->inputs.empty()
+            ? 0
+            : resolvePinChannels(graph, node->inputs.front().id, visiting);
+    return readBoundShapeProperty(*node, "channels", incoming, 0);
   }
   case NodeType::merge:
     visiting.erase(pinId);
@@ -1286,28 +1364,44 @@ void applyNodePinShapes(openyourbox::graph::NodeGraph &graph,
       break;
     inheritInputs();
     auto outgoing = incoming;
+    for (auto &property : node.properties) {
+      if (!property.preserveInBound)
+        continue;
+      if ((property.key == "features" || property.key == "channels") &&
+          incoming.channels > 0)
+        property.value = incoming.channels;
+    }
     if (isConvolutionType(node.type)) {
       const auto stride = std::max(1, readNodeProperty(node, "stride", 1));
       const auto rate =
           convolutionOutputTemporalRate(incoming.temporalRate, stride, false);
       outgoing.temporalRate = rate < 0 ? 0 : rate;
-      const auto channels = readNodeProperty(node, "channels", 0);
+      const auto channels =
+          readBoundShapeProperty(node, "channels", incoming.channels, 0);
       if (channels > 0)
         outgoing.channels = channels;
+      else if (propertyCopyListIsInvalid(node, "channels"))
+        outgoing.channels = 0;
       updateConv1dDetail(node);
     } else if (isConvTransposeType(node.type)) {
       const auto stride = std::max(1, readNodeProperty(node, "stride", 1));
       const auto rate =
           convolutionOutputTemporalRate(incoming.temporalRate, stride, true);
       outgoing.temporalRate = rate < 0 ? 0 : rate;
-      const auto channels = readNodeProperty(node, "channels", 0);
+      const auto channels =
+          readBoundShapeProperty(node, "channels", incoming.channels, 0);
       if (channels > 0)
         outgoing.channels = channels;
+      else if (propertyCopyListIsInvalid(node, "channels"))
+        outgoing.channels = 0;
       updateConvTransposeDetail(node);
     } else if (node.type == NodeType::linear) {
-      const auto features = readNodeProperty(node, "features", 0);
+      const auto features =
+          readBoundShapeProperty(node, "features", incoming.channels, 0);
       if (features > 0)
         outgoing.channels = features;
+      else if (propertyCopyListIsInvalid(node, "features"))
+        outgoing.channels = 0;
     } else if (node.type == NodeType::merge) {
       updateMergeOutputShape(graph, node);
       outgoing.channels =
@@ -1335,6 +1429,12 @@ std::string firstIncompatibleLinkMessage(const openyourbox::graph::NodeGraph &gr
   using openyourbox::graph::pqmfSynthesisChannelMessage;
   using openyourbox::graph::variationalBottleneckChannelIsError;
   using openyourbox::graph::variationalBottleneckChannelMessage;
+  for (const auto &node : graph.getNodes()) {
+    for (const auto &property : node.properties) {
+      if (property.copyListInvalid && !property.copyListInvalidMessage.empty())
+        return property.copyListInvalidMessage;
+    }
+  }
   for (const auto &link : graph.getLinks()) {
     const auto *source = graph.findPin(link.sourcePinId);
     const auto *destination = graph.findPin(link.destinationPinId);
@@ -1608,7 +1708,18 @@ juce::ValueTree nodeToTree(const openyourbox::graph::GraphNode &node) {
     child.setProperty("floatValue", property.floatValue, nullptr);
     child.setProperty("floatMinimum", property.floatMinimum, nullptr);
     child.setProperty("floatMaximum", property.floatMaximum, nullptr);
-    if (!property.copyIntValues.empty()) {
+    child.setProperty("preserveIn", property.preserveInBound, nullptr);
+    child.setProperty("copyListInvalid", property.copyListInvalid, nullptr);
+    if (!property.copyListInvalidMessage.empty())
+      child.setProperty("copyListInvalidMessage",
+                        juce::String(property.copyListInvalidMessage), nullptr);
+    if (property.preserveInBound) {
+      juce::StringArray tokens;
+      const auto count = std::max(1, static_cast<int>(property.copyIntValues.size()));
+      for (int index = 0; index < count; ++index)
+        tokens.add(openyourbox::graph::preserveInToken);
+      child.setProperty("copyIntValues", tokens.joinIntoString(","), nullptr);
+    } else if (!property.copyIntValues.empty()) {
       juce::StringArray ints;
       for (const auto value : property.copyIntValues)
         ints.add(juce::String(value));
@@ -1732,11 +1843,28 @@ openyourbox::graph::GraphNode nodeFromTree(const juce::ValueTree &tree) {
           static_cast<float>(child.getProperty("floatMinimum", 0.0));
       property.floatMaximum =
           static_cast<float>(child.getProperty("floatMaximum", 1.0));
+      property.preserveInBound = static_cast<bool>(child.getProperty("preserveIn", false));
+      property.copyListInvalid =
+          static_cast<bool>(child.getProperty("copyListInvalid", false));
+      property.copyListInvalidMessage =
+          child.getProperty("copyListInvalidMessage", "").toString().toStdString();
       if (child.hasProperty("copyIntValues")) {
         const auto tokens = juce::StringArray::fromTokens(
             child["copyIntValues"].toString(), ",", "");
-        for (const auto &token : tokens)
-          property.copyIntValues.push_back(token.getIntValue());
+        bool anyIn = false;
+        bool allIn = true;
+        for (const auto &token : tokens) {
+          const auto trimmed = token.trim();
+          if (trimmed == openyourbox::graph::preserveInToken) {
+            anyIn = true;
+            property.copyIntValues.push_back(0);
+          } else {
+            allIn = false;
+            property.copyIntValues.push_back(trimmed.getIntValue());
+          }
+        }
+        if (anyIn && allIn)
+          property.preserveInBound = true;
       }
       if (child.hasProperty("copyFloatValues")) {
         const auto tokens = juce::StringArray::fromTokens(
@@ -1750,6 +1878,7 @@ openyourbox::graph::GraphNode nodeFromTree(const juce::ValueTree &tree) {
   migrateLegacyMixerNode(node, tree["type"].toString());
   normalizeMergeNodeProperties(node);
   normalizeGainProperty(node);
+  normalizeNegativeSlopeProperty(node);
   normalizeConditioningPins(node);
   normalizePhase3Node(node);
   normalizeConvolutionProperties(node);
@@ -1859,6 +1988,7 @@ void refreshCopySlotsForGroup(openyourbox::graph::NodeGraph &graph,
       const auto copies = graph.effectiveCopyCount(nodeId);
       openyourbox::graph::ensureCopySlotCount(*node, copies);
       openyourbox::graph::ensureNodePropertyCopyCounts(*node, copies);
+      graph.validateAuthoredCopyLists(nodeId);
     }
   }
 }
@@ -2316,6 +2446,35 @@ int NodeGraph::effectiveCopyCount(std::int32_t nodeId) const {
     parent = group->parentGroupId;
   }
   return std::max(1, count);
+}
+
+std::vector<int> NodeGraph::ancestorCopyCounts(std::int32_t nodeId) const {
+  const auto *node = findNode(nodeId);
+  if (node == nullptr)
+    return {};
+  std::vector<int> innerToOuter;
+  auto parent = node->parentGroupId;
+  std::unordered_set<std::int32_t> visiting;
+  while (parent.has_value()) {
+    if (!visiting.insert(*parent).second)
+      break;
+    const auto *group = findGroup(*parent);
+    if (group == nullptr)
+      break;
+    innerToOuter.push_back(std::max(1, group->copies));
+    parent = group->parentGroupId;
+  }
+  std::reverse(innerToOuter.begin(), innerToOuter.end());
+  return innerToOuter;
+}
+
+void NodeGraph::validateAuthoredCopyLists(std::int32_t nodeId) {
+  auto *node = findNode(nodeId);
+  if (node == nullptr)
+    return;
+  const auto counts = ancestorCopyCounts(nodeId);
+  for (auto &property : node->properties)
+    syncCopyListValidity(property, counts);
 }
 
 bool NodeGraph::isNodeHiddenByCollapse(std::int32_t nodeId) const {
@@ -2795,6 +2954,9 @@ GroupActionResult NodeGraph::ungroup(std::int32_t groupId) {
                                 return candidate.id == groupId;
                               }),
                groups.end());
+  pruneStickySpineId(viewport.stickySpine, groupId);
+  if (viewport.focusedGroupId == groupId)
+    viewport.focusedGroupId = parent;
   return {true, {}, groupId};
 }
 
@@ -2831,6 +2993,11 @@ GroupActionResult NodeGraph::deleteGroup(std::int32_t groupId) {
                                 return groupIds.count(candidate.id) != 0;
                               }),
                groups.end());
+  for (const auto id : groupIds)
+    pruneStickySpineId(viewport.stickySpine, id);
+  if (viewport.focusedGroupId.has_value() &&
+      groupIds.count(*viewport.focusedGroupId) != 0)
+    viewport.focusedGroupId.reset();
   return {true, {}, groupId};
 }
 
@@ -2939,7 +3106,8 @@ GroupActionResult NodeGraph::setGroupCopies(std::int32_t groupId, int copies) {
   group->copies = copies;
   refreshCopySlotsForGroup(*this, groupId);
   refreshPropagatedPinShapes(*this);
-  return {true, {}, groupId};
+  const auto warning = firstIncompatibleLinkMessage(*this);
+  return {true, warning, groupId};
 }
 
 bool NodeGraph::randomizeGroupWeights(std::int32_t groupId) {
@@ -3295,17 +3463,22 @@ bool NodeGraph::setProperty(std::int32_t nodeId, const std::string &key,
     return false;
   const auto previousValue = property->value;
   const auto previousCopyValues = property->copyIntValues;
+  const auto previousPreserveIn = property->preserveInBound;
+  const auto previousInvalid = property->copyListInvalid;
   property->setValue(value);
 
   const auto syncCopyValues = [&]() {
     if (!propertySupportsCopyValueList(*property))
       return;
-    ensurePropertyCopyCount(*property, effectiveCopyCount(nodeId));
-    std::fill(property->copyIntValues.begin(), property->copyIntValues.end(),
-              property->value);
+    property->preserveInBound = false;
+    property->copyListInvalid = false;
+    property->copyListInvalidMessage.clear();
+    property->copyIntValues = {property->value};
   };
   const auto restoreCopyValues = [&]() {
     property->copyIntValues = previousCopyValues;
+    property->preserveInBound = previousPreserveIn;
+    property->copyListInvalid = previousInvalid;
   };
   syncCopyValues();
 
@@ -3431,13 +3604,17 @@ bool NodeGraph::setFloatProperty(std::int32_t nodeId, const std::string &key,
   if (property == node->properties.end() ||
       property->kind != PropertyKind::real)
     return false;
+  if (key == "negative_slope") {
+    if (value < property->floatMinimum || value > property->floatMaximum)
+      return false;
+  }
   property->setFloatValue(value);
   if (key == "fidelity")
     node->fidelityPercent = clampFidelity(property->floatValue);
   if (propertySupportsCopyValueList(*property)) {
-    ensurePropertyCopyCount(*property, effectiveCopyCount(nodeId));
-    std::fill(property->copyFloatValues.begin(),
-              property->copyFloatValues.end(), property->floatValue);
+    property->copyListInvalid = false;
+    property->copyListInvalidMessage.clear();
+    property->copyFloatValues = {property->floatValue};
   }
   return true;
 }
@@ -3455,8 +3632,8 @@ bool NodeGraph::setPropertyCopyValues(std::int32_t nodeId,
       !propertySupportsCopyValueList(*property) ||
       property->kind != PropertyKind::integer)
     return false;
-  const auto copies = effectiveCopyCount(nodeId);
-  if (static_cast<int>(values.size()) != copies)
+  const auto counts = ancestorCopyCounts(nodeId);
+  if (!isDividingSetLength(static_cast<int>(values.size()), counts))
     return false;
   std::vector<int> clamped;
   clamped.reserve(values.size());
@@ -3467,9 +3644,48 @@ bool NodeGraph::setPropertyCopyValues(std::int32_t nodeId,
   }
   if (!setProperty(nodeId, key, clamped.front()))
     return false;
+  property->preserveInBound = false;
+  property->copyListInvalid = false;
+  property->copyListInvalidMessage.clear();
   property->copyIntValues = std::move(clamped);
   property->value = property->copyIntValues.front();
   refreshPropagatedPinShapes(*this);
+  return true;
+}
+
+bool NodeGraph::setPropertyPreserveIn(std::int32_t nodeId, const std::string &key,
+                                      int authoredLength) {
+  auto *node = findNode(nodeId);
+  if (node == nullptr || node->state == NodeState::frozenGold)
+    return false;
+  const auto property = std::find_if(
+      node->properties.begin(), node->properties.end(),
+      [&key](const NodeProperty &candidate) { return candidate.key == key; });
+  if (property == node->properties.end() ||
+      !propertySupportsPreserveIn(*property))
+    return false;
+  const auto counts = ancestorCopyCounts(nodeId);
+  if (!isDividingSetLength(std::max(1, authoredLength), counts))
+    return false;
+  const auto previousValue = property->value;
+  const auto previousCopyValues = property->copyIntValues;
+  const auto previousPreserveIn = property->preserveInBound;
+  const auto previousInvalid = property->copyListInvalid;
+  property->preserveInBound = true;
+  property->copyListInvalid = false;
+  property->copyListInvalidMessage.clear();
+  property->copyIntValues.assign(static_cast<std::size_t>(std::max(1, authoredLength)),
+                                 0);
+  refreshPropagatedPinShapes(*this);
+  const auto incompatible = firstIncompatibleLinkMessage(*this);
+  if (!incompatible.empty()) {
+    property->value = previousValue;
+    property->copyIntValues = previousCopyValues;
+    property->preserveInBound = previousPreserveIn;
+    property->copyListInvalid = previousInvalid;
+    refreshPropagatedPinShapes(*this);
+    return false;
+  }
   return true;
 }
 
@@ -3490,8 +3706,8 @@ bool NodeGraph::setFloatPropertyCopyValues(std::int32_t nodeId,
       !propertySupportsCopyValueList(*property) ||
       property->kind != PropertyKind::real)
     return false;
-  const auto copies = effectiveCopyCount(nodeId);
-  if (static_cast<int>(values.size()) != copies)
+  const auto counts = ancestorCopyCounts(nodeId);
+  if (!isDividingSetLength(static_cast<int>(values.size()), counts))
     return false;
   std::vector<float> clamped;
   clamped.reserve(values.size());
@@ -3503,6 +3719,8 @@ bool NodeGraph::setFloatPropertyCopyValues(std::int32_t nodeId,
   }
   if (!setFloatProperty(nodeId, key, clamped.front()))
     return false;
+  property->copyListInvalid = false;
+  property->copyListInvalidMessage.clear();
   property->copyFloatValues = std::move(clamped);
   property->floatValue = property->copyFloatValues.front();
   if (key == "fidelity")
@@ -3731,6 +3949,8 @@ std::optional<FreezeSelectionRequest> NodeGraph::createFreezeRequest(
       auto serialized = std::make_unique<juce::DynamicObject>();
       serialized->setProperty("key", juce::String(property.key));
       serialized->setProperty("value", property.value);
+      if (property.kind == PropertyKind::real)
+        serialized->setProperty("float_value", property.floatValue);
       properties.add(juce::var(serialized.release()));
     }
     element->setProperty("properties", properties);
@@ -3911,6 +4131,12 @@ juce::ValueTree NodeGraph::toValueTree() const {
   tree.setProperty("mapVisible", viewport.mapVisible, nullptr);
   if (viewport.focusedGroupId.has_value())
     tree.setProperty("focusedGroupId", *viewport.focusedGroupId, nullptr);
+  if (!viewport.stickySpine.empty()) {
+    juce::StringArray spine;
+    for (const auto id : viewport.stickySpine)
+      spine.add(juce::String(id));
+    tree.setProperty("stickySpine", spine.joinIntoString(","), nullptr);
+  }
   for (const auto &node : nodes)
     tree.appendChild(nodeToTree(node), nullptr);
   for (const auto &group : groups)
@@ -3988,6 +4214,18 @@ bool NodeGraph::restoreFromValueTree(const juce::ValueTree &tree) {
   if (viewport.focusedGroupId.has_value() &&
       findGroup(*viewport.focusedGroupId) == nullptr)
     viewport.focusedGroupId.reset();
+  viewport.stickySpine.clear();
+  if (tree.hasProperty("stickySpine")) {
+    const auto tokens = juce::StringArray::fromTokens(
+        tree.getProperty("stickySpine").toString(), ",", "");
+    for (const auto &token : tokens) {
+      const auto id = token.getIntValue();
+      if (findGroup(id) != nullptr)
+        viewport.stickySpine.push_back(id);
+    }
+  }
+  for (auto &node : nodes)
+    validateAuthoredCopyLists(node.id);
 
   links.erase(std::remove_if(links.begin(), links.end(),
                              [this](const GraphLink &link) {
@@ -4074,9 +4312,45 @@ juce::ValueTree NodeGraph::exportBox(std::int32_t boxId,
   return {};
 }
 
+/**
+ * @brief Collects snapshot node/group ids in the subtree of @p rootId.
+ * @param snapshot Box snapshot tree.
+ * @param rootId Node or group id inside the snapshot.
+ * @param nodeIds Destination node id set.
+ * @param groupIds Destination group id set.
+ */
+void collectSnapshotSubtree(const juce::ValueTree &snapshot, std::int32_t rootId,
+                            std::unordered_set<std::int32_t> &nodeIds,
+                            std::unordered_set<std::int32_t> &groupIds) {
+  std::unordered_map<std::int32_t, juce::ValueTree> groupsById;
+  std::unordered_set<std::int32_t> nodesById;
+  for (const auto child : snapshot) {
+    if (child.hasType("Node"))
+      nodesById.insert(static_cast<std::int32_t>(child["id"]));
+    else if (child.hasType("Group"))
+      groupsById.emplace(static_cast<std::int32_t>(child["id"]), child);
+  }
+  std::function<void(std::int32_t)> walk = [&](std::int32_t id) {
+    if (nodesById.count(id) != 0) {
+      nodeIds.insert(id);
+      return;
+    }
+    const auto found = groupsById.find(id);
+    if (found == groupsById.end() || !groupIds.insert(id).second)
+      return;
+    for (const auto member : found->second) {
+      if (!member.hasType("Member"))
+        continue;
+      walk(static_cast<std::int32_t>(member["id"]));
+    }
+  };
+  walk(rootId);
+}
+
 std::optional<std::int32_t>
 NodeGraph::importBox(const juce::ValueTree &snapshot, juce::Point<float> position,
-                     bool collapseGroups, juce::String &error) {
+                     bool collapseGroups, juce::String &error,
+                     std::int32_t nestedRootId) {
   error.clear();
   if (!snapshot.hasType("BoxSnapshot")) {
     error = "Box library entry is not a valid snapshot";
@@ -4098,6 +4372,14 @@ NodeGraph::importBox(const juce::ValueTree &snapshot, juce::Point<float> positio
 
   const auto backup = toValueTree();
   const auto originalRoot = static_cast<std::int32_t>(snapshot["rootId"]);
+  const auto requestedRoot = nestedRootId != 0 ? nestedRootId : originalRoot;
+  std::unordered_set<std::int32_t> keepNodes;
+  std::unordered_set<std::int32_t> keepGroups;
+  collectSnapshotSubtree(snapshot, requestedRoot, keepNodes, keepGroups);
+  if (keepNodes.empty() && keepGroups.empty()) {
+    error = "Nested library path is missing from this box";
+    return std::nullopt;
+  }
   std::unordered_map<std::int32_t, std::int32_t> idMap;
   std::unordered_map<std::int32_t, std::int32_t> pinMap;
   std::vector<GraphNode> importedNodes;
@@ -4115,10 +4397,19 @@ NodeGraph::importBox(const juce::ValueTree &snapshot, juce::Point<float> positio
 
   for (const auto child : snapshot) {
     if (child.hasType("Node")) {
+      const auto oldId = static_cast<std::int32_t>(child["id"]);
+      if (keepNodes.count(oldId) == 0)
+        continue;
       auto node = nodeFromTree(child);
       node.id = remapId(node.id);
-      if (node.parentGroupId.has_value())
-        node.parentGroupId = remapId(*node.parentGroupId);
+      if (oldId == requestedRoot)
+        node.parentGroupId.reset();
+      else if (node.parentGroupId.has_value()) {
+        if (keepGroups.count(*node.parentGroupId) != 0)
+          node.parentGroupId = remapId(*node.parentGroupId);
+        else
+          node.parentGroupId.reset();
+      }
       for (auto &pin : node.inputs) {
         const auto fresh = nextPinId++;
         pinMap.emplace(pin.id, fresh);
@@ -4131,10 +4422,19 @@ NodeGraph::importBox(const juce::ValueTree &snapshot, juce::Point<float> positio
       }
       importedNodes.push_back(std::move(node));
     } else if (child.hasType("Group")) {
+      const auto oldId = static_cast<std::int32_t>(child["id"]);
+      if (keepGroups.count(oldId) == 0)
+        continue;
       auto group = groupFromTree(child);
       group.id = remapId(group.id);
-      if (group.parentGroupId.has_value())
-        group.parentGroupId = remapId(*group.parentGroupId);
+      if (oldId == requestedRoot)
+        group.parentGroupId.reset();
+      else if (group.parentGroupId.has_value()) {
+        if (keepGroups.count(*group.parentGroupId) != 0)
+          group.parentGroupId = remapId(*group.parentGroupId);
+        else
+          group.parentGroupId.reset();
+      }
       if (collapseGroups)
         group.collapsed = true;
       importedGroups.push_back(std::move(group));
@@ -4142,15 +4442,14 @@ NodeGraph::importBox(const juce::ValueTree &snapshot, juce::Point<float> positio
   }
 
   for (auto &group : importedGroups) {
-    for (auto &member : group.memberIds) {
-      const auto found = idMap.find(member);
-      if (found == idMap.end()) {
-        error = "Box snapshot has a missing group member";
-        restoreFromValueTree(backup);
-        return std::nullopt;
-      }
-      member = found->second;
-    }
+    group.memberIds.erase(
+        std::remove_if(group.memberIds.begin(), group.memberIds.end(),
+                       [&idMap](std::int32_t member) {
+                         return idMap.find(member) == idMap.end();
+                       }),
+        group.memberIds.end());
+    for (auto &member : group.memberIds)
+      member = idMap[member];
   }
 
   for (const auto child : snapshot) {
@@ -4160,6 +4459,8 @@ NodeGraph::importBox(const juce::ValueTree &snapshot, juce::Point<float> positio
     const auto source = pinMap.find(link.sourcePinId);
     const auto destination = pinMap.find(link.destinationPinId);
     if (source == pinMap.end() || destination == pinMap.end()) {
+      if (nestedRootId != 0)
+        continue;
       error = "Box snapshot has a connection to a missing pin";
       restoreFromValueTree(backup);
       return std::nullopt;
@@ -4170,7 +4471,7 @@ NodeGraph::importBox(const juce::ValueTree &snapshot, juce::Point<float> positio
     importedLinks.push_back(link);
   }
 
-  const auto rootFound = idMap.find(originalRoot);
+  const auto rootFound = idMap.find(requestedRoot);
   if (rootFound == idMap.end()) {
     error = "Box snapshot is missing its root box";
     restoreFromValueTree(backup);
@@ -4230,6 +4531,8 @@ std::string NodeGraph::toJson() const {
       auto value = std::make_unique<juce::DynamicObject>();
       value->setProperty("key", juce::String(property.key));
       value->setProperty("value", property.value);
+      if (property.kind == PropertyKind::real)
+        value->setProperty("float_value", property.floatValue);
       properties.add(juce::var(value.release()));
     }
     object->setProperty("properties", properties);
@@ -4396,6 +4699,16 @@ GraphNode NodeGraph::makeNode(NodeType type, juce::Point<float> position) {
         property("activation", "Function", 0, 0, 4, PropertyKind::choice,
                  {"ReLU", "Sigmoid", "Tanh", "LeakyReLU", "PReLU"}));
     node.properties.push_back(gainProperty());
+    {
+      NodeProperty slope;
+      slope.key = "negative_slope";
+      slope.label = "Negative slope";
+      slope.kind = PropertyKind::real;
+      slope.floatValue = leakyReluNegativeSlopeDefault;
+      slope.floatMinimum = leakyReluNegativeSlopeMinimum;
+      slope.floatMaximum = leakyReluNegativeSlopeMaximum;
+      node.properties.push_back(std::move(slope));
+    }
     break;
   case NodeType::tcn:
     node.label = "TCN";
@@ -4426,6 +4739,16 @@ GraphNode NodeGraph::makeNode(NodeType type, juce::Point<float> position) {
         property("activation", "Activation", 0, 0, 4, PropertyKind::choice,
                  {"ReLU", "Sigmoid", "Tanh", "LeakyReLU", "PReLU"}));
     node.properties.push_back(gainProperty());
+    {
+      NodeProperty slope;
+      slope.key = "negative_slope";
+      slope.label = "Negative slope";
+      slope.kind = PropertyKind::real;
+      slope.floatValue = leakyReluNegativeSlopeDefault;
+      slope.floatMinimum = leakyReluNegativeSlopeMinimum;
+      slope.floatMaximum = leakyReluNegativeSlopeMaximum;
+      node.properties.push_back(std::move(slope));
+    }
     break;
   case NodeType::merge:
     node.label = "Utility";

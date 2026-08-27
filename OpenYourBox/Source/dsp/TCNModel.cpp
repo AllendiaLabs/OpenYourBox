@@ -184,9 +184,16 @@ std::uint64_t TCNModel::getArchitectureHash() const noexcept {
   hashCombine(hash, static_cast<std::uint64_t>(config.residual ? 1 : 0));
   hashCombine(hash, static_cast<std::uint64_t>(
                         static_cast<int>(config.gain * 1000.0f)));
+  hashCombine(hash, static_cast<std::uint64_t>(
+                        static_cast<int>(config.negativeSlope * 1000.0f)));
   return hash;
 }
 
+/**
+ * @brief Applies the configured TCN activation for @p layer.
+ * @param value Pre-activation tensor.
+ * @param layer Temporal block index (used for PReLU parameters).
+ */
 torch::Tensor TCNModel::applyActivation(torch::Tensor value, int layer) {
   if (std::abs(config.gain - 1.0f) > 1.0e-6f)
     value = value * config.gain;
@@ -198,7 +205,7 @@ torch::Tensor TCNModel::applyActivation(torch::Tensor value, int layer) {
   case ActivationType::tanh:
     return torch::tanh(value);
   case ActivationType::leakyRelu:
-    return torch::leaky_relu(value, 0.01);
+    return torch::leaky_relu(value, config.negativeSlope);
   case ActivationType::prelu:
     if (layer >= 0 && static_cast<std::size_t>(layer) < preluActivations->size())
       return preluActivations[static_cast<std::size_t>(layer)]

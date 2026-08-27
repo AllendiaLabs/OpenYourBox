@@ -93,6 +93,17 @@ private:
   void renderPalette(NodeGraph &graph,
                      openyourbox::library::UserBoxLibrary *boxLibrary);
   /**
+   * @brief Draws the live graph hierarchy under Library for navigate and save.
+   * @param graph Message-thread graph document.
+   */
+  void renderProjectStructure(NodeGraph &graph);
+  /**
+   * @brief Draws one Project structure row for a node or nested group.
+   * @param graph Message-thread graph document.
+   * @param boxId Node or group identifier.
+   */
+  void renderProjectStructureItem(NodeGraph &graph, std::int32_t boxId);
+  /**
    * @brief Draws one node and its inline controls.
    * @param graph Message-thread graph document.
    * @param node Node being rendered.
@@ -250,6 +261,8 @@ private:
   bool mapHoveredLastFrame = false;
   /** @brief User Library tree drawn in the left palette. */
   openyourbox::ui::UserBoxLibraryPanel boxLibraryPanel;
+  /** @brief Session width of the left Library palette in pixels. */
+  float leftPaletteWidth = 200.0f;
   /** @brief Node or group targeted by the save-to-library dialog. */
   std::int32_t pendingSaveBoxId = 0;
   /** @brief True to open the save-to-library popup this frame. */

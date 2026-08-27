@@ -7,6 +7,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <iterator>
 #include <limits>
 #include <optional>
 #include <string>
@@ -90,6 +91,16 @@ inline constexpr float gainMinimum = 0.1f;
 inline constexpr float gainMaximum = 10.0f;
 /** @brief Neutral Gain value that leaves nonlinearity slope unchanged. */
 inline constexpr float gainDefault = 1.0f;
+/** @brief Default LeakyReLU negative slope (PyTorch default). */
+inline constexpr float leakyReluNegativeSlopeDefault = 0.01f;
+/** @brief Inclusive lower bound for LeakyReLU negative slope. */
+inline constexpr float leakyReluNegativeSlopeMinimum = 0.0f;
+/** @brief Inclusive upper bound for LeakyReLU negative slope. */
+inline constexpr float leakyReluNegativeSlopeMaximum = 1.0f;
+/** @brief Activation choice index for LeakyReLU. */
+inline constexpr int leakyReluActivationIndex = 3;
+/** @brief Reserved token binding a dim/channels/features field to its input. */
+inline constexpr const char *preserveInToken = "in";
 /** @brief Default copies parameter N for a new group. */
 inline constexpr int defaultGroupCopies = 1;
 /** @brief Inclusive upper bound for a group's copies parameter. */
@@ -749,8 +760,26 @@ struct NodeProperty {
    * @brief Per-copy real values when the owner sits in a group with N&gt;1.
    *
    * Empty means every copy uses `floatValue`. Slot 0 mirrors `floatValue`.
+   * Length is the **authored** list length L (may be less than P).
    */
   std::vector<float> copyFloatValues;
+  /**
+   * @brief True when authored length L is not in the nest dividing set.
+   *
+   * Authored values are preserved; runtime and shape inference treat the
+   * property as unresolved until the user commits a legal list.
+   */
+  bool copyListInvalid = false;
+  /** @brief User-facing reason when @ref copyListInvalid is set. */
+  std::string copyListInvalidMessage;
+  /**
+   * @brief True when this integer property is bound to the `in` keyword.
+   *
+   * Authored length is `copyIntValues.size()` (or 1 when empty). Resolved
+   * integers are derived from the paired input shape, not persisted as the
+   * source of truth.
+   */
+  bool preserveInBound = false;
 
   /** @brief Clamps and stores a proposed integer value. */
   void setValue(int proposed) noexcept {
@@ -786,14 +815,16 @@ inline void widenIntegerPropertyBounds(NodeProperty &property) noexcept {
  * @brief Outcome of parsing a comma-separated per-copy property list.
  */
 struct PropertyCopyListParse {
-  /** @brief True when the text is a legal 1-value broadcast or N-value list. */
+  /** @brief True when the text is a legal dividing-set length (or all-`in`). */
   bool accepted = false;
   /** @brief User-facing reason when parsing failed. */
   std::string message;
-  /** @brief Parsed integers, sized to the requested copy count. */
+  /** @brief Parsed authored integers (length L, not expanded to P). */
   std::vector<int> intValues;
-  /** @brief Parsed reals, sized to the requested copy count. */
+  /** @brief Parsed authored reals (length L, not expanded to P). */
   std::vector<float> floatValues;
+  /** @brief True when every token is the reserved `in` keyword. */
+  bool preserveIn = false;
 };
 
 /** @brief Live performance values displayed by a frozen BlackBox node. */
@@ -975,6 +1006,12 @@ struct ViewportState {
    * @brief Group whose interior is the current canvas, or empty at the graph root.
    */
   std::optional<std::int32_t> focusedGroupId;
+  /**
+   * @brief Last-visited descendant groups under the current focus (parent→deep).
+   *
+   * Shown in the hierarchy trail until the user opens a different branch.
+   */
+  std::vector<std::int32_t> stickySpine;
 };
 
 /** @brief Outcome returned when an interactive connection is validated. */
@@ -1208,58 +1245,246 @@ inline bool propertySupportsCopyValueList(const NodeProperty &property) noexcept
 }
 
 /**
+ * @brief Returns true when @p property may bind to the reserved `in` token.
+ * @param property Candidate inline property.
+ */
+inline bool propertySupportsPreserveIn(const NodeProperty &property) noexcept {
+  if (property.kind != PropertyKind::integer)
+    return false;
+  return property.key == "features" || property.key == "channels";
+}
+
+/**
+ * @brief Product of ancestor copy counts (P), or 1 when @p copyCounts is empty.
+ * @param copyCounts Outer→inner copy-count vector.
+ */
+inline int copyCountProduct(const std::vector<int> &copyCounts) noexcept {
+  int product = 1;
+  for (const auto copies : copyCounts)
+    product *= std::max(1, copies);
+  return std::max(1, product);
+}
+
+/**
+ * @brief Dividing-set lengths D(C) = {1} ∪ suffix products of @p copyCounts.
+ * @param copyCounts Outer→inner copy-count vector C.
+ * @return Sorted unique legal authored lengths including 1 and P.
+ */
+inline std::vector<int>
+dividingSetLengths(const std::vector<int> &copyCounts) {
+  std::vector<int> lengths;
+  lengths.push_back(1);
+  int product = 1;
+  for (int index = static_cast<int>(copyCounts.size()) - 1; index >= 0;
+       --index) {
+    product *= std::max(1, copyCounts[static_cast<std::size_t>(index)]);
+    lengths.push_back(product);
+  }
+  std::sort(lengths.begin(), lengths.end());
+  lengths.erase(std::unique(lengths.begin(), lengths.end()), lengths.end());
+  return lengths;
+}
+
+/**
+ * @brief Returns true when @p length is in D(@p copyCounts).
+ * @param length Authored list length L.
+ * @param copyCounts Outer→inner copy-count vector.
+ */
+inline bool isDividingSetLength(int length,
+                                const std::vector<int> &copyCounts) noexcept {
+  if (length < 1)
+    return false;
+  for (const auto allowed : dividingSetLengths(copyCounts)) {
+    if (allowed == length)
+      return true;
+  }
+  return false;
+}
+
+/**
+ * @brief User-facing list of allowed authored lengths for @p label.
+ * @param label Property label.
+ * @param copyCounts Outer→inner copy-count vector.
+ */
+inline std::string
+formatAllowedCopyListLengths(const std::string &label,
+                             const std::vector<int> &copyCounts) {
+  const auto allowed = dividingSetLengths(copyCounts);
+  std::string text = label + " needs a list of length ";
+  for (std::size_t index = 0; index < allowed.size(); ++index) {
+    if (index > 0 && index + 1 == allowed.size())
+      text += ", or ";
+    else if (index > 0)
+      text += ", ";
+    text += std::to_string(allowed[index]);
+  }
+  return text;
+}
+
+/**
+ * @brief Authored list length L stored on @p property (at least 1).
+ * @param property Source property.
+ */
+inline int authoredCopyListLength(const NodeProperty &property) noexcept {
+  if (property.kind == PropertyKind::real)
+    return std::max(1, static_cast<int>(property.copyFloatValues.size()));
+  return std::max(1, static_cast<int>(property.copyIntValues.size()));
+}
+
+/**
+ * @brief Marks @p property valid or invalid for nest @p copyCounts without resizing.
+ * @param property List-capable property whose authored length is preserved.
+ * @param copyCounts Outer→inner copy-count vector for the owner node.
+ */
+inline void syncCopyListValidity(NodeProperty &property,
+                                 const std::vector<int> &copyCounts) {
+  if (!propertySupportsCopyValueList(property))
+    return;
+  if (property.kind == PropertyKind::real) {
+    if (property.copyFloatValues.empty())
+      property.copyFloatValues.push_back(property.floatValue);
+  } else if (property.copyIntValues.empty()) {
+    property.copyIntValues.push_back(
+        property.preserveInBound ? 0 : property.value);
+  }
+  const auto length = authoredCopyListLength(property);
+  if (isDividingSetLength(length, copyCounts)) {
+    property.copyListInvalid = false;
+    property.copyListInvalidMessage.clear();
+    return;
+  }
+  property.copyListInvalid = true;
+  property.copyListInvalidMessage =
+      formatAllowedCopyListLengths(property.label, copyCounts) +
+      " for this nest (authored length " + std::to_string(length) +
+      " is no longer valid)";
+}
+
+/**
+ * @brief Updates sticky descendant ids when canvas focus moves along a nest.
+ * @param stickySpine Ordered descendants under the new focus (parent→deep).
+ * @param previousChain Ancestor chain of the previous focus (outer→inner).
+ * @param nextChain Ancestor chain of the new focus (outer→inner).
+ */
+inline void updateHierarchyStickySpine(
+    std::vector<std::int32_t> &stickySpine,
+    const std::vector<std::int32_t> &previousChain,
+    const std::vector<std::int32_t> &nextChain) {
+  const auto isPrefix =
+      [](const std::vector<std::int32_t> &prefix,
+         const std::vector<std::int32_t> &chain) {
+        if (prefix.size() > chain.size())
+          return false;
+        return std::equal(prefix.begin(), prefix.end(), chain.begin());
+      };
+  const bool goingUp =
+      !previousChain.empty() &&
+      (nextChain.empty() || (nextChain.size() < previousChain.size() &&
+                             isPrefix(nextChain, previousChain)));
+  const bool goingDown =
+      !nextChain.empty() &&
+      (previousChain.empty() || (previousChain.size() < nextChain.size() &&
+                                 isPrefix(previousChain, nextChain)));
+  if (goingUp) {
+    std::vector<std::int32_t> retained;
+    if (nextChain.empty()) {
+      retained = previousChain;
+    } else {
+      bool afterFocus = false;
+      for (const auto id : previousChain) {
+        if (!afterFocus) {
+          if (id == nextChain.back())
+            afterFocus = true;
+          continue;
+        }
+        retained.push_back(id);
+      }
+    }
+    for (const auto id : stickySpine) {
+      if (std::find(retained.begin(), retained.end(), id) == retained.end())
+        retained.push_back(id);
+    }
+    stickySpine = std::move(retained);
+    return;
+  }
+  if (goingDown) {
+    const auto found =
+        std::find(stickySpine.begin(), stickySpine.end(), nextChain.back());
+    if (found != stickySpine.end())
+      stickySpine.erase(stickySpine.begin(), std::next(found));
+    else
+      stickySpine.clear();
+    return;
+  }
+  stickySpine.clear();
+}
+
+/**
+ * @brief Drops @p removedId and deeper sticky descendants from @p stickySpine.
+ * @param stickySpine Ordered descendant group ids.
+ * @param removedId Group that was deleted or ungrouped.
+ */
+inline void pruneStickySpineId(std::vector<std::int32_t> &stickySpine,
+                               std::int32_t removedId) {
+  const auto found =
+      std::find(stickySpine.begin(), stickySpine.end(), removedId);
+  if (found != stickySpine.end())
+    stickySpine.erase(found, stickySpine.end());
+}
+
+/**
  * @brief Integer used by copy slot @p slot, falling back to the primary value.
  * @param property Source property.
  * @param slot Copy index (0 is the visible element).
  */
 inline int integerValueForCopy(const NodeProperty &property, int slot) noexcept {
-  if (slot >= 0 && slot < static_cast<int>(property.copyIntValues.size()))
-    return property.copyIntValues[static_cast<std::size_t>(slot)];
-  return property.value;
+  if (property.copyIntValues.empty())
+    return property.value;
+  const auto length = static_cast<int>(property.copyIntValues.size());
+  const auto index = ((slot % length) + length) % length;
+  return property.copyIntValues[static_cast<std::size_t>(index)];
 }
 
 /**
- * @brief Real used by copy slot @p slot, falling back to the primary value.
+ * @brief Real used by copy slot @p slot, tiling the authored list when L &lt; P.
  * @param property Source property.
  * @param slot Copy index (0 is the visible element).
  */
 inline float floatValueForCopy(const NodeProperty &property, int slot) noexcept {
-  if (slot >= 0 && slot < static_cast<int>(property.copyFloatValues.size()))
-    return property.copyFloatValues[static_cast<std::size_t>(slot)];
-  return property.floatValue;
+  if (property.copyFloatValues.empty())
+    return property.floatValue;
+  const auto length = static_cast<int>(property.copyFloatValues.size());
+  const auto index = ((slot % length) + length) % length;
+  return property.copyFloatValues[static_cast<std::size_t>(index)];
 }
 
 /**
- * @brief Grows or shrinks a property's per-copy list to @p count.
- * @param property Property to resize.
- * @param count Required slot count (≥ 1). New slots clone the previous last
- *        value. An empty list is initialized from the primary field.
+ * @brief Ensures an authored copy list exists without pad/truncating to P.
+ *
+ * Empty lists are initialized from the primary scalar. Existing authored
+ * lengths are left unchanged so nest changes can flag invalid L instead of
+ * silently rewriting it.
+ * @param property Property to initialize.
+ * @param count Ignored (kept for call-site compatibility); tiling uses P at read.
  */
 inline void ensurePropertyCopyCount(NodeProperty &property, int count) {
+  (void)count;
   if (!propertySupportsCopyValueList(property))
     return;
-  const auto target = std::max(1, count);
   if (property.kind == PropertyKind::real) {
     if (property.copyFloatValues.empty())
       property.copyFloatValues.push_back(property.floatValue);
-    while (static_cast<int>(property.copyFloatValues.size()) < target)
-      property.copyFloatValues.push_back(property.copyFloatValues.back());
-    if (static_cast<int>(property.copyFloatValues.size()) > target)
-      property.copyFloatValues.resize(static_cast<std::size_t>(target));
     return;
   }
   if (property.copyIntValues.empty())
-    property.copyIntValues.push_back(property.value);
-  while (static_cast<int>(property.copyIntValues.size()) < target)
-    property.copyIntValues.push_back(property.copyIntValues.back());
-  if (static_cast<int>(property.copyIntValues.size()) > target)
-    property.copyIntValues.resize(static_cast<std::size_t>(target));
+    property.copyIntValues.push_back(
+        property.preserveInBound ? 0 : property.value);
 }
 
 /**
- * @brief Resizes every list-capable property on @p node to @p count slots.
+ * @brief Initializes empty authored lists on @p node without forcing size P.
  * @param node Element whose enclosing copy product changed.
- * @param count Required slot count (≥ 1).
+ * @param count Ignored; validity is synced separately from the copy-count vector.
  */
 inline void ensureNodePropertyCopyCounts(GraphNode &node, int count) {
   for (auto &property : node.properties)
@@ -1273,6 +1498,8 @@ inline void ensureNodePropertyCopyCounts(GraphNode &node, int count) {
  */
 inline void applyCopyPropertyValues(GraphNode &node, int slot) {
   for (auto &property : node.properties) {
+    if (property.preserveInBound || property.copyListInvalid)
+      continue;
     if (property.kind == PropertyKind::real)
       property.setFloatValue(floatValueForCopy(property, slot));
     else if (property.kind == PropertyKind::integer)
@@ -1281,18 +1508,18 @@ inline void applyCopyPropertyValues(GraphNode &node, int slot) {
 }
 
 /**
- * @brief Formats N numeric copy values as a comma-separated list.
+ * @brief Formats the authored (short) copy-list for the editable field.
  * @param property Source property.
- * @param copyCount Number of copies to include.
  */
-inline std::string formatPropertyCopyList(const NodeProperty &property,
-                                          int copyCount) {
-  const auto count = std::max(1, copyCount);
+inline std::string formatAuthoredPropertyCopyList(const NodeProperty &property) {
+  const auto count = authoredCopyListLength(property);
   std::string text;
   for (int index = 0; index < count; ++index) {
     if (index > 0)
       text += ", ";
-    if (property.kind == PropertyKind::real) {
+    if (property.preserveInBound)
+      text += preserveInToken;
+    else if (property.kind == PropertyKind::real) {
       char buffer[32];
       std::snprintf(buffer, sizeof(buffer), "%.2f",
                     floatValueForCopy(property, index));
@@ -1305,19 +1532,58 @@ inline std::string formatPropertyCopyList(const NodeProperty &property,
 }
 
 /**
- * @brief Parses a comma-separated list of 1 (broadcast) or N per-copy numbers.
+ * @brief Formats the expanded P-length preview (tiling the authored list).
+ * @param property Source property.
+ * @param copyCount Expanded slot count P.
+ */
+inline std::string formatExpandedPropertyCopyList(const NodeProperty &property,
+                                                  int copyCount) {
+  const auto count = std::max(1, copyCount);
+  std::string text;
+  for (int index = 0; index < count; ++index) {
+    if (index > 0)
+      text += ", ";
+    if (property.preserveInBound)
+      text += preserveInToken;
+    else if (property.kind == PropertyKind::real) {
+      char buffer[32];
+      std::snprintf(buffer, sizeof(buffer), "%.2f",
+                    floatValueForCopy(property, index));
+      text += buffer;
+    } else {
+      text += std::to_string(integerValueForCopy(property, index));
+    }
+  }
+  return text;
+}
+
+/**
+ * @brief Formats N numeric copy values as a comma-separated list.
+ * @param property Source property.
+ * @param copyCount Number of copies to include.
+ * @deprecated Use formatAuthoredPropertyCopyList / formatExpandedPropertyCopyList.
+ */
+inline std::string formatPropertyCopyList(const NodeProperty &property,
+                                          int copyCount) {
+  return formatExpandedPropertyCopyList(property, copyCount);
+}
+
+/**
+ * @brief Parses a comma-separated authored copy list (dividing-set length).
  *
- * Commas separate values. Periods are the decimal mark. A single token is
- * applied to every copy.
+ * Commas separate values. Periods are the decimal mark. Length L must be in
+ * D(C). The reserved token `in` is accepted when @p allowPreserveIn is true
+ * and every token is `in`.
  * @param property Property providing kind and legal ranges.
- * @param copyCount Required list length when more than one token is present.
+ * @param ancestorCopyCounts Outer→inner copy-count vector C.
  * @param text User-entered list.
+ * @param allowPreserveIn True when this field may bind to `in`.
  */
 inline PropertyCopyListParse
-parsePropertyCopyList(const NodeProperty &property, int copyCount,
-                      const std::string &text) {
+parsePropertyCopyList(const NodeProperty &property,
+                      const std::vector<int> &ancestorCopyCounts,
+                      const std::string &text, bool allowPreserveIn = false) {
   PropertyCopyListParse result;
-  const auto target = std::max(1, copyCount);
   std::vector<std::string> tokens;
   std::string_view remaining(text);
   while (!remaining.empty() || tokens.empty()) {
@@ -1339,10 +1605,42 @@ parsePropertyCopyList(const NodeProperty &property, int copyCount,
       return result;
     }
   }
-  if (tokens.size() != 1 &&
-      tokens.size() != static_cast<std::size_t>(target)) {
-    result.message = property.label + " needs " + std::to_string(target) +
-                     " comma-separated values (one per copy)";
+
+  int inCount = 0;
+  int numericCount = 0;
+  for (const auto &token : tokens) {
+    if (token == preserveInToken)
+      ++inCount;
+    else
+      ++numericCount;
+  }
+  if (inCount > 0 && numericCount > 0) {
+    result.message = property.label + " cannot mix " + preserveInToken +
+                     " with numbers";
+    return result;
+  }
+  if (inCount > 0) {
+    if (!allowPreserveIn || !propertySupportsPreserveIn(property)) {
+      result.message = property.label + " does not support the " +
+                       preserveInToken + " keyword";
+      return result;
+    }
+    if (!isDividingSetLength(static_cast<int>(tokens.size()),
+                             ancestorCopyCounts)) {
+      result.message =
+          formatAllowedCopyListLengths(property.label, ancestorCopyCounts);
+      return result;
+    }
+    result.accepted = true;
+    result.preserveIn = true;
+    result.intValues.assign(tokens.size(), 0);
+    return result;
+  }
+
+  if (!isDividingSetLength(static_cast<int>(tokens.size()),
+                           ancestorCopyCounts)) {
+    result.message =
+        formatAllowedCopyListLengths(property.label, ancestorCopyCounts);
     return result;
   }
 
@@ -1414,18 +1712,22 @@ parsePropertyCopyList(const NodeProperty &property, int copyCount,
       integers.push_back(integer);
     }
   }
-  if (tokens.size() == 1) {
-    if (property.kind == PropertyKind::real) {
-      const auto broadcastValue = reals.front();
-      reals.assign(static_cast<std::size_t>(target), broadcastValue);
-    } else {
-      const auto broadcastValue = integers.front();
-      integers.assign(static_cast<std::size_t>(target), broadcastValue);
-    }
-  }
   result.accepted = true;
   result.floatValues = std::move(reals);
   result.intValues = std::move(integers);
   return result;
+}
+
+/**
+ * @brief Parses a copy list when only P is known (D = {1, P}).
+ * @param property Property providing kind and legal ranges.
+ * @param copyCount Expanded slot count P.
+ * @param text User-entered list.
+ */
+inline PropertyCopyListParse
+parsePropertyCopyList(const NodeProperty &property, int copyCount,
+                      const std::string &text) {
+  const auto target = std::max(1, copyCount);
+  return parsePropertyCopyList(property, std::vector<int>{target}, text, false);
 }
 } // namespace openyourbox::graph

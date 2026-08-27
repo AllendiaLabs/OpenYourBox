@@ -34,9 +34,9 @@ description: "Task list for Editor UX & Parameter Flexibility"
 
 **Purpose**: Confirm design artifacts and touch-points before code changes.
 
-- [ ] T001 Verify design artifact cross-links and story order in `specs/011-editor-ux-params/plan.md`
-- [ ] T002 [P] Inventory current copy-list parse/commit and breadcrumb/palette width call sites in `OpenYourBox/Source/graph/GraphTypes.h`, `OpenYourBox/Source/graph/NodeGraph.cpp`, and `OpenYourBox/Source/graph/NodeRenderer.cpp`
-- [ ] T003 [P] Inventory LeakyReLU hardcoded `0.01` sites in `OpenYourBox/Source/dsp/LiveGraphEngine.cpp`, `OpenYourBox/Source/dsp/TCNModel.cpp`, `Backend/train_worker.py`, and `Backend/freeze_worker.py`
+- [X] T001 Verify design artifact cross-links and story order in `specs/011-editor-ux-params/plan.md`
+- [X] T002 [P] Inventory current copy-list parse/commit and breadcrumb/palette width call sites in `OpenYourBox/Source/graph/GraphTypes.h`, `OpenYourBox/Source/graph/NodeGraph.cpp`, and `OpenYourBox/Source/graph/NodeRenderer.cpp`
+- [X] T003 [P] Inventory LeakyReLU hardcoded `0.01` sites in `OpenYourBox/Source/dsp/LiveGraphEngine.cpp`, `OpenYourBox/Source/dsp/TCNModel.cpp`, `Backend/train_worker.py`, and `Backend/freeze_worker.py`
 
 ---
 
@@ -46,9 +46,9 @@ description: "Task list for Editor UX & Parameter Flexibility"
 
 **⚠️ CRITICAL**: No user story work can begin until this phase is complete.
 
-- [ ] T004 Add ancestor copy-count vector + dividing-set helpers (outer→inner, `D(C)` per `specs/011-editor-ux-params/contracts/copy-list-tiling-contract.md`) with Doxygen in `OpenYourBox/Source/graph/GraphTypes.h`
-- [ ] T005 Add `copyListInvalid` (or equivalent) flag and authored-length-preserving resize policy notes on `NodeProperty` in `OpenYourBox/Source/graph/GraphTypes.h` (stop silent pad/truncate as the only path)
-- [ ] T006 Wire `effectiveCopyCount` / ancestor walk to expose ordered copy vector for tiling in `OpenYourBox/Source/graph/NodeGraph.cpp`
+- [X] T004 Add ancestor copy-count vector + dividing-set helpers (outer→inner, `D(C)` per `specs/011-editor-ux-params/contracts/copy-list-tiling-contract.md`) with Doxygen in `OpenYourBox/Source/graph/GraphTypes.h`
+- [X] T005 Add `copyListInvalid` (or equivalent) flag and authored-length-preserving resize policy notes on `NodeProperty` in `OpenYourBox/Source/graph/GraphTypes.h` (stop silent pad/truncate as the only path)
+- [X] T006 Wire `effectiveCopyCount` / ancestor walk to expose ordered copy vector for tiling in `OpenYourBox/Source/graph/NodeGraph.cpp`
 
 **Checkpoint**: Foundation ready — dividing-set API available; property can represent authored L ≠ P without forced mute resize.
 
@@ -62,14 +62,14 @@ description: "Task list for Editor UX & Parameter Flexibility"
 
 ### Implementation for User Story 1
 
-- [ ] T007 [US1] Extend `parsePropertyCopyList` to accept L ∈ D(C) and expand by tiling in `OpenYourBox/Source/graph/GraphTypes.h` per `specs/011-editor-ux-params/contracts/copy-list-tiling-contract.md`
-- [ ] T008 [US1] Update `setPropertyCopyValues` / `setFloatPropertyCopyValues` to store authored L and derive expanded P for runtime in `OpenYourBox/Source/graph/NodeGraph.cpp`
-- [ ] T009 [US1] Stop `ensurePropertyCopyCount` from silently rewriting authored L; integrate invalid flag path in `OpenYourBox/Source/graph/GraphTypes.h` / `OpenYourBox/Source/graph/NodeGraph.cpp`
-- [ ] T010 [US1] On `setGroupCopies`, re-tile when L still valid else mark `copyListInvalid` with user-visible message in `OpenYourBox/Source/graph/NodeGraph.cpp`
-- [ ] T011 [US1] Persist authored vectors without forcing size==P on save/load in `OpenYourBox/Source/graph/NodeGraph.cpp` (property ValueTree CSV path)
-- [ ] T012 [US1] Property UI: editable authored CSV + read-only expanded P preview when P>1 in `OpenYourBox/Source/graph/NodeRenderer.cpp`
-- [ ] T013 [US1] Show clear refuse/invalid messages for bad lengths and post-nest invalid state in `OpenYourBox/Source/graph/NodeRenderer.cpp`
-- [ ] T014 [P] [US1] Add dividing-set / tiling unit coverage in `Tests/` (new or existing graph property test file registered in `CMakeLists.txt`)
+- [X] T007 [US1] Extend `parsePropertyCopyList` to accept L ∈ D(C) and expand by tiling in `OpenYourBox/Source/graph/GraphTypes.h` per `specs/011-editor-ux-params/contracts/copy-list-tiling-contract.md`
+- [X] T008 [US1] Update `setPropertyCopyValues` / `setFloatPropertyCopyValues` to store authored L and derive expanded P for runtime in `OpenYourBox/Source/graph/NodeGraph.cpp`
+- [X] T009 [US1] Stop `ensurePropertyCopyCount` from silently rewriting authored L; integrate invalid flag path in `OpenYourBox/Source/graph/GraphTypes.h` / `OpenYourBox/Source/graph/NodeGraph.cpp`
+- [X] T010 [US1] On `setGroupCopies`, re-tile when L still valid else mark `copyListInvalid` with user-visible message in `OpenYourBox/Source/graph/NodeGraph.cpp`
+- [X] T011 [US1] Persist authored vectors without forcing size==P on save/load in `OpenYourBox/Source/graph/NodeGraph.cpp` (property ValueTree CSV path)
+- [X] T012 [US1] Property UI: editable authored CSV + read-only expanded P preview when P>1 in `OpenYourBox/Source/graph/NodeRenderer.cpp`
+- [X] T013 [US1] Show clear refuse/invalid messages for bad lengths and post-nest invalid state in `OpenYourBox/Source/graph/NodeRenderer.cpp`
+- [X] T014 [P] [US1] Add dividing-set / tiling unit coverage in `Tests/` (new or existing graph property test file registered in `CMakeLists.txt`)
 
 **Checkpoint**: US1 complete — short lists authorable; preview shows P; nest changes re-tile or flag.
 
@@ -83,12 +83,12 @@ description: "Task list for Editor UX & Parameter Flexibility"
 
 ### Implementation for User Story 2
 
-- [ ] T015 [US2] Extend property parse path to accept reserved token `in` (case-sensitive) for bindable integer fields in `OpenYourBox/Source/graph/GraphTypes.h` per `specs/011-editor-ux-params/contracts/preserve-in-keyword-contract.md`
-- [ ] T016 [US2] Persist `in` binding intent (not only resolved ints) on `NodeProperty` serialize/deserialize in `OpenYourBox/Source/graph/NodeGraph.cpp`
-- [ ] T017 [US2] Resolve `in` → paired input channels/features during shape refresh / `setProperty` in `OpenYourBox/Source/graph/NodeGraph.cpp`
-- [ ] T018 [US2] Re-resolve bindings when ancestor copies or upstream shapes change; treat unresolved as illegal in `OpenYourBox/Source/graph/NodeGraph.cpp`
-- [ ] T019 [US2] Property editor accepts `in` / list-of-`in`, refuses mixes and non-bindable fields with messages in `OpenYourBox/Source/graph/NodeRenderer.cpp`
-- [ ] T020 [P] [US2] Add `in` parse/resolve unit coverage in `Tests/` (same or adjacent test target as T014)
+- [X] T015 [US2] Extend property parse path to accept reserved token `in` (case-sensitive) for bindable integer fields in `OpenYourBox/Source/graph/GraphTypes.h` per `specs/011-editor-ux-params/contracts/preserve-in-keyword-contract.md`
+- [X] T016 [US2] Persist `in` binding intent (not only resolved ints) on `NodeProperty` serialize/deserialize in `OpenYourBox/Source/graph/NodeGraph.cpp`
+- [X] T017 [US2] Resolve `in` → paired input channels/features during shape refresh / `setProperty` in `OpenYourBox/Source/graph/NodeGraph.cpp`
+- [X] T018 [US2] Re-resolve bindings when ancestor copies or upstream shapes change; treat unresolved as illegal in `OpenYourBox/Source/graph/NodeGraph.cpp`
+- [X] T019 [US2] Property editor accepts `in` / list-of-`in`, refuses mixes and non-bindable fields with messages in `OpenYourBox/Source/graph/NodeRenderer.cpp`
+- [X] T020 [P] [US2] Add `in` parse/resolve unit coverage in `Tests/` (same or adjacent test target as T014)
 
 **Checkpoint**: US2 complete — `in` keeps shapes legal across copy-count changes.
 
@@ -102,14 +102,14 @@ description: "Task list for Editor UX & Parameter Flexibility"
 
 ### Implementation for User Story 3
 
-- [ ] T021 [US3] Add collapsible **Project structure** section under Library in left palette in `OpenYourBox/Source/graph/NodeRenderer.cpp` / `OpenYourBox/Source/ui/UserBoxLibraryPanel.cpp` per `specs/011-editor-ux-params/contracts/project-structure-library-tree-contract.md`
-- [ ] T022 [US3] Build live hierarchy tree (groups/elements) from `NodeGraph` and refresh on graph edits in `OpenYourBox/Source/ui/UserBoxLibraryPanel.cpp` (or dedicated helper beside it)
-- [ ] T023 [US3] Navigate: activating a group in Project structure calls `setCanvasFocus` in `OpenYourBox/Source/graph/NodeRenderer.cpp`
-- [ ] T024 [US3] Enable save-to-library from Project structure targeted nested box (reuse `exportBox`) in `OpenYourBox/Source/graph/NodeRenderer.cpp` / `OpenYourBox/Source/library/UserBoxLibrary.cpp`
-- [ ] T025 [US3] Expandable member tree for group library entries from snapshot payload in `OpenYourBox/Source/ui/UserBoxLibraryPanel.cpp`
-- [ ] T026 [US3] Insert subpart API: clone nested subtree only (no external cables) in `OpenYourBox/Source/library/UserBoxLibrary.cpp` / `OpenYourBox/Source/graph/NodeGraph.cpp` (`importBox` variant or path arg)
-- [ ] T027 [US3] DnD/place payload supports `(entryId, optional nestedPathOrId)` in `OpenYourBox/Source/ui/UserBoxLibraryPanel.cpp` and drop handling in `OpenYourBox/Source/graph/NodeRenderer.cpp`
-- [ ] T028 [US3] Sort user library entries by display name (case-insensitive) within each folder when rendering in `OpenYourBox/Source/ui/UserBoxLibraryPanel.cpp` (and sort nested member rows by label when expanding an entry); keep order correct after rename/save per FR-004a
+- [X] T021 [US3] Add collapsible **Project structure** section under Library in left palette in `OpenYourBox/Source/graph/NodeRenderer.cpp` / `OpenYourBox/Source/ui/UserBoxLibraryPanel.cpp` per `specs/011-editor-ux-params/contracts/project-structure-library-tree-contract.md`
+- [X] T022 [US3] Build live hierarchy tree (groups/elements) from `NodeGraph` and refresh on graph edits in `OpenYourBox/Source/ui/UserBoxLibraryPanel.cpp` (or dedicated helper beside it)
+- [X] T023 [US3] Navigate: activating a group in Project structure calls `setCanvasFocus` in `OpenYourBox/Source/graph/NodeRenderer.cpp`
+- [X] T024 [US3] Enable save-to-library from Project structure targeted nested box (reuse `exportBox`) in `OpenYourBox/Source/graph/NodeRenderer.cpp` / `OpenYourBox/Source/library/UserBoxLibrary.cpp`
+- [X] T025 [US3] Expandable member tree for group library entries from snapshot payload in `OpenYourBox/Source/ui/UserBoxLibraryPanel.cpp`
+- [X] T026 [US3] Insert subpart API: clone nested subtree only (no external cables) in `OpenYourBox/Source/library/UserBoxLibrary.cpp` / `OpenYourBox/Source/graph/NodeGraph.cpp` (`importBox` variant or path arg)
+- [X] T027 [US3] DnD/place payload supports `(entryId, optional nestedPathOrId)` in `OpenYourBox/Source/ui/UserBoxLibraryPanel.cpp` and drop handling in `OpenYourBox/Source/graph/NodeRenderer.cpp`
+- [X] T028 [US3] Sort user library entries by display name (case-insensitive) within each folder when rendering in `OpenYourBox/Source/ui/UserBoxLibraryPanel.cpp` (and sort nested member rows by label when expanding an entry); keep order correct after rename/save per FR-004a
 
 **Checkpoint**: US3 complete — live tree + library subtree insert/save + name-ordered lists.
 
@@ -123,10 +123,10 @@ description: "Task list for Editor UX & Parameter Flexibility"
 
 ### Implementation for User Story 4
 
-- [ ] T029 [US4] Add `stickySpine` (ordered GroupIds) on viewport/session state beside `focusedGroupId` in `OpenYourBox/Source/graph/GraphTypes.h`
-- [ ] T030 [US4] Update `setCanvasFocus` / open-child paths to extend or reset spine per `specs/011-editor-ux-params/contracts/hierarchy-sticky-trail-contract.md` in `OpenYourBox/Source/graph/NodeRenderer.cpp`
-- [ ] T031 [US4] Render sticky descendants in `renderScopeBreadcrumb` as clickable entries in `OpenYourBox/Source/graph/NodeRenderer.cpp`
-- [ ] T032 [US4] Prune spine on delete/ungroup of sticky ids in `OpenYourBox/Source/graph/NodeGraph.cpp` / `OpenYourBox/Source/graph/NodeRenderer.cpp`
+- [X] T029 [US4] Add `stickySpine` (ordered GroupIds) on viewport/session state beside `focusedGroupId` in `OpenYourBox/Source/graph/GraphTypes.h`
+- [X] T030 [US4] Update `setCanvasFocus` / open-child paths to extend or reset spine per `specs/011-editor-ux-params/contracts/hierarchy-sticky-trail-contract.md` in `OpenYourBox/Source/graph/NodeRenderer.cpp`
+- [X] T031 [US4] Render sticky descendants in `renderScopeBreadcrumb` as clickable entries in `OpenYourBox/Source/graph/NodeRenderer.cpp`
+- [X] T032 [US4] Prune spine on delete/ungroup of sticky ids in `OpenYourBox/Source/graph/NodeGraph.cpp` / `OpenYourBox/Source/graph/NodeRenderer.cpp`
 
 **Checkpoint**: US4 complete — sticky trail matches FR-003.
 
@@ -140,10 +140,10 @@ description: "Task list for Editor UX & Parameter Flexibility"
 
 ### Implementation for User Story 5
 
-- [ ] T033 [US5] Replace fixed left `200.f` palette width with splitter + clamps in `OpenYourBox/Source/graph/NodeRenderer.cpp` per `specs/011-editor-ux-params/contracts/resizable-side-menus-contract.md`
-- [ ] T034 [US5] Replace fixed right/`-340` graph inset with splitter + clamps in `OpenYourBox/Source/PluginEditor.cpp`
-- [ ] T035 [US5] Store `leftWidthPx` / `rightWidthPx` for session (and prefs if UI prefs already exist) in `OpenYourBox/Source/PluginEditor.cpp` / `OpenYourBox/Source/graph/NodeRenderer.cpp`
-- [ ] T036 [US5] Enforce `minCanvasWidth` while dragging so canvas stays usable in `OpenYourBox/Source/PluginEditor.cpp` and `OpenYourBox/Source/graph/NodeRenderer.cpp`
+- [X] T033 [US5] Replace fixed left `200.f` palette width with splitter + clamps in `OpenYourBox/Source/graph/NodeRenderer.cpp` per `specs/011-editor-ux-params/contracts/resizable-side-menus-contract.md`
+- [X] T034 [US5] Replace fixed right/`-340` graph inset with splitter + clamps in `OpenYourBox/Source/PluginEditor.cpp`
+- [X] T035 [US5] Store `leftWidthPx` / `rightWidthPx` for session (and prefs if UI prefs already exist) in `OpenYourBox/Source/PluginEditor.cpp` / `OpenYourBox/Source/graph/NodeRenderer.cpp`
+- [X] T036 [US5] Enforce `minCanvasWidth` while dragging so canvas stays usable in `OpenYourBox/Source/PluginEditor.cpp` and `OpenYourBox/Source/graph/NodeRenderer.cpp`
 
 **Checkpoint**: US5 complete — both side menus resizable.
 
@@ -157,12 +157,12 @@ description: "Task list for Editor UX & Parameter Flexibility"
 
 ### Implementation for User Story 6
 
-- [ ] T037 [US6] Add `negative_slope` real property (default 0.01, range [0,1], refuse OOR) on activation factory in `OpenYourBox/Source/graph/NodeGraph.cpp` per `specs/011-editor-ux-params/contracts/leakyrelu-negative-slope-contract.md`
-- [ ] T038 [US6] Show/edit `negative_slope` only when activation is LeakyReLU in `OpenYourBox/Source/graph/NodeRenderer.cpp`
-- [ ] T039 [US6] Replace hardcoded `0.01` with property in `OpenYourBox/Source/dsp/LiveGraphEngine.cpp`
-- [ ] T040 [P] [US6] Replace hardcoded `0.01` with property in `OpenYourBox/Source/dsp/TCNModel.cpp`
-- [ ] T041 [P] [US6] Pass element `negative_slope` into LeakyReLU construction in `Backend/train_worker.py`
-- [ ] T042 [P] [US6] Pass element `negative_slope` into LeakyReLU construction in `Backend/freeze_worker.py`
+- [X] T037 [US6] Add `negative_slope` real property (default 0.01, range [0,1], refuse OOR) on activation factory in `OpenYourBox/Source/graph/NodeGraph.cpp` per `specs/011-editor-ux-params/contracts/leakyrelu-negative-slope-contract.md`
+- [X] T038 [US6] Show/edit `negative_slope` only when activation is LeakyReLU in `OpenYourBox/Source/graph/NodeRenderer.cpp`
+- [X] T039 [US6] Replace hardcoded `0.01` with property in `OpenYourBox/Source/dsp/LiveGraphEngine.cpp`
+- [X] T040 [P] [US6] Replace hardcoded `0.01` with property in `OpenYourBox/Source/dsp/TCNModel.cpp`
+- [X] T041 [P] [US6] Pass element `negative_slope` into LeakyReLU construction in `Backend/train_worker.py`
+- [X] T042 [P] [US6] Pass element `negative_slope` into LeakyReLU construction in `Backend/freeze_worker.py`
 
 **Checkpoint**: US6 complete — slope editable end-to-end.
 
@@ -172,10 +172,10 @@ description: "Task list for Editor UX & Parameter Flexibility"
 
 **Purpose**: Validation and cleanup across stories.
 
-- [ ] T043 Run manual scenarios in `specs/011-editor-ux-params/quickstart.md` and record gaps
-- [ ] T044 [P] Mark completed TODO bullets for this feature in `TODO.md` (lines covering Project structure, menus, hierarchy trail, `in`, nested lists, LeakyReLU slope)
-- [ ] T045 [P] Doxygen pass on new public helpers in `OpenYourBox/Source/graph/GraphTypes.h` and related `.h` APIs touched by this feature
-- [ ] T046 Fix any Shape Integrity regressions from `in` + tiling (illegal cable messaging) in `OpenYourBox/Source/graph/NodeGraph.cpp`
+- [X] T043 Run manual scenarios in `specs/011-editor-ux-params/quickstart.md` and record gaps
+- [X] T044 [P] Mark completed TODO bullets for this feature in `TODO.md` (lines covering Project structure, menus, hierarchy trail, `in`, nested lists, LeakyReLU slope)
+- [X] T045 [P] Doxygen pass on new public helpers in `OpenYourBox/Source/graph/GraphTypes.h` and related `.h` APIs touched by this feature
+- [X] T046 Fix any Shape Integrity regressions from `in` + tiling (illegal cable messaging) in `OpenYourBox/Source/graph/NodeGraph.cpp`
 
 ---
 

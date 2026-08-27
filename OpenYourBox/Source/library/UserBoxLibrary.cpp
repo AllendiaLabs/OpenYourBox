@@ -318,27 +318,41 @@ UserBoxLibrary::saveBox(const graph::NodeGraph &graph, std::int32_t boxId,
 
 std::optional<std::int32_t>
 UserBoxLibrary::insertBox(graph::NodeGraph &graph, const juce::String &entryId,
-                          juce::Point<float> position, juce::String &error) {
+                          juce::Point<float> position, juce::String &error,
+                          std::int32_t nestedRootId) {
+  auto snapshot = loadEntrySnapshot(entryId, error);
+  if (!snapshot.isValid())
+    return std::nullopt;
+  const auto *entry = findEntry(entryId);
+  if (entry == nullptr)
+    return std::nullopt;
+  const auto payloadDirectory = root.getChildFile(entry->payloadRelativePath);
+  if (!copyArtifactsIntoProject(snapshot, payloadDirectory, error))
+    return std::nullopt;
+  return graph.importBox(snapshot, position, true, error, nestedRootId);
+}
+
+juce::ValueTree UserBoxLibrary::loadEntrySnapshot(const juce::String &entryId,
+                                                  juce::String &error) const {
+  error.clear();
   const auto *entry = findEntry(entryId);
   if (entry == nullptr) {
     error = "Box library entry no longer exists";
-    return std::nullopt;
+    return {};
   }
   const auto payloadDirectory = root.getChildFile(entry->payloadRelativePath);
   const auto xmlFile = payloadDirectory.getChildFile("box.xml");
   auto xml = juce::XmlDocument::parse(xmlFile);
   if (xml == nullptr) {
     error = "Box snapshot could not be read";
-    return std::nullopt;
+    return {};
   }
   auto snapshot = juce::ValueTree::fromXml(*xml);
   if (!snapshot.isValid()) {
     error = "Box snapshot is corrupt";
-    return std::nullopt;
+    return {};
   }
-  if (!copyArtifactsIntoProject(snapshot, payloadDirectory, error))
-    return std::nullopt;
-  return graph.importBox(snapshot, position, true, error);
+  return snapshot;
 }
 
 bool UserBoxLibrary::rename(const juce::String &id, const juce::String &name,

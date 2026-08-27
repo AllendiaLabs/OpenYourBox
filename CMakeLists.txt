@@ -289,6 +289,22 @@ if(BUILD_TESTING)
         juce::juce_recommended_warning_flags)
     add_test(NAME OpenYourBoxGroups COMMAND OpenYourBoxGroupTests)
 
+    juce_add_console_app(OpenYourBoxCopyListTests PRODUCT_NAME "OpenYourBox Copy List Tests")
+    target_sources(OpenYourBoxCopyListTests PRIVATE Tests/CopyListTilingTests.cpp)
+    target_include_directories(OpenYourBoxCopyListTests BEFORE PRIVATE
+        "${CMAKE_CURRENT_BINARY_DIR}/OpenYourBox_artefacts/JuceLibraryCode"
+        OpenYourBox/Source
+        "${TORCH_INCLUDE_DIRS}")
+    target_link_libraries(OpenYourBoxCopyListTests PRIVATE
+        OpenYourBox
+        OpenYourBoxResources
+        juce::juce_audio_utils
+        juce::juce_dsp
+        juce::juce_opengl
+        juce::juce_recommended_config_flags
+        juce::juce_recommended_warning_flags)
+    add_test(NAME OpenYourBoxCopyLists COMMAND OpenYourBoxCopyListTests)
+
     juce_add_console_app(OpenYourBoxLibraryTests PRODUCT_NAME "OpenYourBox Library Tests")
     target_sources(OpenYourBoxLibraryTests PRIVATE Tests/UserBoxLibraryTests.cpp)
     target_include_directories(OpenYourBoxLibraryTests BEFORE PRIVATE

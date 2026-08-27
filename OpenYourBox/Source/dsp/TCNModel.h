@@ -24,6 +24,8 @@ struct TCNConfiguration {
   ActivationType activation = ActivationType::relu;
   /** @brief Pre-nonlinearity Gain applied to each TCN activation stage. */
   float gain = 1.0f;
+  /** @brief LeakyReLU negative slope when activation is leaky ReLU. */
+  float negativeSlope = 0.01f;
   /** @brief Whether each temporal block adds a residual path. */
   bool residual = false;
 

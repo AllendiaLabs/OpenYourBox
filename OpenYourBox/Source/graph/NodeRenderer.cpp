@@ -39,20 +39,21 @@ struct RavePaletteItem {
 
 constexpr const char *raveLayoutPayloadId = "OPENYOURBOX_RAVE_LAYOUT";
 
+/** @brief Factory palette rows, listed alphabetically by display label. */
 constexpr std::array<PaletteItem, 13> paletteItems{{
-    {"Linear", openyourbox::graph::NodeType::linear},
+    {"Activation", openyourbox::graph::NodeType::activation},
+    {"BatchNorm1d", openyourbox::graph::NodeType::batchNorm},
+    {"Bottleneck", openyourbox::graph::NodeType::variationalBottleneck},
     {"Conv1D", openyourbox::graph::NodeType::convolution},
     {"ConvTranspose1d", openyourbox::graph::NodeType::convTranspose},
-    {"BatchNorm1d", openyourbox::graph::NodeType::batchNorm},
-    {"Activation", openyourbox::graph::NodeType::activation},
-    {"TCN", openyourbox::graph::NodeType::tcn},
-    {"Utility", openyourbox::graph::NodeType::merge},
     {"Knob Input", openyourbox::graph::NodeType::knobInput},
-    {"XY Trackpad", openyourbox::graph::NodeType::xyTrackpad},
+    {"Linear", openyourbox::graph::NodeType::linear},
+    {"Noise Synth", openyourbox::graph::NodeType::noiseSynthesizer},
     {"PQMF Analysis", openyourbox::graph::NodeType::pqmfAnalysis},
     {"PQMF Synthesis", openyourbox::graph::NodeType::pqmfSynthesis},
-    {"Bottleneck", openyourbox::graph::NodeType::variationalBottleneck},
-    {"Noise Synth", openyourbox::graph::NodeType::noiseSynthesizer},
+    {"TCN", openyourbox::graph::NodeType::tcn},
+    {"Utility", openyourbox::graph::NodeType::merge},
+    {"XY Trackpad", openyourbox::graph::NodeType::xyTrackpad},
 }};
 
 constexpr float nodeBodyWidth = 188.0f;
@@ -581,13 +582,17 @@ void NodeRenderer::render(NodeGraph &graph,
     }
     if (boxLibrary != nullptr) {
       if (const auto *payload =
-              ImGui::AcceptDragDropPayload("OPENYOURBOX_BOX_LIBRARY_ID")) {
-        const auto entryId = juce::String::fromUTF8(
-            static_cast<const char *>(payload->Data));
+              ImGui::AcceptDragDropPayload(
+                  openyourbox::ui::boxLibraryPayloadId)) {
+        const auto *drop =
+            static_cast<const openyourbox::ui::BoxLibraryDropPayload *>(
+                payload->Data);
+        const auto entryId = juce::String::fromUTF8(drop->entryId);
         const auto canvasPosition = ed::ScreenToCanvas(ImGui::GetMousePos());
         juce::String error;
         const auto rootId = boxLibrary->insertBox(
-            graph, entryId, {canvasPosition.x, canvasPosition.y}, error);
+            graph, entryId, {canvasPosition.x, canvasPosition.y}, error,
+            drop->nestedRootId);
         if (rootId.has_value()) {
           positionedNodeIds.erase(*rootId);
           positionedGroupIds.erase(*rootId);
@@ -692,7 +697,15 @@ std::int32_t NodeRenderer::getPrimarySelectedNodeId() const noexcept {
 
 void NodeRenderer::renderPalette(NodeGraph &graph,
                                  openyourbox::library::UserBoxLibrary *boxLibrary) {
-  ImGui::BeginChild("ElementPalette", ImVec2(200.0f, 0.0f), true);
+  constexpr float splitterWidth = 6.0f;
+  constexpr float minPalette = 140.0f;
+  constexpr float maxPalette = 420.0f;
+  constexpr float minCanvas = 220.0f;
+  const auto avail = ImGui::GetContentRegionAvail();
+  auto width = std::clamp(leftPaletteWidth, minPalette, maxPalette);
+  width = std::min(width, std::max(minPalette, avail.x - minCanvas - splitterWidth));
+  leftPaletteWidth = width;
+  ImGui::BeginChild("ElementPalette", ImVec2(width, 0.0f), true);
   ImGui::TextColored(ImVec4(0.39f, 0.70f, 1.0f, 1.0f), "Library");
   ImGui::TextDisabled("Drag onto the graph");
   ImGui::Separator();
@@ -782,12 +795,33 @@ void NodeRenderer::renderPalette(NodeGraph &graph,
       transientMessage = message;
       transientMessageDeadline = ImGui::GetTime() + 2.5;
     };
-    boxLibraryPanel.render(*boxLibrary, boxCallbacks);
+    boxLibraryPanel.render(*boxLibrary, boxCallbacks,
+                           [boxLibrary](const juce::String &id,
+                                        juce::String &error) {
+                             return boxLibrary->loadEntrySnapshot(id, error);
+                           });
+  }
+  if (ImGui::TreeNodeEx("Project structure",
+                        ImGuiTreeNodeFlags_OpenOnArrow |
+                            ImGuiTreeNodeFlags_SpanAvailWidth)) {
+    renderProjectStructure(graph);
+    ImGui::TreePop();
   }
   ImGui::TextWrapped(
       "Scroll to pan. Ctrl/Cmd+scroll or pinch to zoom at the pointer. "
       "Double-click a group to open it. Use Graph > group at the top to go back.");
   ImGui::EndChild();
+  ImGui::SameLine(0.0f, 0.0f);
+  ImGui::InvisibleButton("PaletteSplitter",
+                         ImVec2(splitterWidth, avail.y > 0.0f ? avail.y : 1.0f));
+  if (ImGui::IsItemActive()) {
+    leftPaletteWidth =
+        std::clamp(leftPaletteWidth + ImGui::GetIO().MouseDelta.x, minPalette,
+                   std::min(maxPalette, avail.x - minCanvas - splitterWidth));
+    layoutMutatedThisFrame = true;
+  }
+  if (ImGui::IsItemHovered() || ImGui::IsItemActive())
+    ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
 }
 
 void NodeRenderer::renderNode(NodeGraph &graph, GraphNode &node,
@@ -861,12 +895,28 @@ void NodeRenderer::renderNode(NodeGraph &graph, GraphNode &node,
       ImGui::EndDisabled();
     if (!frozen && fidelityLocked)
       ImGui::BeginDisabled();
+    const bool hideNegativeSlope =
+        property.key == "negative_slope" &&
+        [&node]() {
+          for (const auto &candidate : node.properties) {
+            if (candidate.key == "activation")
+              return candidate.value != leakyReluActivationIndex;
+          }
+          return true;
+        }();
+    if (hideNegativeSlope) {
+      if (!frozen && fidelityLocked)
+        ImGui::EndDisabled();
+      if (liveOnGold)
+        ImGui::BeginDisabled();
+      continue;
+    }
     ImGui::PushID(property.key.c_str());
     auto value = property.value;
     bool changed = false;
     int dragSteps = 0;
-    beginPropertyRow(property.label.c_str());
     if (property.key == "residual" || property.key == "weight_norm") {
+      beginPropertyRow(property.label.c_str());
       bool enabled = property.value != 0;
       const auto checkboxId =
           property.key == "residual" ? "##residual" : "##weight_norm";
@@ -886,8 +936,13 @@ void NodeRenderer::renderNode(NodeGraph &graph, GraphNode &node,
       continue;
     }
     const auto copyCount = graph.effectiveCopyCount(node.id);
+    const auto ancestorCounts = graph.ancestorCopyCounts(node.id);
     const auto listEdit =
-        copyCount > 1 && propertySupportsCopyValueList(property);
+        propertySupportsCopyValueList(property) &&
+        (copyCount > 1 || propertySupportsPreserveIn(property) ||
+         property.preserveInBound || property.copyListInvalid);
+    if (!listEdit)
+      beginPropertyRow(property.label.c_str());
     if (listEdit) {
       constexpr float handleWidth = 18.0f;
       beginCopyListPropertyRow(property.label.c_str());
@@ -904,12 +959,13 @@ void NodeRenderer::renderNode(NodeGraph &graph, GraphNode &node,
         patchGestureLabel = "Parameter edit";
       }
       if (dragSteps != 0) {
-        ensurePropertyCopyCount(property, copyCount);
         if (property.kind == PropertyKind::real) {
           const auto span = property.floatMaximum - property.floatMinimum;
           const auto stepPerTick =
               ImGui::GetIO().KeyShift ? span / 2000.0f : span / 200.0f;
           auto values = property.copyFloatValues;
+          if (values.empty())
+            values.push_back(property.floatValue);
           for (auto &item : values)
             item += static_cast<float>(dragSteps) * stepPerTick;
           if (graph.setFloatPropertyCopyValues(node.id, property.key, values)) {
@@ -919,8 +975,10 @@ void NodeRenderer::renderNode(NodeGraph &graph, GraphNode &node,
               callbacks.floatPropertyChanged(node.id, property.key,
                                              property.floatValue);
           }
-        } else {
+        } else if (!property.preserveInBound) {
           auto values = property.copyIntValues;
+          if (values.empty())
+            values.push_back(property.value);
           for (auto &item : values)
             item += dragSteps;
           if (graph.setPropertyCopyValues(node.id, property.key, values)) {
@@ -939,22 +997,37 @@ void NodeRenderer::renderNode(NodeGraph &graph, GraphNode &node,
       auto &buffer = propertyListBuffers[bufferKey];
       const auto widgetId = ImGui::GetID("##copyList");
       if (ImGui::GetActiveID() != widgetId) {
-        const auto formatted = formatPropertyCopyList(property, copyCount);
+        const auto formatted = formatAuthoredPropertyCopyList(property);
         std::snprintf(buffer.data(), buffer.size(), "%s", formatted.c_str());
       }
       ImGui::InputText("##copyList", buffer.data(), buffer.size());
       ImGui::PopStyleVar();
       ImGui::PopStyleColor();
       if (ImGui::IsItemDeactivatedAfterEdit()) {
-        const auto parsed =
-            parsePropertyCopyList(property, copyCount, buffer.data());
+        const auto parsed = parsePropertyCopyList(
+            property, ancestorCounts, buffer.data(),
+            propertySupportsPreserveIn(property));
         if (!parsed.accepted) {
           transientMessage = parsed.message;
           transientMessageDeadline = ImGui::GetTime() + 2.5;
           if (callbacks.showMessage)
             callbacks.showMessage(transientMessage);
-          const auto formatted = formatPropertyCopyList(property, copyCount);
+          const auto formatted = formatAuthoredPropertyCopyList(property);
           std::snprintf(buffer.data(), buffer.size(), "%s", formatted.c_str());
+        } else if (parsed.preserveIn) {
+          if (graph.setPropertyPreserveIn(node.id, property.key,
+                                          static_cast<int>(parsed.intValues.size()))) {
+            mutatedThisFrame = true;
+            recompileThisFrame = true;
+            if (callbacks.propertyChanged)
+              callbacks.propertyChanged(node.id, property.key, property.value);
+          } else {
+            transientMessage =
+                "That binding would break downstream channel compatibility";
+            transientMessageDeadline = ImGui::GetTime() + 2.5;
+            if (callbacks.showMessage)
+              callbacks.showMessage(transientMessage);
+          }
         } else if (property.kind == PropertyKind::real) {
           if (graph.setFloatPropertyCopyValues(node.id, property.key,
                                                parsed.floatValues)) {
@@ -977,6 +1050,16 @@ void NodeRenderer::renderNode(NodeGraph &graph, GraphNode &node,
           if (callbacks.showMessage)
             callbacks.showMessage(transientMessage);
         }
+      }
+      if (copyCount > 1) {
+        ImGui::TextDisabled("Expanded (%d): %s", copyCount,
+                            formatExpandedPropertyCopyList(property, copyCount)
+                                .c_str());
+      }
+      if (property.copyListInvalid && !property.copyListInvalidMessage.empty()) {
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.38f, 0.38f, 1.0f));
+        ImGui::TextWrapped("%s", property.copyListInvalidMessage.c_str());
+        ImGui::PopStyleColor();
       }
       ImGui::PopID();
       if (fidelityLocked)
@@ -1040,6 +1123,16 @@ void NodeRenderer::renderNode(NodeGraph &graph, GraphNode &node,
           transientMessageDeadline = ImGui::GetTime() + 2.5;
           if (callbacks.showMessage)
             callbacks.showMessage(transientMessage);
+          if (property.key == "negative_slope") {
+            ImGui::PopID();
+            if (fidelityLocked)
+              ImGui::TextDisabled("Compactness not ready");
+            if (!frozen && fidelityLocked)
+              ImGui::EndDisabled();
+            if (liveOnGold)
+              ImGui::BeginDisabled();
+            continue;
+          }
         }
         const auto previous = property.floatValue;
         property.setFloatValue(floatValue);
@@ -1381,7 +1474,8 @@ void NodeRenderer::renderGroup(NodeGraph &graph, GraphGroup &group,
     if (result.accepted) {
       mutatedThisFrame = true;
       recompileThisFrame = true;
-    } else if (!result.message.empty()) {
+    }
+    if (!result.message.empty()) {
       transientMessage = result.message;
       transientMessageDeadline = ImGui::GetTime() + 2.5;
       if (callbacks.showMessage)
@@ -2119,10 +2213,16 @@ void NodeRenderer::syncEditorTransforms(NodeGraph &graph) {
 }
 
 void NodeRenderer::renderScopeBreadcrumb(NodeGraph &graph) {
-  const auto focused = graph.getViewport().focusedGroupId;
+  auto &viewport = graph.getViewport();
+  viewport.stickySpine.erase(
+      std::remove_if(viewport.stickySpine.begin(), viewport.stickySpine.end(),
+                     [&graph](std::int32_t id) {
+                       return graph.findGroup(id) == nullptr;
+                     }),
+      viewport.stickySpine.end());
+  const auto focused = viewport.focusedGroupId;
   ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(4.0f, 4.0f));
-  const auto current = focused.has_value();
-  if (!current) {
+  if (!focused.has_value()) {
     ImGui::TextColored(ImVec4(0.75f, 0.88f, 1.0f, 1.0f), "Graph");
   } else if (ImGui::SmallButton("Graph")) {
     setCanvasFocus(graph, std::nullopt);
@@ -2145,6 +2245,18 @@ void NodeRenderer::renderScopeBreadcrumb(NodeGraph &graph) {
       ImGui::PopID();
     }
   }
+  for (const auto id : viewport.stickySpine) {
+    const auto *group = graph.findGroup(id);
+    if (group == nullptr)
+      continue;
+    ImGui::SameLine();
+    ImGui::TextDisabled(">");
+    ImGui::SameLine();
+    ImGui::PushID(static_cast<int>(id) ^ 0x5a5a5a5a);
+    if (ImGui::SmallButton(group->name.c_str()))
+      setCanvasFocus(graph, id);
+    ImGui::PopID();
+  }
   ImGui::PopStyleVar();
 }
 
@@ -2155,10 +2267,128 @@ void NodeRenderer::setCanvasFocus(NodeGraph &graph,
   auto &viewport = graph.getViewport();
   if (viewport.focusedGroupId == groupId)
     return;
+  const auto previousChain =
+      viewport.focusedGroupId.has_value()
+          ? graph.groupAncestorChain(*viewport.focusedGroupId)
+          : std::vector<std::int32_t>{};
+  const auto nextChain =
+      groupId.has_value() ? graph.groupAncestorChain(*groupId)
+                          : std::vector<std::int32_t>{};
+  updateHierarchyStickySpine(viewport.stickySpine, previousChain, nextChain);
   viewport.focusedGroupId = groupId;
   restoreViewPending = true;
   layoutMutatedThisFrame = true;
   mutatedThisFrame = true;
+}
+
+void NodeRenderer::renderProjectStructure(NodeGraph &graph) {
+  std::vector<std::int32_t> roots;
+  for (const auto &group : graph.getGroups()) {
+    if (!group.parentGroupId.has_value())
+      roots.push_back(group.id);
+  }
+  for (const auto &node : graph.getNodes()) {
+    if (!node.parentGroupId.has_value() && !isFixedIoType(node.type))
+      roots.push_back(node.id);
+  }
+  std::sort(roots.begin(), roots.end(), [&graph](std::int32_t left,
+                                                 std::int32_t right) {
+    const auto *leftGroup = graph.findGroup(left);
+    const auto *rightGroup = graph.findGroup(right);
+    const auto *leftNode = graph.findNode(left);
+    const auto *rightNode = graph.findNode(right);
+    const auto leftName = leftGroup != nullptr
+                              ? juce::String(leftGroup->name)
+                              : (leftNode != nullptr ? juce::String(leftNode->label)
+                                                     : juce::String());
+    const auto rightName =
+        rightGroup != nullptr
+            ? juce::String(rightGroup->name)
+            : (rightNode != nullptr ? juce::String(rightNode->label)
+                                    : juce::String());
+    return leftName.compareIgnoreCase(rightName) < 0;
+  });
+  if (roots.empty()) {
+    ImGui::TextDisabled("Empty graph");
+    return;
+  }
+  for (const auto id : roots)
+    renderProjectStructureItem(graph, id);
+}
+
+void NodeRenderer::renderProjectStructureItem(NodeGraph &graph,
+                                              std::int32_t boxId) {
+  ImGui::PushID(boxId);
+  if (const auto *group = graph.findGroup(boxId)) {
+    const auto flags =
+        ImGuiTreeNodeFlags_OpenOnArrow | ImGuiTreeNodeFlags_SpanAvailWidth;
+    const auto open =
+        ImGui::TreeNodeEx("##projectGroup", flags, "%s", group->name.c_str());
+    if (ImGui::IsItemClicked() && !ImGui::IsItemToggledOpen())
+      setCanvasFocus(graph, boxId);
+    if (ImGui::BeginPopupContextItem("ProjectStructureGroup")) {
+      if (ImGui::MenuItem("Save to Box Library...")) {
+        pendingSaveBoxId = boxId;
+        requestSaveBoxPopup = true;
+        saveBoxOverwrite = false;
+        const auto utf8 = juce::String(group->name).toRawUTF8();
+        const auto length =
+            std::min(saveBoxNameBuffer.size() - 1, std::strlen(utf8));
+        std::memcpy(saveBoxNameBuffer.data(), utf8, length);
+        saveBoxNameBuffer[length] = '\0';
+      }
+      ImGui::EndPopup();
+    }
+    if (open) {
+      auto members = group->memberIds;
+      std::sort(members.begin(), members.end(),
+                [&graph](std::int32_t left, std::int32_t right) {
+                  const auto *leftGroup = graph.findGroup(left);
+                  const auto *rightGroup = graph.findGroup(right);
+                  const auto *leftNode = graph.findNode(left);
+                  const auto *rightNode = graph.findNode(right);
+                  const auto leftName =
+                      leftGroup != nullptr
+                          ? juce::String(leftGroup->name)
+                          : (leftNode != nullptr ? juce::String(leftNode->label)
+                                                 : juce::String());
+                  const auto rightName =
+                      rightGroup != nullptr
+                          ? juce::String(rightGroup->name)
+                          : (rightNode != nullptr ? juce::String(rightNode->label)
+                                                  : juce::String());
+                  return leftName.compareIgnoreCase(rightName) < 0;
+                });
+      for (const auto member : members)
+        renderProjectStructureItem(graph, member);
+      ImGui::TreePop();
+    }
+  } else if (const auto *node = graph.findNode(boxId)) {
+    ImGui::TreeNodeEx(node->label.c_str(),
+                      ImGuiTreeNodeFlags_Leaf | ImGuiTreeNodeFlags_NoTreePushOnOpen |
+                          ImGuiTreeNodeFlags_SpanAvailWidth);
+    if (ImGui::IsItemClicked()) {
+      if (node->parentGroupId.has_value())
+        setCanvasFocus(graph, node->parentGroupId);
+      else
+        setCanvasFocus(graph, std::nullopt);
+    }
+    if (!isFixedIoType(node->type) &&
+        ImGui::BeginPopupContextItem("ProjectStructureNode")) {
+      if (ImGui::MenuItem("Save to Box Library...")) {
+        pendingSaveBoxId = boxId;
+        requestSaveBoxPopup = true;
+        saveBoxOverwrite = false;
+        const auto utf8 = juce::String(node->label).toRawUTF8();
+        const auto length =
+            std::min(saveBoxNameBuffer.size() - 1, std::strlen(utf8));
+        std::memcpy(saveBoxNameBuffer.data(), utf8, length);
+        saveBoxNameBuffer[length] = '\0';
+      }
+      ImGui::EndPopup();
+    }
+  }
+  ImGui::PopID();
 }
 
 void NodeRenderer::adoptNewBox(NodeGraph &graph, std::int32_t boxId,

@@ -6,11 +6,25 @@
 #include <JuceHeader.h>
 
 #include <array>
+#include <cstdint>
 #include <functional>
 #include <string>
 #include <vector>
 
 namespace openyourbox::ui {
+/** @brief Drag-drop payload id for user box library rows. */
+inline constexpr const char *boxLibraryPayloadId = "OPENYOURBOX_BOX_LIBRARY_ID";
+
+/**
+ * @brief Drag payload identifying a catalog entry and optional nested snapshot id.
+ */
+struct BoxLibraryDropPayload {
+  /** @brief Catalog UUID (UTF-8). */
+  char entryId[64]{};
+  /** @brief Snapshot node/group id to insert; 0 inserts the saved root. */
+  std::int32_t nestedRootId = 0;
+};
+
 /**
  * @class UserBoxLibraryPanel
  * @brief User Library tree of saved boxes drawn inside the unified Library palette.
@@ -27,8 +41,11 @@ public:
    * @brief Draws the protected User Library root and its folders and boxes.
    * @param library Mutable catalog.
    * @param callbacks Editor-owned actions.
+   * @param loadSnapshot Loads a catalog entry snapshot for nested member trees.
    */
-  void render(library::UserBoxLibrary &library, const Callbacks &callbacks);
+  void render(library::UserBoxLibrary &library, const Callbacks &callbacks,
+              const std::function<juce::ValueTree(const juce::String &,
+                                                  juce::String &)> &loadSnapshot = {});
 
   /**
    * @brief Marks the protected Factory root as the active library selection.
@@ -86,6 +103,22 @@ private:
    */
   void renderDialogs(library::UserBoxLibrary &library,
                      const Callbacks &callbacks);
+  /**
+   * @brief Starts a library drag for @p entry targeting optional nested id.
+   * @param entry Catalog row.
+   * @param nestedRootId Snapshot node/group id, or 0 for the saved root.
+   */
+  void beginBoxDrag(const library::UserBoxLibraryEntry &entry,
+                    std::int32_t nestedRootId) const;
+  /**
+   * @brief Draws nested snapshot members under a group library entry.
+   * @param entry Catalog row being expanded.
+   * @param snapshot Loaded box snapshot.
+   * @param rootId Group id whose members to list.
+   */
+  void renderSnapshotMembers(const library::UserBoxLibraryEntry &entry,
+                             const juce::ValueTree &snapshot,
+                             std::int32_t rootId);
 
   /** @brief True when the protected Factory root is selected. */
   bool factorySelected = true;
@@ -109,5 +142,8 @@ private:
   juce::String pendingDeleteFolder;
   /** @brief True when folder delete should remove contained boxes. */
   bool pendingDeleteFolderContents = false;
+  /** @brief Snapshot loader bound for the current render pass. */
+  std::function<juce::ValueTree(const juce::String &, juce::String &)>
+      snapshotLoader;
 };
 } // namespace openyourbox::ui

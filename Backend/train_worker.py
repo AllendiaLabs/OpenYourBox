@@ -198,12 +198,13 @@ class TCNBlock(nn.Module):
         activation: int,
         residual: bool,
         cond_dim: int,
+        negative_slope: float = 0.01,
     ) -> None:
         """Create one temporal block."""
         super().__init__()
         self.convolution = CausalConv1d(channels, channels, kernel_size, dilation)
         self.film = FiLM(cond_dim, channels) if cond_dim > 0 else None
-        self.activation = _activation(activation, channels)
+        self.activation = _activation(activation, channels, negative_slope)
         self.residual = residual
         self.residual_projection = (
             nn.Conv1d(channels, channels, 1, bias=False) if residual else None
@@ -236,6 +237,7 @@ class SteerableTCN(nn.Module):
         activation: int,
         residual: bool,
         cond_dim: int,
+        negative_slope: float = 0.01,
     ) -> None:
         """Create input projection, temporal blocks, and output projection."""
         super().__init__()
@@ -249,6 +251,7 @@ class SteerableTCN(nn.Module):
                     activation,
                     residual,
                     cond_dim,
+                    negative_slope,
                 )
                 for layer in range(depth)
             ]
@@ -308,13 +311,13 @@ class ZeroPreservingSigmoid(nn.Module):
         return torch.where(samples == 0.0, torch.zeros_like(samples), torch.sigmoid(samples))
 
 
-def _activation(index: int, channels: int = 1) -> nn.Module:
+def _activation(index: int, channels: int = 1, negative_slope: float = 0.01) -> nn.Module:
     """Return the activation represented by an OpenYourBox enum value."""
     activations: tuple[nn.Module, ...] = (
         nn.ReLU(),
         ZeroPreservingSigmoid(),
         nn.Tanh(),
-        nn.LeakyReLU(0.01),
+        nn.LeakyReLU(float(negative_slope)),
         nn.PReLU(num_parameters=max(1, channels)),
     )
     if index < 0 or index >= len(activations):
@@ -394,7 +397,8 @@ def build_module(
         if element_type in {"audio_input", "audio_output", "knob_input", "xy_trackpad"}:
             continue
         if element_type == "activation":
-            modules.append(_activation(int(properties.get("activation", 0)), channels))
+            modules.append(_activation(int(properties.get("activation", 0)), channels,
+                                       float(properties.get("negative_slope", 0.01))))
         elif element_type == "linear":
             output_channels = int(properties.get("features", channels))
             modules.append(nn.Conv1d(channels, output_channels, 1, bias=False))
@@ -427,6 +431,7 @@ def build_module(
                     activation,
                     residual,
                     cond_dim,
+                    float(properties.get("negative_slope", 0.01)),
                 )
             )
         elif element_type in {"utility", "merge", "sum", "multiply"}:
@@ -852,10 +857,12 @@ def build_rave_graph_module(
                 int(properties.get("activation", 0)),
                 bool(int(properties.get("residual", 0))),
                 0,
+                float(properties.get("negative_slope", 0.01)),
             )
             channels_by_id[node_id] = in_ch
         elif element_type == "activation":
-            layers[node_id] = _activation(int(properties.get("activation", 0)), in_ch)
+            layers[node_id] = _activation(int(properties.get("activation", 0)), in_ch,
+                                          float(properties.get("negative_slope", 0.01)))
             channels_by_id[node_id] = in_ch
         elif element_type == "linear":
             out_ch = int(properties.get("features", in_ch))

@@ -239,6 +239,8 @@ private:
   openyourbox::ui::ErrorModal errorModal;
   /** @brief Side-panel tab: 0 info, 1 library, 2 capture, 3 train, 4 presets. */
   int sidePanelTab = 0;
+  /** @brief Session width of the right Info column in pixels. */
+  float rightPanelWidth = 332.0f;
   /** @brief Tab index to select on the next frame, or -1. */
   int pendingSidePanelTab = -1;
   /** @brief True while the copyright modal should be shown. */

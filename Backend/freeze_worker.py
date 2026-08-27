@@ -254,12 +254,13 @@ class TCNBlock(nn.Module):
         activation: int,
         residual: bool,
         cond_dim: int,
+        negative_slope: float = 0.01,
     ) -> None:
         """Create one temporal block matching the live TCN element."""
         super().__init__()
         self.convolution = CausalConv1d(channels, channels, kernel_size, dilation)
         self.film = FiLM(cond_dim, channels) if cond_dim > 0 else None
-        self.activation = _activation(activation)
+        self.activation = _activation(activation, negative_slope)
         self.residual = residual
 
     def forward(self, samples: torch.Tensor, cond: torch.Tensor) -> torch.Tensor:
@@ -288,6 +289,7 @@ class SteerableTCN(nn.Module):
         activation: int,
         residual: bool,
         cond_dim: int,
+        negative_slope: float = 0.01,
     ) -> None:
         """Create input projection, temporal blocks, and output projection."""
         super().__init__()
@@ -301,6 +303,7 @@ class SteerableTCN(nn.Module):
                     activation,
                     residual,
                     cond_dim,
+                    negative_slope,
                 )
                 for layer in range(depth)
             ]
@@ -352,13 +355,13 @@ class ConditionedSequential(nn.Module):
         return value
 
 
-def _activation(index: int) -> nn.Module:
+def _activation(index: int, negative_slope: float = 0.01) -> nn.Module:
     """Return the activation represented by an OpenYourBox enum value."""
     activations: tuple[nn.Module, ...] = (
         nn.ReLU(),
         ZeroPreservingSigmoid(),
         nn.Tanh(),
-        nn.LeakyReLU(0.01),
+        nn.LeakyReLU(float(negative_slope)),
         nn.PReLU(),
     )
     if index < 0 or index >= len(activations):
@@ -366,12 +369,16 @@ def _activation(index: int) -> nn.Module:
     return activations[index]
 
 
-def _properties(element: dict[str, Any]) -> dict[str, int]:
+def _properties(element: dict[str, Any]) -> dict[str, Any]:
     """Convert an element's ordered property array to a lookup dictionary."""
-    return {
-        str(item["key"]): int(item["value"])
-        for item in element.get("properties", [])
-    }
+    values: dict[str, Any] = {}
+    for item in element.get("properties", []):
+        key = str(item["key"])
+        if "float_value" in item:
+            values[key] = float(item["float_value"])
+        else:
+            values[key] = int(item["value"])
+    return values
 
 
 def _topological_elements(fragment: dict[str, Any]) -> list[dict[str, Any]]:
@@ -440,7 +447,8 @@ def build_module(
         if element_type in {"audio_input", "audio_output", "knob_input", "xy_trackpad"}:
             continue
         if element_type == "activation":
-            modules.append(_activation(properties.get("activation", 0)))
+            modules.append(_activation(properties.get("activation", 0),
+                                       float(properties.get("negative_slope", 0.01))))
         elif element_type == "linear":
             output_channels = properties.get("features", channels)
             module = ChannelLinear(channels, output_channels)
@@ -486,6 +494,7 @@ def build_module(
                 activation,
                 residual,
                 cond_dim,
+                float(properties.get("negative_slope", 0.01)),
             )
             _assign_tcn_weights(module, seed)
             modules.append(module)

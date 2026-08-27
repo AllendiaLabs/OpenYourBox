@@ -8,8 +8,6 @@
 
 namespace openyourbox::ui {
 namespace {
-constexpr const char *boxLibraryPayloadId = "OPENYOURBOX_BOX_LIBRARY_ID";
-
 /**
  * @brief Returns immediate child folder names under @p parent.
  * @param folders All persisted folder paths.
@@ -32,7 +30,10 @@ childFolders(const std::vector<juce::String> &folders,
         std::find(children.begin(), children.end(), remainder) == children.end())
       children.push_back(remainder);
   }
-  std::sort(children.begin(), children.end());
+  std::sort(children.begin(), children.end(),
+            [](const juce::String &left, const juce::String &right) {
+              return left.compareIgnoreCase(right) < 0;
+            });
   return children;
 }
 
@@ -60,8 +61,9 @@ void acceptBoxDrop(library::UserBoxLibrary &library, const juce::String &folder,
   if (!ImGui::BeginDragDropTarget())
     return;
   if (const auto *payload = ImGui::AcceptDragDropPayload(boxLibraryPayloadId)) {
-    const auto id =
-        juce::String::fromUTF8(static_cast<const char *>(payload->Data));
+    const auto *drop =
+        static_cast<const BoxLibraryDropPayload *>(payload->Data);
+    const auto id = juce::String::fromUTF8(drop->entryId);
     juce::String error;
     if (!library.setFolder(id, folder, error) && callbacks.showMessage &&
         error.isNotEmpty())
@@ -97,8 +99,11 @@ void UserBoxLibraryPanel::beginNewFolder(const juce::String &parent) {
   openNewFolderPopup = true;
 }
 
-void UserBoxLibraryPanel::render(library::UserBoxLibrary &library,
-                                 const Callbacks &callbacks) {
+void UserBoxLibraryPanel::render(
+    library::UserBoxLibrary &library, const Callbacks &callbacks,
+    const std::function<juce::ValueTree(const juce::String &, juce::String &)>
+        &loadSnapshot) {
+  snapshotLoader = loadSnapshot;
   const auto selected = !factorySelected && selectedFolder.isEmpty();
   const auto flags =
       ImGuiTreeNodeFlags_DefaultOpen | ImGuiTreeNodeFlags_OpenOnArrow |
@@ -149,11 +154,42 @@ void UserBoxLibraryPanel::renderFolder(library::UserBoxLibrary &library,
       entries.push_back(&entry);
   }
 
+  /** @brief One folder or box row, sorted together by display name. */
+  struct ChildRow {
+    juce::String label;
+    juce::String childFolder;
+    const library::UserBoxLibraryEntry *entry = nullptr;
+  };
+  std::vector<ChildRow> rows;
+  rows.reserve(children.size() + entries.size());
+  for (const auto &child : children) {
+    ChildRow row;
+    row.label = child;
+    row.childFolder = folder.isEmpty() ? child : folder + "/" + child;
+    rows.push_back(std::move(row));
+  }
+  for (const auto *entry : entries) {
+    ChildRow row;
+    row.label = entry->name;
+    row.entry = entry;
+    rows.push_back(std::move(row));
+  }
+  std::sort(rows.begin(), rows.end(),
+            [](const ChildRow &left, const ChildRow &right) {
+              return left.label.compareIgnoreCase(right.label) < 0;
+            });
+
+  const auto renderChildren = [&]() {
+    for (const auto &row : rows) {
+      if (row.entry != nullptr)
+        renderEntry(library, *row.entry, callbacks);
+      else
+        renderFolder(library, row.childFolder, callbacks);
+    }
+  };
+
   if (folder.isEmpty()) {
-    for (const auto &child : children)
-      renderFolder(library, child, callbacks);
-    for (const auto *entry : entries)
-      renderEntry(library, *entry, callbacks);
+    renderChildren();
     return;
   }
 
@@ -211,10 +247,7 @@ void UserBoxLibraryPanel::renderFolder(library::UserBoxLibrary &library,
       renamingFolder.clear();
   }
   if (open) {
-    for (const auto &child : children)
-      renderFolder(library, folder + "/" + child, callbacks);
-    for (const auto *entry : entries)
-      renderEntry(library, *entry, callbacks);
+    renderChildren();
     ImGui::TreePop();
   }
   ImGui::PopID();
@@ -228,15 +261,13 @@ void UserBoxLibraryPanel::renderEntry(
       entry.kind == library::UserBoxKind::group ? "Group" : "Element";
   char label[160];
   std::snprintf(label, sizeof(label), "%s  (%s)", entry.name.toRawUTF8(), kind);
-  ImGui::Selectable(label, false);
-  if (ImGui::BeginDragDropSource(ImGuiDragDropFlags_SourceAllowNullID)) {
-    char payload[64]{};
-    const auto utf8 = entry.id.toRawUTF8();
-    std::strncpy(payload, utf8, sizeof(payload) - 1);
-    ImGui::SetDragDropPayload(boxLibraryPayloadId, payload, sizeof(payload));
-    ImGui::TextUnformatted(entry.name.toRawUTF8());
-    ImGui::EndDragDropSource();
-  }
+  const auto groupEntry = entry.kind == library::UserBoxKind::group;
+  const auto flags =
+      ImGuiTreeNodeFlags_OpenOnArrow | ImGuiTreeNodeFlags_SpanAvailWidth |
+      (groupEntry ? 0
+                  : ImGuiTreeNodeFlags_Leaf | ImGuiTreeNodeFlags_NoTreePushOnOpen);
+  const auto open = ImGui::TreeNodeEx("##boxEntry", flags, "%s", label);
+  beginBoxDrag(entry, 0);
   if (ImGui::BeginPopupContextItem("BoxEntryMenu")) {
     if (ImGui::MenuItem("Rename")) {
       renamingEntryId = entry.id;
@@ -259,7 +290,90 @@ void UserBoxLibraryPanel::renderEntry(
     if (ImGui::IsItemDeactivated() && !ImGui::IsItemDeactivatedAfterEdit())
       renamingEntryId.clear();
   }
+  if (groupEntry && open) {
+    juce::String error;
+    juce::ValueTree snapshot;
+    if (snapshotLoader)
+      snapshot = snapshotLoader(entry.id, error);
+    if (snapshot.isValid())
+      renderSnapshotMembers(entry, snapshot,
+                            static_cast<std::int32_t>(snapshot["rootId"]));
+    else if (error.isNotEmpty() && callbacks.showMessage)
+      callbacks.showMessage(error.toStdString());
+    ImGui::TreePop();
+  }
   ImGui::PopID();
+}
+
+void UserBoxLibraryPanel::beginBoxDrag(const library::UserBoxLibraryEntry &entry,
+                                       std::int32_t nestedRootId) const {
+  if (!ImGui::BeginDragDropSource(ImGuiDragDropFlags_SourceAllowNullID))
+    return;
+  BoxLibraryDropPayload payload;
+  const auto utf8 = entry.id.toRawUTF8();
+  std::strncpy(payload.entryId, utf8, sizeof(payload.entryId) - 1);
+  payload.nestedRootId = nestedRootId;
+  ImGui::SetDragDropPayload(boxLibraryPayloadId, &payload, sizeof(payload));
+  ImGui::TextUnformatted(entry.name.toRawUTF8());
+  ImGui::EndDragDropSource();
+}
+
+void UserBoxLibraryPanel::renderSnapshotMembers(
+    const library::UserBoxLibraryEntry &entry, const juce::ValueTree &snapshot,
+    std::int32_t rootId) {
+  struct MemberRow {
+    std::int32_t id = 0;
+    juce::String label;
+    bool isGroup = false;
+  };
+  std::unordered_map<std::int32_t, juce::ValueTree> groups;
+  std::unordered_map<std::int32_t, juce::String> nodeLabels;
+  for (const auto child : snapshot) {
+    if (child.hasType("Group"))
+      groups.emplace(static_cast<std::int32_t>(child["id"]), child);
+    else if (child.hasType("Node"))
+      nodeLabels.emplace(static_cast<std::int32_t>(child["id"]),
+                         child["label"].toString());
+  }
+  const auto found = groups.find(rootId);
+  if (found == groups.end())
+    return;
+  std::vector<MemberRow> rows;
+  for (const auto member : found->second) {
+    if (!member.hasType("Member"))
+      continue;
+    MemberRow row;
+    row.id = static_cast<std::int32_t>(member["id"]);
+    const auto group = groups.find(row.id);
+    if (group != groups.end()) {
+      row.isGroup = true;
+      row.label = group->second.getProperty("name", "Group").toString();
+    } else {
+      const auto label = nodeLabels.find(row.id);
+      row.label = label != nodeLabels.end() ? label->second : juce::String("Element");
+    }
+    rows.push_back(std::move(row));
+  }
+  std::sort(rows.begin(), rows.end(),
+            [](const MemberRow &left, const MemberRow &right) {
+              return left.label.compareIgnoreCase(right.label) < 0;
+            });
+  for (const auto &row : rows) {
+    ImGui::PushID(row.id);
+    const auto flags =
+        ImGuiTreeNodeFlags_OpenOnArrow | ImGuiTreeNodeFlags_SpanAvailWidth |
+        (row.isGroup
+             ? 0
+             : ImGuiTreeNodeFlags_Leaf | ImGuiTreeNodeFlags_NoTreePushOnOpen);
+    const auto open =
+        ImGui::TreeNodeEx("##member", flags, "%s", row.label.toRawUTF8());
+    beginBoxDrag(entry, row.id);
+    if (row.isGroup && open) {
+      renderSnapshotMembers(entry, snapshot, row.id);
+      ImGui::TreePop();
+    }
+    ImGui::PopID();
+  }
 }
 
 void UserBoxLibraryPanel::renderDialogs(library::UserBoxLibrary &library,

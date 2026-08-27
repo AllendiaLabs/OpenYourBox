@@ -115,12 +115,24 @@ public:
    * @param entryId Catalog UUID.
    * @param position Canvas origin for the placed root.
    * @param error Receives a user-facing failure.
+   * @param nestedRootId Snapshot node/group id to insert instead of the saved
+   *        root; 0 inserts the snapshot root.
    * @return New root node or group id, or no value on failure.
    */
   std::optional<std::int32_t> insertBox(graph::NodeGraph &graph,
                                         const juce::String &entryId,
                                         juce::Point<float> position,
-                                        juce::String &error);
+                                        juce::String &error,
+                                        std::int32_t nestedRootId = 0);
+
+  /**
+   * @brief Loads the box.xml snapshot for a catalog entry.
+   * @param entryId Catalog UUID.
+   * @param error Receives a user-facing failure.
+   * @return Snapshot tree, or invalid on failure.
+   */
+  juce::ValueTree loadEntrySnapshot(const juce::String &entryId,
+                                    juce::String &error) const;
 
   /**
    * @brief Renames one catalog row.

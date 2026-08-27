@@ -65,6 +65,8 @@ struct CompiledElement {
   int mergeMode = 0;
   /** @brief Nonlinearity slope Gain for Activation and TCN elements. */
   float gain = 1.0f;
+  /** @brief LeakyReLU negative slope for Activation and TCN elements. */
+  float negativeSlope = openyourbox::graph::leakyReluNegativeSlopeDefault;
   /** @brief Compiled Knob Input scalar, overridden by live controls. */
   float conditioningValue = 0.0f;
   /** @brief Compiled XY Trackpad X scalar. */
@@ -371,10 +373,16 @@ void randomizeElementWeights(CompiledElement &element, std::int32_t seed) {
   }
 }
 
-/** @brief Applies a configured zero-preserving activation. */
+/**
+ * @brief Applies a configured zero-preserving activation.
+ * @param value Pre-activation tensor.
+ * @param activation Selected nonlinearity.
+ * @param gain Pre-nonlinearity slope Gain.
+ * @param negativeSlope LeakyReLU negative slope when that function is selected.
+ */
 torch::Tensor applyActivation(torch::Tensor value,
                               openyourbox::dsp::ActivationType activation,
-                              float gain) {
+                              float gain, float negativeSlope = 0.01f) {
   if (std::abs(gain - 1.0f) > 1.0e-6f)
     value = value * gain;
   switch (activation) {
@@ -386,7 +394,7 @@ torch::Tensor applyActivation(torch::Tensor value,
   case openyourbox::dsp::ActivationType::tanh:
     return torch::tanh(value);
   case openyourbox::dsp::ActivationType::leakyRelu:
-    return torch::leaky_relu(value, 0.01);
+    return torch::leaky_relu(value, negativeSlope);
   case openyourbox::dsp::ActivationType::prelu:
     return torch::prelu(value, torch::full({1}, 0.25f, value.options()));
   }
@@ -1160,11 +1168,12 @@ void LiveGraphRuntime::executeElement(std::size_t index,
     smoother.setTargetValue(resolveGain(element, controls));
     if (!smoother.isSmoothing()) {
       output = applyActivation(upstream, element.activation,
-                               smoother.getCurrentValue());
+                               smoother.getCurrentValue(),
+                               element.negativeSlope);
     } else {
       output = applyActivation(upstream * makeGainEnvelope(smoother, samples,
                                                            blockInput.options()),
-                               element.activation, 1.0f);
+                               element.activation, 1.0f, element.negativeSlope);
     }
     break;
   }
@@ -1204,7 +1213,7 @@ void LiveGraphRuntime::executeElement(std::size_t index,
       }
       value = applyActivation(
           value * alignControlTime(gainEnvelope, value.size(2)),
-          element.activation, 1.0f);
+          element.activation, 1.0f, element.negativeSlope);
       if (element.residual) {
         value = value + residual.narrow(2, residual.size(2) - value.size(2),
                                         value.size(2));
@@ -1917,6 +1926,11 @@ LiveGraphEngine::compile(const graph::NodeGraph &graphDocument,
         float gain = graph::gainDefault;
         readFloatProperty(node, "gain", gain);
         element.gain = graph::clampGain(gain);
+        float negativeSlope = graph::leakyReluNegativeSlopeDefault;
+        readFloatProperty(node, "negative_slope", negativeSlope);
+        element.negativeSlope = std::clamp(
+            negativeSlope, graph::leakyReluNegativeSlopeMinimum,
+            graph::leakyReluNegativeSlopeMaximum);
         break;
       }
       case NodeType::tcn: {
@@ -1948,6 +1962,11 @@ LiveGraphEngine::compile(const graph::NodeGraph &graphDocument,
         float gain = graph::gainDefault;
         readFloatProperty(node, "gain", gain);
         element.gain = graph::clampGain(gain);
+        float negativeSlope = graph::leakyReluNegativeSlopeDefault;
+        readFloatProperty(node, "negative_slope", negativeSlope);
+        element.negativeSlope = std::clamp(
+            negativeSlope, graph::leakyReluNegativeSlopeMinimum,
+            graph::leakyReluNegativeSlopeMaximum);
         element.filmInputIndex = -1;
         element.filmExtractChannel = -1;
         element.condDim = 0;

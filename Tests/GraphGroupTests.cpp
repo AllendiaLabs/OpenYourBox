@@ -141,9 +141,16 @@ int main() {
                          std::abs(parsed.floatValues[1] - 1.0f) < 1.0e-5f,
                      "comma-separated reals parse into per-copy values");
     const auto broadcast = parsePropertyCopyList(gain, 3, "0.25");
-    passed &= expect(broadcast.accepted && broadcast.floatValues.size() == 3 &&
-                         std::abs(broadcast.floatValues[2] - 0.25f) < 1.0e-5f,
-                     "a single value broadcasts to every copy");
+    passed &= expect(broadcast.accepted && broadcast.floatValues.size() == 1 &&
+                         std::abs(broadcast.floatValues.front() - 0.25f) < 1.0e-5f,
+                     "a single value is stored as authored length 1");
+    {
+      auto tiled = gain;
+      tiled.copyFloatValues = broadcast.floatValues;
+      passed &= expect(std::abs(openyourbox::graph::floatValueForCopy(tiled, 2) -
+                                0.25f) < 1.0e-5f,
+                       "authored length 1 tiles across expanded copy slots");
+    }
     const auto commaDecimal = parsePropertyCopyList(gain, 3, "0,5");
     passed &= expect(!commaDecimal.accepted,
                      "comma is a list separator, not a decimal mark");

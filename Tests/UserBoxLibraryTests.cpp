@@ -159,6 +159,25 @@ int main() {
                      "inserted groups restore copies N");
     passed &= expect(placed.getGroups().size() == 1,
                      "library original is not mutated into extra groups");
+
+    juce::String snapError;
+    auto snapshot = reloaded.loadEntrySnapshot(g1->id, snapError);
+    std::int32_t nestedId = 0;
+    for (const auto child : snapshot) {
+      if (!child.hasType("Node"))
+        continue;
+      nestedId = static_cast<std::int32_t>(child["id"]);
+      break;
+    }
+    passed &= expect(nestedId != 0, "group snapshot contains a member node");
+    error.clear();
+    const auto nestedInsert =
+        reloaded.insertBox(placed, g1->id, {200.0f, 40.0f}, error, nestedId);
+    passed &= expect(nestedInsert.has_value(), "nested subpart insert succeeds");
+    passed &= expect(nestedInsert.has_value() &&
+                         placed.findNode(*nestedInsert) != nullptr &&
+                         placed.findGroup(*nestedInsert) == nullptr,
+                     "nested insert places only the selected element");
   }
 
   error.clear();
