@@ -32,8 +32,9 @@ int main() {
   using openyourbox::graph::NodeType;
   using openyourbox::graph::PropertyKind;
   using openyourbox::graph::dividingSetLengths;
-  using openyourbox::graph::floatValueForCopy;
-  using openyourbox::graph::integerValueForCopy;
+  using openyourbox::graph::formatExpandedPropertyCopyList;
+  using openyourbox::graph::formatHierarchicalCopyList;
+  using openyourbox::graph::formatShapeCopyList;
   using openyourbox::graph::isDividingSetLength;
   using openyourbox::graph::parsePropertyCopyList;
   using openyourbox::graph::updateHierarchyStickySpine;
@@ -47,6 +48,48 @@ int main() {
                    "O=2,M=2,N=2 dividing set is {1,2,4,8}");
   passed &= expect(isDividingSetLength(2, nest) && !isDividingSetLength(3, nest),
                    "illegal length 3 is outside the dividing set");
+
+  const std::vector<std::string> eight{"1", "2", "3", "4", "5", "6", "7", "8"};
+  passed &= expect(formatHierarchicalCopyList(eight, nest) ==
+                       "[[[1, 2], [3, 4]], [[5, 6], [7, 8]]]",
+                   "three-level nest formats as a list of lists of lists");
+  passed &= expect(formatHierarchicalCopyList({"a", "b", "c"}, {3}) ==
+                       "[a, b, c]",
+                   "one copy axis wraps a single bracketed list");
+  passed &= expect(formatHierarchicalCopyList({"a", "b", "c", "d"}, {2, 2}) ==
+                       "[[a, b], [c, d]]",
+                   "two copy axes format as a list of lists");
+  passed &= expect(formatHierarchicalCopyList({"x"}, {}) == "x",
+                   "a single ungrouped value is unbracketed");
+  passed &= expect(formatHierarchicalCopyList({"a", "b", "c"}, {1, 3}) ==
+                       "[a, b, c]",
+                   "copy axes of 1 are skipped when nesting");
+
+  NodeProperty preview;
+  preview.key = "features";
+  preview.label = "Features";
+  preview.kind = PropertyKind::integer;
+  preview.copyIntValues = {1, 2, 3, 4, 5, 6, 7, 8};
+  passed &= expect(formatExpandedPropertyCopyList(preview, 8, nest) ==
+                       "[[[1, 2], [3, 4]], [[5, 6], [7, 8]]]",
+                   "expanded property preview nests along C");
+  preview.copyIntValues = {1, 2};
+  passed &= expect(formatExpandedPropertyCopyList(preview, 8, nest) ==
+                       "[[[1, 2], [1, 2]], [[1, 2], [1, 2]]]",
+                   "tiled L=2 preview keeps inner-pair grouping");
+
+  openyourbox::graph::ShapeSignature twoCh;
+  twoCh.channels = 2;
+  openyourbox::graph::ShapeSignature fourCh;
+  fourCh.channels = 4;
+  openyourbox::graph::ShapeSignature eightCh;
+  eightCh.channels = 8;
+  openyourbox::graph::ShapeSignature sixteenCh;
+  sixteenCh.channels = 16;
+  passed &= expect(formatShapeCopyList({twoCh, fourCh, eightCh, sixteenCh},
+                                       twoCh, {2, 2}) ==
+                       "[[2ch, 4ch], [8ch, 16ch]]",
+                   "pin shapes nest as a list of lists");
 
   NodeProperty channels;
   channels.key = "channels";

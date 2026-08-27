@@ -969,9 +969,10 @@ int main() {
               linear->outputs.front().copyShapes[2].channels == 8,
           "element output lists a shape per copy");
       const auto listLabel = openyourbox::graph::formatShapeCopyList(
-          linear->outputs.front().copyShapes, linear->outputs.front().shape);
-      passed &= expect(listLabel == "2ch, 4ch, 8ch",
-                       "element display label joins per-copy shapes");
+          linear->outputs.front().copyShapes, linear->outputs.front().shape,
+          {3});
+      passed &= expect(listLabel == "[2ch, 4ch, 8ch]",
+                       "element display label groups per-copy shapes");
       openyourbox::graph::ShapeSignature groupOutShape;
       for (const auto &port : shapeGraph.groupInterfacePorts(grouped.groupId)) {
         if (port.kind != openyourbox::graph::PinKind::output)

@@ -428,28 +428,120 @@ struct ShapeSignature {
 };
 
 /**
- * @brief Formats per-copy pin shapes as a comma-separated display label.
+ * @brief Formats copy-slot labels as nested @c [] lists along the nest axes.
+ *
+ * @p copyCounts is outer→inner. Axes of 1 are skipped. A single ungrouped
+ * item is returned without brackets. When @p items length does not match the
+ * product of @p copyCounts, the items are shown as one flat bracketed list.
+ * @param items One label per expanded copy slot.
+ * @param copyCounts Outer→inner ancestor copy-count vector C.
+ */
+inline std::string
+formatHierarchicalCopyList(const std::vector<std::string> &items,
+                           const std::vector<int> &copyCounts) {
+  if (items.empty())
+    return {};
+
+  const auto joinRange = [&items](int start, int count) {
+    std::string text = "[";
+    for (int index = 0; index < count; ++index) {
+      if (index > 0)
+        text += ", ";
+      text += items[static_cast<std::size_t>(start + index)];
+    }
+    text += "]";
+    return text;
+  };
+
+  int product = 1;
+  for (const auto copies : copyCounts)
+    product *= std::max(1, copies);
+  product = std::max(1, product);
+  const auto count = static_cast<int>(items.size());
+  if (product != count)
+    return count == 1 ? items.front() : joinRange(0, count);
+
+  struct Formatter {
+    const std::vector<std::string> &items;
+    const std::vector<int> &copyCounts;
+    /**
+     * @brief Nests @p span items starting at @p start from axis @p dim.
+     * @param start First item index.
+     * @param span Number of items in this axis slice.
+     * @param dim Current outer→inner copy-count index.
+     */
+    std::string format(int start, int span, int dim) const {
+      if (span <= 0)
+        return {};
+      while (dim < static_cast<int>(copyCounts.size()) &&
+             copyCounts[static_cast<std::size_t>(dim)] <= 1)
+        ++dim;
+      if (dim >= static_cast<int>(copyCounts.size())) {
+        if (span == 1)
+          return items[static_cast<std::size_t>(start)];
+        std::string text = "[";
+        for (int index = 0; index < span; ++index) {
+          if (index > 0)
+            text += ", ";
+          text += items[static_cast<std::size_t>(start + index)];
+        }
+        text += "]";
+        return text;
+      }
+      const int groups =
+          std::max(1, copyCounts[static_cast<std::size_t>(dim)]);
+      if (span % groups != 0) {
+        std::string text = "[";
+        for (int index = 0; index < span; ++index) {
+          if (index > 0)
+            text += ", ";
+          text += items[static_cast<std::size_t>(start + index)];
+        }
+        text += "]";
+        return text;
+      }
+      const int inner = span / groups;
+      std::string text = "[";
+      for (int group = 0; group < groups; ++group) {
+        if (group > 0)
+          text += ", ";
+        text += format(start + group * inner, inner, dim + 1);
+      }
+      text += "]";
+      return text;
+    }
+  };
+  return Formatter{items, copyCounts}.format(0, count, 0);
+}
+
+/**
+ * @brief Formats per-copy pin shapes as a nested copy-hierarchy label.
  * @param shapes Ordered shapes (one per copy). Falls back to @p fallback when
  *        empty.
  * @param fallback Shape used when @p shapes is empty (typically the first copy).
+ * @param copyCounts Outer→inner ancestor copy counts used to nest @c [] groups.
  * @return Empty when no concrete shape fields are known yet.
  */
 inline std::string formatShapeCopyList(const std::vector<ShapeSignature> &shapes,
-                                       const ShapeSignature &fallback) {
+                                       const ShapeSignature &fallback,
+                                       const std::vector<int> &copyCounts = {}) {
+  std::vector<std::string> labels;
   if (shapes.size() <= 1) {
     const auto &shape = shapes.empty() ? fallback : shapes.front();
-    return shape.displayLabel();
+    auto label = shape.displayLabel();
+    if (label.empty())
+      return {};
+    labels.push_back(std::move(label));
+  } else {
+    labels.reserve(shapes.size());
+    for (const auto &shape : shapes) {
+      auto part = shape.displayLabel();
+      if (part.empty())
+        part = "?";
+      labels.push_back(std::move(part));
+    }
   }
-  std::string text;
-  for (std::size_t index = 0; index < shapes.size(); ++index) {
-    auto part = shapes[index].displayLabel();
-    if (part.empty())
-      part = "?";
-    if (index > 0)
-      text += ", ";
-    text += part;
-  }
-  return text;
+  return formatHierarchicalCopyList(labels, copyCounts);
 }
 
 /**
@@ -1571,28 +1663,32 @@ inline std::string formatAuthoredPropertyCopyList(const NodeProperty &property) 
 
 /**
  * @brief Formats the expanded P-length preview (tiling the authored list).
+ *
+ * Values are nested with @c [] along @p copyCounts so inner-group copies are
+ * grouped inside outer-group copies.
  * @param property Source property.
  * @param copyCount Expanded slot count P.
+ * @param copyCounts Outer→inner ancestor copy-count vector C.
  */
-inline std::string formatExpandedPropertyCopyList(const NodeProperty &property,
-                                                  int copyCount) {
+inline std::string
+formatExpandedPropertyCopyList(const NodeProperty &property, int copyCount,
+                               const std::vector<int> &copyCounts = {}) {
   const auto count = std::max(1, copyCount);
-  std::string text;
+  std::vector<std::string> items;
+  items.reserve(static_cast<std::size_t>(count));
   for (int index = 0; index < count; ++index) {
-    if (index > 0)
-      text += ", ";
     if (property.preserveInBound)
-      text += preserveInToken;
+      items.emplace_back(preserveInToken);
     else if (property.kind == PropertyKind::real) {
       char buffer[32];
       std::snprintf(buffer, sizeof(buffer), "%.2f",
                     floatValueForCopy(property, index));
-      text += buffer;
+      items.emplace_back(buffer);
     } else {
-      text += std::to_string(integerValueForCopy(property, index));
+      items.push_back(std::to_string(integerValueForCopy(property, index)));
     }
   }
-  return text;
+  return formatHierarchicalCopyList(items, copyCounts);
 }
 
 /**

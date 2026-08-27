@@ -264,6 +264,53 @@ int propertyDragSteps(const char *id, ImVec2 size) {
   return steps;
 }
 
+/** @brief Info-box text queued until after pin/node builders finish. */
+std::string pendingInfoTooltip;
+
+/**
+ * @brief Draws a circled i; queues the info box while the pointer is over it.
+ *
+ * Tooltips cannot be opened inside @c BeginPin / @c BeginNode: those builders
+ * own the editor draw-list splitter, and @c ed::Suspend() would swap it out
+ * from under them.
+ * @param id Unique ImGui id for the hover target.
+ * @param text Tooltip body shown inside the info box.
+ */
+void drawInfoHover(const char *id, const std::string &text) {
+  if (text.empty())
+    return;
+  const float height = ImGui::GetTextLineHeight();
+  const auto origin = ImGui::GetCursorScreenPos();
+  ImGui::InvisibleButton(id, ImVec2(height, height));
+  const bool hovered = ImGui::IsItemHovered();
+  auto *draw = ImGui::GetWindowDrawList();
+  const ImVec2 centre(origin.x + height * 0.5f, origin.y + height * 0.5f);
+  const float radius = height * 0.40f;
+  const auto colour =
+      ImGui::GetColorU32(hovered ? ImGuiCol_Text : ImGuiCol_TextDisabled);
+  draw->AddCircle(centre, radius, colour, 12, 1.15f);
+  const auto letterSize = ImGui::CalcTextSize("i");
+  draw->AddText(ImVec2(centre.x - letterSize.x * 0.5f, origin.y), colour, "i");
+  if (hovered)
+    pendingInfoTooltip = text;
+}
+
+/**
+ * @brief Shows the queued info box in screen space after nodes have closed.
+ */
+void flushPendingInfoTooltip() {
+  if (pendingInfoTooltip.empty())
+    return;
+  ed::Suspend();
+  ImGui::BeginTooltip();
+  ImGui::PushTextWrapPos(ImGui::GetFontSize() * 28.0f);
+  ImGui::TextUnformatted(pendingInfoTooltip.c_str());
+  ImGui::PopTextWrapPos();
+  ImGui::EndTooltip();
+  ed::Resume();
+  pendingInfoTooltip.clear();
+}
+
 /**
  * @brief Draws a left-aligned property label and moves the cursor to the value
  *        column on the right edge of the node body.
@@ -278,12 +325,97 @@ void beginPropertyRow(const char *label) {
 }
 
 /**
- * @brief Draws a property label and places a full-width value row beneath it.
+ * @brief Draws a property label, optional expanded-value info icon, and a
+ *        full-width value row beneath.
  * @param label Property label text.
+ * @param expandedInfo Hierarchical expanded-copy preview, or empty.
  */
-void beginCopyListPropertyRow(const char *label) {
+void beginCopyListPropertyRow(const char *label,
+                              const std::string &expandedInfo) {
   ImGui::TextUnformatted(label);
+  if (!expandedInfo.empty()) {
+    ImGui::SameLine(0.0f, 4.0f);
+    drawInfoHover("##expandedInfo", expandedInfo);
+  }
   ImGui::SetNextItemWidth(nodeBodyWidth);
+}
+
+/**
+ * @brief Ancestor copy counts using each group's effective (chainable) copies.
+ * @param graph Graph document.
+ * @param nodeId Leaf or hub node.
+ * @return Outer→inner vector; empty when @p nodeId has no parent group.
+ */
+std::vector<int>
+ancestorRuntimeCopyCounts(const openyourbox::graph::NodeGraph &graph,
+                          std::int32_t nodeId) {
+  const auto *node = graph.findNode(nodeId);
+  if (node == nullptr)
+    return {};
+  std::vector<int> innerToOuter;
+  auto parent = node->parentGroupId;
+  std::unordered_set<std::int32_t> visiting;
+  while (parent.has_value()) {
+    if (!visiting.insert(*parent).second)
+      break;
+    const auto status = graph.groupCopyStatus(*parent);
+    innerToOuter.push_back(std::max(1, status.effectiveCopies));
+    const auto *group = graph.findGroup(*parent);
+    if (group == nullptr)
+      break;
+    parent = group->parentGroupId;
+  }
+  std::reverse(innerToOuter.begin(), innerToOuter.end());
+  return innerToOuter;
+}
+
+/**
+ * @brief Draws a pin caption, hiding multi-copy shapes behind a hover info icon.
+ * @param kind Input or output direction (affects arrows).
+ * @param label Pin name.
+ * @param inlineShape Shape shown in parentheses when there is no copy list.
+ * @param expandedShapes Nested copy-shape preview, or empty to show @p inlineShape.
+ */
+void drawPinCaption(openyourbox::graph::PinKind kind, const char *label,
+                    const openyourbox::graph::ShapeSignature &inlineShape,
+                    const std::string &expandedShapes) {
+  const bool isInput = kind == openyourbox::graph::PinKind::input;
+  if (!expandedShapes.empty()) {
+    if (isInput)
+      ImGui::Text("<- %s", label);
+    else
+      ImGui::TextUnformatted(label);
+    ImGui::SameLine(0.0f, 4.0f);
+    drawInfoHover("##shapeInfo", expandedShapes);
+    if (!isInput) {
+      ImGui::SameLine(0.0f, 4.0f);
+      ImGui::TextUnformatted("->");
+    }
+    return;
+  }
+  const auto shapeLabel = inlineShape.displayLabel();
+  if (isInput) {
+    if (!shapeLabel.empty())
+      ImGui::Text("<- %s (%s)", label, shapeLabel.c_str());
+    else
+      ImGui::Text("<- %s", label);
+  } else if (!shapeLabel.empty())
+    ImGui::Text("%s (%s) ->", label, shapeLabel.c_str());
+  else
+    ImGui::Text("%s ->", label);
+}
+
+/**
+ * @brief Nested copy-shape tooltip text when @p pin lists more than one copy.
+ * @param pin Endpoint whose @c copyShapes may be populated.
+ * @param copyCounts Outer→inner counts used to nest the list.
+ */
+std::string pinExpandedShapeInfo(const openyourbox::graph::Pin &pin,
+                                 const std::vector<int> &copyCounts) {
+  if (pin.copyShapes.size() <= 1)
+    return {};
+  return openyourbox::graph::formatShapeCopyList(pin.copyShapes, pin.shape,
+                                                 copyCounts);
 }
 
 /**
@@ -475,6 +607,7 @@ void NodeRenderer::render(NodeGraph &graph,
   }
 
   syncEditorTransforms(graph);
+  pendingInfoTooltip.clear();
 
   for (auto &group : graph.getGroups()) {
     if (graph.isGroupOnFocusedCanvas(group.id, focusedGroupId))
@@ -510,6 +643,7 @@ void NodeRenderer::render(NodeGraph &graph,
              ImColor(100, 180, 255, 220), 2.0f);
   }
 
+  flushPendingInfoTooltip();
   handleConnections(graph, callbacks);
   handleDeletion(graph);
   synchronizeSelection(graph);
@@ -825,13 +959,13 @@ void NodeRenderer::renderNode(NodeGraph &graph, GraphNode &node,
   drawNodeDivider();
 
   if (node.type != NodeType::groupInput) {
+    const auto pinCopyCounts = ancestorRuntimeCopyCounts(graph, node.id);
     for (const auto &pin : node.inputs) {
     ed::BeginPin(ed::PinId(editorIdentifier(pin.id)), ed::PinKind::Input);
-    const auto shapeLabel = pin.shape.displayLabel();
-    if (!shapeLabel.empty())
-      ImGui::Text("<- %s (%s)", pin.label.c_str(), shapeLabel.c_str());
-    else
-      ImGui::Text("<- %s", pin.label.c_str());
+    ImGui::PushID(pin.id);
+    drawPinCaption(PinKind::input, pin.label.c_str(), pin.shape,
+                   pinExpandedShapeInfo(pin, pinCopyCounts));
+    ImGui::PopID();
     ed::EndPin();
     }
   }
@@ -941,7 +1075,11 @@ void NodeRenderer::renderNode(NodeGraph &graph, GraphNode &node,
       beginPropertyRow(property.label.c_str());
     if (listEdit) {
       constexpr float handleWidth = 18.0f;
-      beginCopyListPropertyRow(property.label.c_str());
+      const auto expandedInfo =
+          copyCount > 1 ? formatExpandedPropertyCopyList(
+                              property, copyCount, ancestorCounts)
+                        : std::string{};
+      beginCopyListPropertyRow(property.label.c_str(), expandedInfo);
       const auto fieldHeight = ImGui::GetFrameHeight();
       const auto fieldOrigin = ImGui::GetCursorScreenPos();
       ImGui::GetWindowDrawList()->AddRectFilled(
@@ -1046,11 +1184,6 @@ void NodeRenderer::renderNode(NodeGraph &graph, GraphNode &node,
           if (callbacks.showMessage)
             callbacks.showMessage(transientMessage);
         }
-      }
-      if (copyCount > 1) {
-        ImGui::TextDisabled("Expanded (%d): %s", copyCount,
-                            formatExpandedPropertyCopyList(property, copyCount)
-                                .c_str());
       }
       if (property.copyListInvalid && !property.copyListInvalidMessage.empty()) {
         ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.38f, 0.38f, 1.0f));
@@ -1352,14 +1485,13 @@ void NodeRenderer::renderNode(NodeGraph &graph, GraphNode &node,
   }
 
   if (node.type != NodeType::groupOutput) {
+    const auto pinCopyCounts = ancestorRuntimeCopyCounts(graph, node.id);
     for (const auto &pin : node.outputs) {
     ed::BeginPin(ed::PinId(editorIdentifier(pin.id)), ed::PinKind::Output);
-    const auto shapeLabel =
-        formatShapeCopyList(pin.copyShapes, pin.shape);
-    if (!shapeLabel.empty())
-      ImGui::Text("%s (%s) ->", pin.label.c_str(), shapeLabel.c_str());
-    else
-      ImGui::Text("%s ->", pin.label.c_str());
+    ImGui::PushID(pin.id);
+    drawPinCaption(PinKind::output, pin.label.c_str(), pin.shape,
+                   pinExpandedShapeInfo(pin, pinCopyCounts));
+    ImGui::PopID();
     ed::PinPivotAlignment(ImVec2(1.0f, 0.5f));
     ed::EndPin();
     }
@@ -1519,27 +1651,21 @@ void NodeRenderer::renderGroup(NodeGraph &graph, GraphGroup &group,
     ed::BeginPin(ed::PinId(editorIdentifier(pinId)),
                  port.kind == PinKind::input ? ed::PinKind::Input
                                              : ed::PinKind::Output);
+    ImGui::PushID(pinId);
     // Group outputs leave the serial stack after the last copy; inputs enter
     // at the first copy (member pin.shape / copyShapes.front()).
     ShapeSignature displayShape = port.shape;
-    if (port.kind == PinKind::output) {
-      if (const auto *memberPin = graph.findPin(port.memberPinId);
-          memberPin != nullptr && !memberPin->copyShapes.empty())
+    std::string expandedShapes;
+    if (const auto *memberPin = graph.findPin(port.memberPinId)) {
+      if (port.kind == PinKind::output && !memberPin->copyShapes.empty())
         displayShape = memberPin->copyShapes.back();
+      expandedShapes = pinExpandedShapeInfo(
+          *memberPin, ancestorRuntimeCopyCounts(graph, port.memberNodeId));
     }
-    const auto shapeLabel = displayShape.displayLabel();
-    if (port.kind == PinKind::input) {
-      if (!shapeLabel.empty())
-        ImGui::Text("<- %s (%s)", port.label.c_str(), shapeLabel.c_str());
-      else
-        ImGui::Text("<- %s", port.label.c_str());
-    } else {
-      if (!shapeLabel.empty())
-        ImGui::Text("%s (%s) ->", port.label.c_str(), shapeLabel.c_str());
-      else
-        ImGui::Text("%s ->", port.label.c_str());
+    drawPinCaption(port.kind, port.label.c_str(), displayShape, expandedShapes);
+    if (port.kind == PinKind::output)
       ed::PinPivotAlignment(ImVec2(1.0f, 0.5f));
-    }
+    ImGui::PopID();
     ed::EndPin();
   };
   for (const auto &port : inputs)
