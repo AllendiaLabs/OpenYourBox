@@ -142,7 +142,6 @@ target_sources(OpenYourBox PRIVATE
     OpenYourBox/Source/freeze/FreezeCoordinator.cpp
     OpenYourBox/Source/graph/NodeGraph.cpp
     OpenYourBox/Source/graph/NodeRenderer.cpp
-    OpenYourBox/Source/graph/RaveLayouts.cpp
     OpenYourBox/Source/library/CopyrightAcknowledgment.cpp
     OpenYourBox/Source/library/TrainingLibrary.cpp
     OpenYourBox/Source/library/UserBoxLibrary.cpp

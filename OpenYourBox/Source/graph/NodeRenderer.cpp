@@ -1,5 +1,4 @@
 #include "NodeRenderer.h"
-#include "RaveLayouts.h"
 
 #include <imgui.h>
 #include <imgui_internal.h>
@@ -153,6 +152,58 @@ void drawNodeDivider() {
       start, ImVec2(start.x + nodeBodyWidth, start.y),
       ImGui::GetColorU32(ImGuiCol_Separator), 1.0f);
   ImGui::Dummy(ImVec2(nodeBodyWidth, 4.0f));
+}
+
+/**
+ * @brief Reads an integer node property or a fallback when missing.
+ * @param node Graph node.
+ * @param key Property key.
+ * @param fallback Value when the key is absent.
+ * @return Property value or fallback.
+ */
+int readIntProperty(const openyourbox::graph::GraphNode &node, const char *key,
+                    int fallback) {
+  for (const auto &property : node.properties) {
+    if (property.key == key)
+      return property.value;
+  }
+  return fallback;
+}
+
+/**
+ * @brief Returns the causal delay of a rate-changing node in samples.
+ * @param node Graph node.
+ * @return Delay at host rate, or 0 when the type does not add history.
+ */
+std::uint64_t nodeDelaySamples(const openyourbox::graph::GraphNode &node) {
+  using openyourbox::graph::NodeType;
+  using openyourbox::graph::defaultBottleneckKernelSize;
+  using openyourbox::graph::defaultPqmfBands;
+  switch (node.type) {
+  case NodeType::pqmfAnalysis:
+  case NodeType::pqmfSynthesis: {
+    const auto nBand =
+        std::max(2, readIntProperty(node, "n_band", defaultPqmfBands));
+    return static_cast<std::uint64_t>(4 * nBand);
+  }
+  case NodeType::convolution:
+  case NodeType::rateConv:
+  case NodeType::convTranspose: {
+    const auto kernel = std::max(1, readIntProperty(node, "kernel_size", 3));
+    const auto dilation = std::max(1, readIntProperty(node, "dilation", 1));
+    const auto stride = std::max(1, readIntProperty(node, "stride", 1));
+    return static_cast<std::uint64_t>(kernel - 1) *
+           static_cast<std::uint64_t>(dilation) *
+           static_cast<std::uint64_t>(stride);
+  }
+  case NodeType::variationalBottleneck: {
+    const auto kernel = std::max(
+        1, readIntProperty(node, "kernel_size", defaultBottleneckKernelSize));
+    return static_cast<std::uint64_t>(kernel - 1);
+  }
+  default:
+    return 0;
+  }
 }
 
 /**
@@ -798,7 +849,7 @@ void NodeRenderer::renderNode(NodeGraph &graph, GraphNode &node,
       convStride > 1;
   if (isRaveProcessingType(node.type) || stridedConv ||
       (node.type == NodeType::blackBox && node.outputs.size() > 1)) {
-    const auto delay = raveNodeDelaySamples(node);
+    const auto delay = nodeDelaySamples(node);
     if (delay > 0 || node.type == NodeType::blackBox) {
       const auto samples =
           node.metrics.has_value()
