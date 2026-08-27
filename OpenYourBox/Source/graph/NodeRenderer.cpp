@@ -26,19 +26,6 @@ struct PaletteItem {
   openyourbox::graph::NodeType type;
 };
 
-/** @brief Factory drag payload for a published RAVE starting graph. */
-struct RavePaletteItem {
-  /** @brief Row label shown while dragging. */
-  const char *label;
-  /** @brief Published RAVE lineage. */
-  openyourbox::graph::RaveLayoutId layout =
-      openyourbox::graph::RaveLayoutId::original;
-  /** @brief Channel width: 1 mono or 2 stereo. */
-  int channels = 1;
-};
-
-constexpr const char *raveLayoutPayloadId = "OPENYOURBOX_RAVE_LAYOUT";
-
 /** @brief Factory palette rows, listed alphabetically by display label. */
 constexpr std::array<PaletteItem, 13> paletteItems{{
     {"Activation", openyourbox::graph::NodeType::activation},
@@ -567,20 +554,6 @@ void NodeRenderer::render(NodeGraph &graph,
       mutatedThisFrame = true;
       recompileThisFrame = true;
     }
-    if (const auto *payload =
-            ImGui::AcceptDragDropPayload(raveLayoutPayloadId)) {
-      const auto item = *static_cast<const RavePaletteItem *>(payload->Data);
-      const auto error = insertRaveLayout(graph, item.layout, item.channels);
-      if (!error.empty()) {
-        transientMessage = error;
-        transientMessageDeadline = ImGui::GetTime() + 3.0;
-        if (callbacks.showMessage)
-          callbacks.showMessage(error);
-      } else {
-        mutatedThisFrame = true;
-        recompileThisFrame = true;
-      }
-    }
     if (boxLibrary != nullptr) {
       if (const auto *payload =
               ImGui::AcceptDragDropPayload(
@@ -743,50 +716,6 @@ void NodeRenderer::renderPalette(NodeGraph &graph,
         ImGui::EndDragDropSource();
       }
       ImGui::PopID();
-    }
-    if (ImGui::TreeNodeEx("RAVE layouts",
-                          ImGuiTreeNodeFlags_OpenOnArrow |
-                              ImGuiTreeNodeFlags_SpanAvailWidth)) {
-      const auto renderRaveItem = [&](const RavePaletteItem &item) {
-        ImGui::PushID(item.label);
-        ImGui::PushID(static_cast<int>(item.layout));
-        ImGui::PushID(item.channels);
-        ImGui::Selectable(item.label, false,
-                          ImGuiSelectableFlags_AllowDoubleClick);
-        if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(0)) {
-          const auto error =
-              insertRaveLayout(graph, item.layout, item.channels);
-          if (!error.empty()) {
-            transientMessage = error;
-            transientMessageDeadline = ImGui::GetTime() + 3.0;
-          } else {
-            mutatedThisFrame = true;
-            recompileThisFrame = true;
-          }
-        }
-        if (ImGui::BeginDragDropSource(ImGuiDragDropFlags_SourceAllowNullID)) {
-          ImGui::SetDragDropPayload(raveLayoutPayloadId, &item, sizeof(item));
-          ImGui::TextUnformatted(item.label);
-          ImGui::EndDragDropSource();
-        }
-        ImGui::PopID();
-        ImGui::PopID();
-        ImGui::PopID();
-      };
-      if (ImGui::TreeNodeEx("Original", ImGuiTreeNodeFlags_OpenOnArrow |
-                                            ImGuiTreeNodeFlags_SpanAvailWidth)) {
-        renderRaveItem({"Mono", RaveLayoutId::original, 1});
-        renderRaveItem({"Stereo", RaveLayoutId::original, 2});
-        ImGui::TreePop();
-      }
-      if (ImGui::TreeNodeEx("Latest continuous",
-                            ImGuiTreeNodeFlags_OpenOnArrow |
-                                ImGuiTreeNodeFlags_SpanAvailWidth)) {
-        renderRaveItem({"Mono", RaveLayoutId::latestContinuous, 1});
-        renderRaveItem({"Stereo", RaveLayoutId::latestContinuous, 2});
-        ImGui::TreePop();
-      }
-      ImGui::TreePop();
     }
     ImGui::TreePop();
   }
