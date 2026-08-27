@@ -72,18 +72,75 @@ int groupDepth(const openyourbox::graph::NodeGraph &graph, std::int32_t groupId)
  * @param graph Graph owning groups and nodes.
  * @param groupId Ancestor group.
  * @param out Destination list.
+ *
+ * Walks @c memberIds and also any node whose @c parentGroupId is @p groupId so
+ * compile-time copy clones remain visible to outer unrolls.
  */
 void collectLeaves(const openyourbox::graph::NodeGraph &graph, std::int32_t groupId,
                    std::vector<std::int32_t> &out) {
   const auto *group = graph.findGroup(groupId);
   if (group == nullptr)
     return;
+  std::unordered_set<std::int32_t> seen;
+  const auto append = [&](std::int32_t nodeId) {
+    if (seen.insert(nodeId).second)
+      out.push_back(nodeId);
+  };
   for (const auto member : group->memberIds) {
     if (graph.findNode(member) != nullptr)
-      out.push_back(member);
+      append(member);
     else
       collectLeaves(graph, member, out);
   }
+  for (const auto &node : graph.getNodes()) {
+    if (node.parentGroupId.has_value() && *node.parentGroupId == groupId)
+      append(node.id);
+  }
+}
+
+/**
+ * @brief Returns true when @p nodeId is a descendant of @p groupId.
+ * @param graph Graph owning parent links.
+ * @param nodeId Candidate node.
+ * @param groupId Ancestor group.
+ */
+bool nodeIsInsideGroup(const openyourbox::graph::NodeGraph &graph,
+                       std::int32_t nodeId, std::int32_t groupId) {
+  const auto *node = graph.findNode(nodeId);
+  if (node == nullptr)
+    return false;
+  auto parent = node->parentGroupId;
+  std::unordered_set<std::int32_t> visiting;
+  while (parent.has_value()) {
+    if (*parent == groupId)
+      return true;
+    if (!visiting.insert(*parent).second)
+      break;
+    const auto *group = graph.findGroup(*parent);
+    if (group == nullptr)
+      break;
+    parent = group->parentGroupId;
+  }
+  return false;
+}
+
+/**
+ * @brief Records a materialized copy as a member of its parent group.
+ * @param graph Expanded compile graph.
+ * @param parentGroupId Group that owns the cloned node.
+ * @param cloneId New node identifier.
+ */
+void registerCloneMembership(openyourbox::graph::NodeGraph &graph,
+                             std::optional<std::int32_t> parentGroupId,
+                             std::int32_t cloneId) {
+  if (!parentGroupId.has_value())
+    return;
+  auto *parent = graph.findGroup(*parentGroupId);
+  if (parent == nullptr)
+    return;
+  if (std::find(parent->memberIds.begin(), parent->memberIds.end(), cloneId) ==
+      parent->memberIds.end())
+    parent->memberIds.push_back(cloneId);
 }
 
 /**
@@ -3599,6 +3656,7 @@ NodeGraph NodeGraph::withInvisibleCopiesMaterialized(
         working[clone.id] = WorkingNode{originalId, slot};
         if (provenance != nullptr)
           (*provenance)[clone.id] = {originalId, slot};
+        registerCloneMembership(expanded, clone.parentGroupId, clone.id);
         expanded.nodes.push_back(std::move(clone));
       }
       for (const auto &link : internalLinks) {
@@ -3615,16 +3673,17 @@ NodeGraph NodeGraph::withInvisibleCopiesMaterialized(
       }
     }
 
-    // Retarget external outs onto the last copy before serial chain links are
-    // inserted. Doing this afterward would rewrite copy[i]->copy[i+1] edges
-    // onto the last copy and create a directed cycle.
+    // Retarget outs that leave this group onto the last copy. Destinations
+    // still inside the group — including serial edges from a nested unroll —
+    // stay put; rewriting those onto the last outer copy closes a cycle.
     const auto &last = instances.back();
     for (auto &link : expanded.links) {
       const auto sourceNode = expanded.findNodeForPin(link.sourcePinId);
       if (!sourceNode.has_value() || templateSet.count(*sourceNode) == 0)
         continue;
       const auto dest = expanded.findNodeForPin(link.destinationPinId);
-      if (dest.has_value() && templateSet.count(*dest) != 0)
+      if (dest.has_value() && (templateSet.count(*dest) != 0 ||
+                               nodeIsInsideGroup(expanded, *dest, groupId)))
         continue;
       const auto mapped = last.pinMap.find(link.sourcePinId);
       if (mapped != last.pinMap.end())

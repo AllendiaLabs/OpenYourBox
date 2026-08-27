@@ -1435,6 +1435,132 @@ int main() {
     passed &= expect(!hasBoundary && residualCompiled.succeeded(),
                      "nested residual stack compiles without a directed cycle");
 
+    openyourbox::graph::NodeGraph nestedCopies;
+    const auto nestedIn =
+        nestedCopies.addNode(NodeType::audioInput, {0.0f, 0.0f});
+    const auto nestedAct =
+        nestedCopies.addNode(NodeType::activation, {200.0f, 40.0f});
+    const auto nestedConv =
+        nestedCopies.addNode(NodeType::convolution, {320.0f, 40.0f});
+    const auto nestedJoin =
+        nestedCopies.addNode(NodeType::merge, {460.0f, 0.0f});
+    const auto nestedOut =
+        nestedCopies.addNode(NodeType::audioOutput, {620.0f, 0.0f});
+    nestedCopies.setProperty(nestedJoin, "inputs", 2);
+    nestedCopies.connect(nestedCopies.findNode(nestedAct)->outputs.front().id,
+                         nestedCopies.findNode(nestedConv)->inputs.front().id);
+    const auto nestedBody = nestedCopies.createGroup({nestedAct, nestedConv});
+    passed &= expect(nestedBody.accepted, "nested-copy residual body groups");
+    std::int32_t nestedBodyIn = 0;
+    std::int32_t nestedBodyOut = 0;
+    if (const auto *group = nestedCopies.findGroup(nestedBody.groupId)) {
+      for (const auto memberId : group->memberIds) {
+        const auto *member = nestedCopies.findNode(memberId);
+        if (member == nullptr)
+          continue;
+        if (member->type == NodeType::groupInput)
+          nestedBodyIn = memberId;
+        if (member->type == NodeType::groupOutput)
+          nestedBodyOut = memberId;
+      }
+    }
+    const auto *nestedBodyInNode = nestedCopies.findNode(nestedBodyIn);
+    const auto *nestedBodyOutNode = nestedCopies.findNode(nestedBodyOut);
+    const auto *nestedActNode = nestedCopies.findNode(nestedAct);
+    const auto *nestedConvNode = nestedCopies.findNode(nestedConv);
+    const auto *nestedJoinNode = nestedCopies.findNode(nestedJoin);
+    passed &= expect(
+        nestedBodyInNode != nullptr && nestedBodyOutNode != nullptr &&
+            nestedActNode != nullptr && nestedConvNode != nullptr &&
+            nestedJoinNode != nullptr &&
+            nestedCopies
+                .connect(nestedBodyInNode->outputs.front().id,
+                         nestedActNode->inputs.front().id)
+                .accepted &&
+            nestedCopies
+                .connect(nestedConvNode->outputs.front().id,
+                         nestedBodyOutNode->inputs.front().id)
+                .accepted &&
+            nestedCopies
+                .connect(nestedBodyOutNode->outputs.front().id,
+                         nestedJoinNode->inputs.front().id)
+                .accepted,
+        "nested-copy layer through-path and join");
+    const auto nestedStack =
+        nestedCopies.createGroup({nestedBody.groupId, nestedJoin});
+    std::int32_t nestedStackIn = 0;
+    std::int32_t nestedStackOut = 0;
+    if (const auto *group = nestedCopies.findGroup(nestedStack.groupId)) {
+      for (const auto memberId : group->memberIds) {
+        const auto *member = nestedCopies.findNode(memberId);
+        if (member == nullptr)
+          continue;
+        if (member->type == NodeType::groupInput)
+          nestedStackIn = memberId;
+        if (member->type == NodeType::groupOutput)
+          nestedStackOut = memberId;
+      }
+    }
+    const auto *nestedStackInNode = nestedCopies.findNode(nestedStackIn);
+    const auto *nestedStackOutNode = nestedCopies.findNode(nestedStackOut);
+    const auto *stackBodyInNode = nestedCopies.findNode(nestedBodyIn);
+    const auto *stackJoinNode = nestedCopies.findNode(nestedJoin);
+    passed &= expect(
+        nestedStack.accepted && nestedStackInNode != nullptr &&
+            nestedStackOutNode != nullptr && stackBodyInNode != nullptr &&
+            stackJoinNode != nullptr && stackJoinNode->inputs.size() >= 2 &&
+            nestedCopies
+                .connect(nestedStackInNode->outputs.front().id,
+                         stackBodyInNode->inputs.front().id)
+                .accepted &&
+            nestedCopies
+                .connect(nestedStackInNode->outputs.front().id,
+                         stackJoinNode->inputs[1].id)
+                .accepted &&
+            nestedCopies
+                .connect(stackJoinNode->outputs.front().id,
+                         nestedStackOutNode->inputs.front().id)
+                .accepted &&
+            nestedCopies
+                .connect(nestedCopies.findNode(nestedIn)->outputs.front().id,
+                         nestedStackInNode->inputs.front().id)
+                .accepted &&
+            nestedCopies
+                .connect(nestedStackOutNode->outputs.front().id,
+                         nestedCopies.findNode(nestedOut)->inputs.front().id)
+                .accepted,
+        "nested-copy stack Group Input fans out into layer and skip");
+    passed &= expect(
+        nestedCopies.setGroupCopies(nestedBody.groupId, 2).accepted &&
+            nestedCopies.groupCopyStatus(nestedBody.groupId).active &&
+            nestedCopies.setGroupCopies(nestedStack.groupId, 3).accepted &&
+            nestedCopies.groupCopyStatus(nestedStack.groupId).active,
+        "ResidualLayer N=2 inside ResidualStack N=3 activates");
+    const auto nestedPrepared = nestedCopies.withInvisibleCopiesMaterialized();
+    int nestedActs = 0;
+    int nestedConvs = 0;
+    int nestedJoins = 0;
+    bool nestedHasBoundary = false;
+    for (const auto &node : nestedPrepared.getNodes()) {
+      if (node.type == NodeType::activation)
+        ++nestedActs;
+      else if (node.type == NodeType::convolution)
+        ++nestedConvs;
+      else if (node.type == NodeType::merge)
+        ++nestedJoins;
+      nestedHasBoundary =
+          nestedHasBoundary ||
+          openyourbox::graph::isGroupBoundaryType(node.type);
+    }
+    const auto nestedCompiled =
+        LiveGraphEngine::compile(nestedPrepared, options);
+    if (!nestedCompiled.succeeded())
+      std::cerr << "nested residual copies failed: "
+                << nestedCompiled.error.message << '\n';
+    passed &= expect(!nestedHasBoundary && nestedActs == 6 && nestedConvs == 6 &&
+                         nestedJoins == 3 && nestedCompiled.succeeded(),
+                     "nested residual copies compile without a directed cycle");
+
     openyourbox::graph::NodeGraph sameUtility;
     const auto sameIn =
         sameUtility.addNode(NodeType::audioInput, {0.0f, 0.0f});

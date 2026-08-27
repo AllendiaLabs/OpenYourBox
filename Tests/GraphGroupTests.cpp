@@ -635,6 +635,84 @@ int main() {
   }
 
   {
+    NodeGraph nested;
+    const auto bodyAct =
+        nested.addNode(NodeType::activation, {160.0f, 40.0f});
+    const auto bodyConv =
+        nested.addNode(NodeType::convolution, {300.0f, 40.0f});
+    const auto join = nested.addNode(NodeType::merge, {460.0f, 0.0f});
+    nested.setProperty(join, "inputs", 2);
+    nested.connect(nested.findNode(bodyAct)->outputs.front().id,
+                   nested.findNode(bodyConv)->inputs.front().id);
+    const auto layer = nested.createGroup({bodyAct, bodyConv});
+    passed &= expect(layer.accepted &&
+                         connectDeclaredThrough(nested, layer.groupId, bodyAct,
+                                                bodyConv),
+                     "nested residual layer groups and wires through");
+    const auto layerOut =
+        findBoundary(nested, layer.groupId, NodeType::groupOutput);
+    const auto *joinNode = nested.findNode(join);
+    const auto *layerOutNode = nested.findNode(layerOut);
+    passed &= expect(joinNode != nullptr && layerOutNode != nullptr &&
+                         nested
+                             .connect(layerOutNode->outputs.front().id,
+                                      joinNode->inputs.front().id)
+                             .accepted,
+                     "layer output feeds the residual join");
+    const auto stack = nested.createGroup({layer.groupId, join});
+    const auto stackIn =
+        findBoundary(nested, stack.groupId, NodeType::groupInput);
+    const auto stackOut =
+        findBoundary(nested, stack.groupId, NodeType::groupOutput);
+    const auto layerIn =
+        findBoundary(nested, layer.groupId, NodeType::groupInput);
+    const auto *stackInNode = nested.findNode(stackIn);
+    const auto *stackOutNode = nested.findNode(stackOut);
+    const auto *layerInNode = nested.findNode(layerIn);
+    const auto *stackJoin = nested.findNode(join);
+    passed &= expect(
+        stack.accepted && stackInNode != nullptr && stackOutNode != nullptr &&
+            layerInNode != nullptr && stackJoin != nullptr &&
+            stackJoin->inputs.size() >= 2 &&
+            nested
+                .connect(stackInNode->outputs.front().id,
+                         layerInNode->inputs.front().id)
+                .accepted &&
+            nested
+                .connect(stackInNode->outputs.front().id,
+                         stackJoin->inputs[1].id)
+                .accepted &&
+            nested
+                .connect(stackJoin->outputs.front().id,
+                         stackOutNode->inputs.front().id)
+                .accepted,
+        "stack Group Input fans out into layer and skip join");
+    passed &= expect(nested.setGroupCopies(layer.groupId, 2).accepted &&
+                         nested.groupCopyStatus(layer.groupId).active &&
+                         nested.setGroupCopies(stack.groupId, 3).accepted &&
+                         nested.groupCopyStatus(stack.groupId).active,
+                     "nested residual copies N=2 inside N=3 activate");
+    const auto expanded = nested.withInvisibleCopiesMaterialized();
+    int activations = 0;
+    int convolutions = 0;
+    int joins = 0;
+    bool hasBoundary = false;
+    for (const auto &node : expanded.getNodes()) {
+      if (node.type == NodeType::activation)
+        ++activations;
+      else if (node.type == NodeType::convolution)
+        ++convolutions;
+      else if (node.type == NodeType::merge)
+        ++joins;
+      hasBoundary =
+          hasBoundary || openyourbox::graph::isGroupBoundaryType(node.type);
+    }
+    passed &= expect(!hasBoundary && activations == 6 && convolutions == 6 &&
+                         joins == 3,
+                     "nested residual unroll keeps a full inner chain per outer copy");
+  }
+
+  {
     NodeGraph interfaceGraph;
     const auto first =
         interfaceGraph.addNode(NodeType::activation, {120.0f, 0.0f});

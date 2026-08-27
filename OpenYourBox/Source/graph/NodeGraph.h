@@ -340,6 +340,9 @@ public:
 
   /**
    * @brief Leaf processing nodes owned by a group, including nested groups.
+   *
+   * Includes nodes listed in @c memberIds and nodes whose @c parentGroupId is
+   * this group or a nested group, so materialized copy clones stay visible.
    * @param groupId Target group.
    */
   [[nodiscard]] std::vector<std::int32_t>
