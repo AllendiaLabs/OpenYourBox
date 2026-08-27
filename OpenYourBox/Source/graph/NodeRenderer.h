@@ -94,6 +94,10 @@ private:
                      openyourbox::library::UserBoxLibrary *boxLibrary);
   /**
    * @brief Draws the live graph hierarchy under Library for navigate and save.
+   *
+   * Rows are ordered by longest-path rank along sibling links, then
+   * case-insensitive display name, then id. Feedback loops share a rank.
+   * Unconnected boxes sit with sources. Group Input/Output hubs are omitted.
    * @param graph Message-thread graph document.
    */
   void renderProjectStructure(NodeGraph &graph);

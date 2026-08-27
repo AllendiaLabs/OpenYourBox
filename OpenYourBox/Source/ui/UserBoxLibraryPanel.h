@@ -112,6 +112,10 @@ private:
                     std::int32_t nestedRootId) const;
   /**
    * @brief Draws nested snapshot members under a group library entry.
+   *
+   * Members are ordered by direct links between displayed siblings; when none
+   * connect them, entries fall back to case-insensitive label. Group Input/Output
+   * hubs are omitted.
    * @param entry Catalog row being expanded.
    * @param snapshot Loaded box snapshot.
    * @param rootId Group id whose members to list.

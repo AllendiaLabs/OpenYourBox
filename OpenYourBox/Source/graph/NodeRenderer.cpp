@@ -2301,26 +2301,11 @@ void NodeRenderer::renderProjectStructure(NodeGraph &graph) {
       roots.push_back(group.id);
   }
   for (const auto &node : graph.getNodes()) {
-    if (!node.parentGroupId.has_value() && !isFixedIoType(node.type))
+    if (!node.parentGroupId.has_value() && !isFixedIoType(node.type) &&
+        !isGroupBoundaryType(node.type))
       roots.push_back(node.id);
   }
-  std::sort(roots.begin(), roots.end(), [&graph](std::int32_t left,
-                                                 std::int32_t right) {
-    const auto *leftGroup = graph.findGroup(left);
-    const auto *rightGroup = graph.findGroup(right);
-    const auto *leftNode = graph.findNode(left);
-    const auto *rightNode = graph.findNode(right);
-    const auto leftName = leftGroup != nullptr
-                              ? juce::String(leftGroup->name)
-                              : (leftNode != nullptr ? juce::String(leftNode->label)
-                                                     : juce::String());
-    const auto rightName =
-        rightGroup != nullptr
-            ? juce::String(rightGroup->name)
-            : (rightNode != nullptr ? juce::String(rightNode->label)
-                                    : juce::String());
-    return leftName.compareIgnoreCase(rightName) < 0;
-  });
+  roots = graph.orderSiblingBoxesByFlow(std::nullopt, std::move(roots));
   if (roots.empty()) {
     ImGui::TextDisabled("Empty graph");
     return;
@@ -2331,6 +2316,10 @@ void NodeRenderer::renderProjectStructure(NodeGraph &graph) {
 
 void NodeRenderer::renderProjectStructureItem(NodeGraph &graph,
                                               std::int32_t boxId) {
+  if (const auto *boundary = graph.findNode(boxId);
+      boundary != nullptr && isGroupBoundaryType(boundary->type))
+    return;
+
   ImGui::PushID(boxId);
   if (const auto *group = graph.findGroup(boxId)) {
     const auto flags =
@@ -2353,25 +2342,7 @@ void NodeRenderer::renderProjectStructureItem(NodeGraph &graph,
       ImGui::EndPopup();
     }
     if (open) {
-      auto members = group->memberIds;
-      std::sort(members.begin(), members.end(),
-                [&graph](std::int32_t left, std::int32_t right) {
-                  const auto *leftGroup = graph.findGroup(left);
-                  const auto *rightGroup = graph.findGroup(right);
-                  const auto *leftNode = graph.findNode(left);
-                  const auto *rightNode = graph.findNode(right);
-                  const auto leftName =
-                      leftGroup != nullptr
-                          ? juce::String(leftGroup->name)
-                          : (leftNode != nullptr ? juce::String(leftNode->label)
-                                                 : juce::String());
-                  const auto rightName =
-                      rightGroup != nullptr
-                          ? juce::String(rightGroup->name)
-                          : (rightNode != nullptr ? juce::String(rightNode->label)
-                                                  : juce::String());
-                  return leftName.compareIgnoreCase(rightName) < 0;
-                });
+      const auto members = graph.orderSiblingBoxesByFlow(boxId, group->memberIds);
       for (const auto member : members)
         renderProjectStructureItem(graph, member);
       ImGui::TreePop();

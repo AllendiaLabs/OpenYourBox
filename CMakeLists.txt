@@ -140,6 +140,7 @@ target_sources(OpenYourBox PRIVATE
     OpenYourBox/Source/dsp/WeightLoader.cpp
     OpenYourBox/Source/dsp/WeightRandomizer.cpp
     OpenYourBox/Source/freeze/FreezeCoordinator.cpp
+    OpenYourBox/Source/graph/BoxFlowOrder.cpp
     OpenYourBox/Source/graph/NodeGraph.cpp
     OpenYourBox/Source/graph/NodeRenderer.cpp
     OpenYourBox/Source/library/CopyrightAcknowledgment.cpp
@@ -223,6 +224,18 @@ if(BUILD_TESTING)
         juce::juce_recommended_config_flags
         juce::juce_recommended_warning_flags)
     add_test(NAME OpenYourBoxTCNModel COMMAND OpenYourBoxTests)
+
+    juce_add_console_app(OpenYourBoxFlowOrderTests PRODUCT_NAME "OpenYourBox Flow Order Tests")
+    target_sources(OpenYourBoxFlowOrderTests PRIVATE
+        Tests/BoxFlowOrderTests.cpp
+        OpenYourBox/Source/graph/BoxFlowOrder.cpp)
+    target_include_directories(OpenYourBoxFlowOrderTests PRIVATE
+        OpenYourBox/Source)
+    target_link_libraries(OpenYourBoxFlowOrderTests PRIVATE
+        juce::juce_core
+        juce::juce_recommended_config_flags
+        juce::juce_recommended_warning_flags)
+    add_test(NAME OpenYourBoxFlowOrder COMMAND OpenYourBoxFlowOrderTests)
 
     juce_add_console_app(OpenYourBoxProcessorTests PRODUCT_NAME "OpenYourBox Processor Tests")
     target_sources(OpenYourBoxProcessorTests PRIVATE Tests/ProcessorIntegrationTests.cpp)

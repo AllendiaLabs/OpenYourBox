@@ -1,4 +1,5 @@
 #include "NodeGraph.h"
+#include "BoxFlowOrder.h"
 
 #include <algorithm>
 #include <array>
@@ -25,6 +26,114 @@ void normalizeMergeNodeProperties(openyourbox::graph::GraphNode &node);
 void refreshPropagatedPinShapes(openyourbox::graph::NodeGraph &graph);
 void refreshPropagatedPinShapesCore(openyourbox::graph::NodeGraph &graph);
 void refreshOutputCopyShapes(openyourbox::graph::NodeGraph &graph);
+
+/**
+ * @brief Collects every node and nested group owned by @p groupId.
+ * @param graph Graph owning membership.
+ * @param groupId Ancestor group.
+ * @param nodeIds Destination node identifiers.
+ * @param groupIds Destination group identifiers, including @p groupId.
+ */
+void collectGroupSubtree(const openyourbox::graph::NodeGraph &graph,
+                         std::int32_t groupId,
+                         std::unordered_set<std::int32_t> &nodeIds,
+                         std::unordered_set<std::int32_t> &groupIds);
+
+/**
+ * @brief Returns the user-visible name of a node or group box.
+ * @param graph Graph owning labels.
+ * @param boxId Node or group identifier.
+ */
+juce::String boxDisplayName(const openyourbox::graph::NodeGraph &graph,
+                            std::int32_t boxId) {
+  if (const auto *group = graph.findGroup(boxId))
+    return juce::String(group->name);
+  if (const auto *node = graph.findNode(boxId))
+    return juce::String(node->label);
+  return {};
+}
+
+/**
+ * @brief Returns true when @p boxId may appear in structure or library trees.
+ * @param graph Graph owning nodes and groups.
+ * @param boxId Node or group identifier.
+ */
+bool isStructureBox(const openyourbox::graph::NodeGraph &graph,
+                    std::int32_t boxId) {
+  if (const auto *node = graph.findNode(boxId))
+    return !openyourbox::graph::isFixedIoType(node->type) &&
+           !openyourbox::graph::isGroupBoundaryType(node->type);
+  return graph.findGroup(boxId) != nullptr;
+}
+
+/**
+ * @brief Collects every node id owned by @p boxId, including nested groups.
+ * @param graph Graph owning nodes and groups.
+ * @param boxId Node or group identifier.
+ * @param nodeIds Destination node identifiers.
+ */
+void collectNodesUnderBox(const openyourbox::graph::NodeGraph &graph,
+                          std::int32_t boxId,
+                          std::unordered_set<std::int32_t> &nodeIds) {
+  if (graph.findNode(boxId) != nullptr) {
+    nodeIds.insert(boxId);
+    return;
+  }
+  std::unordered_set<std::int32_t> groupIds;
+  collectGroupSubtree(graph, boxId, nodeIds, groupIds);
+}
+
+/**
+ * @brief Maps a node to the sibling box that owns it in @p candidates.
+ * @param graph Graph owning membership.
+ * @param candidates Displayed sibling node and group identifiers.
+ * @param nodeId Endpoint node resolved from a link pin.
+ */
+std::optional<std::int32_t>
+owningCandidateBox(const openyourbox::graph::NodeGraph &graph,
+                   const std::unordered_set<std::int32_t> &candidates,
+                   std::int32_t nodeId) {
+  if (candidates.count(nodeId) != 0)
+    return nodeId;
+  const auto *node = graph.findNode(nodeId);
+  if (node == nullptr)
+    return std::nullopt;
+
+  auto groupId = node->parentGroupId;
+  std::unordered_set<std::int32_t> visiting;
+  while (groupId.has_value()) {
+    if (candidates.count(*groupId) != 0)
+      return *groupId;
+    const auto *group = graph.findGroup(*groupId);
+    if (group == nullptr || !visiting.insert(*groupId).second)
+      break;
+    groupId = group->parentGroupId;
+  }
+  return std::nullopt;
+}
+
+/**
+ * @brief Collects nodes whose links can order @p candidates at one scope.
+ * @param graph Graph owning nodes and membership.
+ * @param scopeGroupId Parent group, or empty for the graph root.
+ * @param candidates Displayed sibling node and group identifiers.
+ * @param nodeIds Destination node identifiers.
+ */
+void collectScopeFlowNodes(const openyourbox::graph::NodeGraph &graph,
+                           std::optional<std::int32_t> scopeGroupId,
+                           const std::unordered_set<std::int32_t> &candidates,
+                           std::unordered_set<std::int32_t> &nodeIds) {
+  for (const auto boxId : candidates)
+    collectNodesUnderBox(graph, boxId, nodeIds);
+  for (const auto &node : graph.getNodes()) {
+    if (scopeGroupId.has_value()) {
+      if (node.parentGroupId == scopeGroupId)
+        nodeIds.insert(node.id);
+    } else if (!node.parentGroupId.has_value()) {
+      nodeIds.insert(node.id);
+    }
+  }
+}
 
 /**
  * @brief Returns true when @p id is a member of @p group, including nested groups.
@@ -2510,6 +2619,46 @@ NodeGraph::collectLeafNodeIds(std::int32_t groupId) const {
   std::vector<std::int32_t> leaves;
   collectLeaves(*this, groupId, leaves);
   return leaves;
+}
+
+std::vector<std::int32_t> NodeGraph::orderSiblingBoxesByFlow(
+    std::optional<std::int32_t> scopeGroupId,
+    std::vector<std::int32_t> boxIds) const {
+  boxIds.erase(std::remove_if(boxIds.begin(), boxIds.end(),
+                              [this](std::int32_t boxId) {
+                                return !isStructureBox(*this, boxId);
+                              }),
+               boxIds.end());
+  if (boxIds.empty())
+    return boxIds;
+
+  const std::unordered_set<std::int32_t> candidates(boxIds.begin(),
+                                                    boxIds.end());
+  std::unordered_set<std::int32_t> flowNodes;
+  collectScopeFlowNodes(*this, scopeGroupId, candidates, flowNodes);
+
+  std::vector<BoxFlowEdge> edges;
+  for (const auto &link : links) {
+    const auto source = findNodeForPin(link.sourcePinId);
+    const auto destination = findNodeForPin(link.destinationPinId);
+    if (!source.has_value() || !destination.has_value())
+      continue;
+    if (flowNodes.count(*source) == 0 || flowNodes.count(*destination) == 0)
+      continue;
+    const auto sourceBox = owningCandidateBox(*this, candidates, *source);
+    const auto destinationBox =
+        owningCandidateBox(*this, candidates, *destination);
+    if (!sourceBox.has_value() || !destinationBox.has_value() ||
+        *sourceBox == *destinationBox)
+      continue;
+    edges.push_back({*sourceBox, *destinationBox});
+  }
+
+  std::unordered_map<std::int32_t, juce::String> names;
+  names.reserve(boxIds.size());
+  for (const auto boxId : boxIds)
+    names.emplace(boxId, boxDisplayName(*this, boxId));
+  return orderBoxesByFlowRank(std::move(boxIds), names, edges);
 }
 
 int NodeGraph::effectiveCopyCount(std::int32_t nodeId) const {

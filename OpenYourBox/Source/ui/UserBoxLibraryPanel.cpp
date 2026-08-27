@@ -1,9 +1,15 @@
 #include "UserBoxLibraryPanel.h"
 
+#include "../graph/BoxFlowOrder.h"
+
 #include <algorithm>
+#include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <functional>
+#include <optional>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace openyourbox::ui {
@@ -70,6 +76,203 @@ void acceptBoxDrop(library::UserBoxLibrary &library, const juce::String &folder,
       callbacks.showMessage(error.toStdString());
   }
   ImGui::EndDragDropTarget();
+}
+
+/**
+ * @brief Returns true for editor-only Group Input/Output snapshot nodes.
+ * @param type Serialized node type name.
+ */
+bool isSnapshotBoundaryType(const juce::String &type) {
+  return type == "group_input" || type == "group_output";
+}
+
+/**
+ * @brief Collects node/group ids in the snapshot subtree rooted at @p rootId.
+ * @param snapshot Loaded box snapshot.
+ * @param rootId Node or group identifier.
+ * @param nodeIds Destination node identifiers.
+ * @param groupIds Destination group identifiers.
+ */
+void collectSnapshotSubtree(const juce::ValueTree &snapshot, std::int32_t rootId,
+                            std::unordered_set<std::int32_t> &nodeIds,
+                            std::unordered_set<std::int32_t> &groupIds);
+
+/**
+ * @brief Collects node ids in the snapshot subtree rooted at @p rootId.
+ * @param snapshot Loaded box snapshot.
+ * @param rootId Node or group identifier.
+ * @param nodeIds Destination node identifiers.
+ */
+void collectSnapshotNodes(const juce::ValueTree &snapshot, std::int32_t rootId,
+                          std::unordered_set<std::int32_t> &nodeIds) {
+  std::unordered_set<std::int32_t> groupIds;
+  collectSnapshotSubtree(snapshot, rootId, nodeIds, groupIds);
+}
+
+/**
+ * @brief Maps a snapshot node to the sibling box that owns it in @p candidates.
+ * @param parentGroupId Parent group keyed by node or nested group id.
+ * @param candidates Displayed sibling node and group identifiers.
+ * @param nodeId Endpoint node resolved from a link pin.
+ */
+std::optional<std::int32_t> snapshotOwningCandidateBox(
+    const std::unordered_map<std::int32_t, std::optional<std::int32_t>>
+        &parentGroupId,
+    const std::unordered_set<std::int32_t> &candidates, std::int32_t nodeId) {
+  if (candidates.count(nodeId) != 0)
+    return nodeId;
+  auto found = parentGroupId.find(nodeId);
+  if (found == parentGroupId.end())
+    return std::nullopt;
+
+  auto groupId = found->second;
+  std::unordered_set<std::int32_t> visiting;
+  while (groupId.has_value()) {
+    if (candidates.count(*groupId) != 0)
+      return *groupId;
+    const auto parent = parentGroupId.find(*groupId);
+    if (parent == parentGroupId.end() || !visiting.insert(*groupId).second)
+      break;
+    groupId = parent->second;
+  }
+  return std::nullopt;
+}
+
+/**
+ * @brief Returns snapshot boxes sorted by information-flow rank, then name.
+ *
+ * Rank is the longest path from sources in the sibling-link DAG; feedback
+ * loops share a rank. Within a rank, order is case-insensitive name, then id.
+ * Unconnected boxes sit with sources (rank 0).
+ * @param snapshot Loaded box snapshot.
+ * @param scopeGroupId Parent group whose members are being listed.
+ * @param boxIds Candidate sibling node and group identifiers.
+ */
+std::vector<std::int32_t>
+orderSnapshotBoxesByFlow(const juce::ValueTree &snapshot,
+                         std::int32_t scopeGroupId,
+                         std::vector<std::int32_t> boxIds) {
+  struct SnapshotBox {
+    juce::String label;
+    bool isBoundary = false;
+  };
+  std::unordered_map<std::int32_t, SnapshotBox> boxes;
+  std::unordered_map<std::int32_t, std::optional<std::int32_t>> parentGroupId;
+  for (const auto child : snapshot) {
+    if (child.hasType("Node")) {
+      const auto id = static_cast<std::int32_t>(child["id"]);
+      SnapshotBox box;
+      box.label = child["label"].toString();
+      box.isBoundary = isSnapshotBoundaryType(child["type"].toString());
+      boxes.emplace(id, std::move(box));
+      if (child.hasProperty("parentGroupId"))
+        parentGroupId.emplace(
+            id, static_cast<std::int32_t>(child.getProperty("parentGroupId")));
+      else
+        parentGroupId.emplace(id, std::nullopt);
+    } else if (child.hasType("Group")) {
+      const auto id = static_cast<std::int32_t>(child["id"]);
+      SnapshotBox box;
+      box.label = child.getProperty("name", "Group").toString();
+      boxes.emplace(id, std::move(box));
+      if (child.hasProperty("parentGroupId"))
+        parentGroupId.emplace(
+            id, static_cast<std::int32_t>(child.getProperty("parentGroupId")));
+      else
+        parentGroupId.emplace(id, std::nullopt);
+    }
+  }
+
+  boxIds.erase(std::remove_if(boxIds.begin(), boxIds.end(),
+                              [&boxes](std::int32_t boxId) {
+                                const auto found = boxes.find(boxId);
+                                return found == boxes.end() ||
+                                       found->second.isBoundary;
+                              }),
+               boxIds.end());
+  if (boxIds.empty())
+    return boxIds;
+
+  const std::unordered_set<std::int32_t> candidates(boxIds.begin(),
+                                                    boxIds.end());
+  std::unordered_set<std::int32_t> flowNodes;
+  for (const auto boxId : boxIds)
+    collectSnapshotNodes(snapshot, boxId, flowNodes);
+  for (const auto &[nodeId, parent] : parentGroupId) {
+    if (parent.has_value() && *parent == scopeGroupId)
+      flowNodes.insert(nodeId);
+  }
+
+  std::unordered_map<std::int32_t, std::int32_t> pinOwners;
+  for (const auto child : snapshot) {
+    if (!child.hasType("Node"))
+      continue;
+    const auto nodeId = static_cast<std::int32_t>(child["id"]);
+    for (const auto pin : child) {
+      if (pin.hasType("Pin"))
+        pinOwners.emplace(static_cast<std::int32_t>(pin["id"]), nodeId);
+    }
+  }
+
+  std::vector<openyourbox::graph::BoxFlowEdge> edges;
+  for (const auto child : snapshot) {
+    if (!child.hasType("Link"))
+      continue;
+    const auto sourcePin =
+        static_cast<std::int32_t>(child.getProperty("sourcePin"));
+    const auto destinationPin =
+        static_cast<std::int32_t>(child.getProperty("destinationPin"));
+    const auto source = pinOwners.find(sourcePin);
+    const auto destination = pinOwners.find(destinationPin);
+    if (source == pinOwners.end() || destination == pinOwners.end())
+      continue;
+    if (flowNodes.count(source->second) == 0 ||
+        flowNodes.count(destination->second) == 0)
+      continue;
+    const auto sourceBox =
+        snapshotOwningCandidateBox(parentGroupId, candidates, source->second);
+    const auto destinationBox = snapshotOwningCandidateBox(
+        parentGroupId, candidates, destination->second);
+    if (!sourceBox.has_value() || !destinationBox.has_value() ||
+        *sourceBox == *destinationBox)
+      continue;
+    edges.push_back({*sourceBox, *destinationBox});
+  }
+
+  std::unordered_map<std::int32_t, juce::String> names;
+  names.reserve(boxIds.size());
+  for (const auto boxId : boxIds)
+    names.emplace(boxId, boxes.at(boxId).label);
+  return openyourbox::graph::orderBoxesByFlowRank(std::move(boxIds), names,
+                                                  edges);
+}
+
+void collectSnapshotSubtree(const juce::ValueTree &snapshot, std::int32_t rootId,
+                            std::unordered_set<std::int32_t> &nodeIds,
+                            std::unordered_set<std::int32_t> &groupIds) {
+  std::unordered_map<std::int32_t, juce::ValueTree> groupsById;
+  std::unordered_set<std::int32_t> nodesById;
+  for (const auto child : snapshot) {
+    if (child.hasType("Node"))
+      nodesById.insert(static_cast<std::int32_t>(child["id"]));
+    else if (child.hasType("Group"))
+      groupsById.emplace(static_cast<std::int32_t>(child["id"]), child);
+  }
+  std::function<void(std::int32_t)> walk = [&](std::int32_t id) {
+    if (nodesById.count(id) != 0) {
+      nodeIds.insert(id);
+      return;
+    }
+    const auto found = groupsById.find(id);
+    if (found == groupsById.end() || !groupIds.insert(id).second)
+      return;
+    for (const auto member : found->second) {
+      if (!member.hasType("Member"))
+        continue;
+      walk(static_cast<std::int32_t>(member["id"]));
+    }
+  };
+  walk(rootId);
 }
 } // namespace
 
@@ -327,41 +530,43 @@ void UserBoxLibraryPanel::renderSnapshotMembers(
     bool isGroup = false;
   };
   std::unordered_map<std::int32_t, juce::ValueTree> groups;
-  std::unordered_map<std::int32_t, juce::String> nodeLabels;
+  std::unordered_map<std::int32_t, juce::ValueTree> nodes;
   for (const auto child : snapshot) {
     if (child.hasType("Group"))
       groups.emplace(static_cast<std::int32_t>(child["id"]), child);
     else if (child.hasType("Node") &&
-             child["type"].toString() != "group_input" &&
-             child["type"].toString() != "group_output")
-      nodeLabels.emplace(static_cast<std::int32_t>(child["id"]),
-                         child["label"].toString());
+             !isSnapshotBoundaryType(child["type"].toString()))
+      nodes.emplace(static_cast<std::int32_t>(child["id"]), child);
   }
   const auto found = groups.find(rootId);
   if (found == groups.end())
     return;
-  std::vector<MemberRow> rows;
+
+  std::vector<std::int32_t> memberIds;
   for (const auto member : found->second) {
     if (!member.hasType("Member"))
       continue;
+    memberIds.push_back(static_cast<std::int32_t>(member["id"]));
+  }
+  memberIds = orderSnapshotBoxesByFlow(snapshot, rootId, std::move(memberIds));
+
+  std::vector<MemberRow> rows;
+  rows.reserve(memberIds.size());
+  for (const auto memberId : memberIds) {
     MemberRow row;
-    row.id = static_cast<std::int32_t>(member["id"]);
-    const auto group = groups.find(row.id);
+    row.id = memberId;
+    const auto group = groups.find(memberId);
     if (group != groups.end()) {
       row.isGroup = true;
       row.label = group->second.getProperty("name", "Group").toString();
     } else {
-      const auto label = nodeLabels.find(row.id);
-      if (label == nodeLabels.end())
+      const auto node = nodes.find(memberId);
+      if (node == nodes.end())
         continue;
-      row.label = label->second;
+      row.label = node->second["label"].toString();
     }
     rows.push_back(std::move(row));
   }
-  std::sort(rows.begin(), rows.end(),
-            [](const MemberRow &left, const MemberRow &right) {
-              return left.label.compareIgnoreCase(right.label) < 0;
-            });
   for (const auto &row : rows) {
     ImGui::PushID(row.id);
     const auto flags =

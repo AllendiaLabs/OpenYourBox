@@ -349,6 +349,21 @@ public:
   collectLeafNodeIds(std::int32_t groupId) const;
 
   /**
+   * @brief Returns @p boxIds sorted by information-flow rank, then name.
+   *
+   * Boxes are treated as siblings under @p scopeGroupId, or the root canvas
+   * when @p scopeGroupId is empty. Rank is the longest path from sources in the
+   * sibling-link DAG; feedback loops share a rank. Within a rank, order is
+   * case-insensitive name, then id. Unconnected boxes sit with sources (rank
+   * 0). Group Input/Output hubs and fixed I/O are omitted.
+   * @param scopeGroupId Parent group, or empty for the graph root.
+   * @param boxIds Candidate sibling node and group identifiers.
+   */
+  [[nodiscard]] std::vector<std::int32_t> orderSiblingBoxesByFlow(
+      std::optional<std::int32_t> scopeGroupId,
+      std::vector<std::int32_t> boxIds) const;
+
+  /**
    * @brief Product of copies on groups that contain @p nodeId.
    * @param nodeId Candidate node.
    */
