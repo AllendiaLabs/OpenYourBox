@@ -630,9 +630,9 @@ private:
   /** @brief Creates a fully initialized node without inserting it. */
   GraphNode makeNode(NodeType type, juce::Point<float> position);
   /**
-   * @brief Rebuilds mixer input ports to match the Inputs property.
-   * @param node Mixer node to update.
-   * @param inputCount Requested input port count.
+   * @brief Rebuilds Utility input ports to match the Inputs property.
+   * @param node Utility node to update.
+   * @param inputCount Requested input port count (minimum 1).
    */
   void setMixerInputCount(GraphNode &node, int inputCount);
   /** @brief Tests whether a candidate edge would introduce a directed cycle. */

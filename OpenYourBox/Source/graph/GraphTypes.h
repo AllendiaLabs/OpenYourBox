@@ -41,7 +41,7 @@ enum class TrainObjective { mapping, reconstruction };
 /** @brief Rate-changing convolution direction. */
 enum class RateConvDirection { downsample, upsample };
 
-/** @brief Merge element operating mode. */
+/** @brief Utility element operating mode (add, multiply, or concatenate). */
 enum class MergeMode : int { add = 0, multiply = 1, concatenate = 2 };
 
 /** @brief Provenance shown by the Weights property on weight-bearing nodes. */
@@ -166,7 +166,7 @@ inline bool isRaveProcessingType(NodeType type) noexcept {
 /**
  * @brief Returns true for tensor ops that inherit hop rate and nBand.
  *
- * Linear, Conv1D, Activation, TCN, Merge, and Noise Synth process whatever
+ * Linear, Conv1D, Activation, TCN, Utility, and Noise Synth process whatever
  * tensor they receive. Their pins start unspecified and copy the connected
  * upstream rate and band count.
  */
@@ -324,7 +324,7 @@ inline float clampConditioning(float value) noexcept {
   return std::clamp(value, conditioningMinimum, conditioningMaximum);
 }
 
-/** @brief Returns true for nodes that combine several input ports. */
+/** @brief Returns true for Utility nodes (one or more combine/passthrough inputs). */
 inline bool isMixerType(NodeType type) noexcept {
   return type == NodeType::merge;
 }

@@ -371,8 +371,8 @@ int readNodeProperty(const openyourbox::graph::GraphNode &node, const char *key,
 }
 
 /**
- * @brief Returns the configured merge operating mode for one node.
- * @param node Merge or legacy mixer node.
+ * @brief Returns the configured Utility operating mode for one node.
+ * @param node Utility or legacy mixer node.
  * @return Merge mode index.
  */
 int mergeModeFor(const openyourbox::graph::GraphNode &node) {
@@ -380,7 +380,7 @@ int mergeModeFor(const openyourbox::graph::GraphNode &node) {
 }
 
 /**
- * @brief Returns whether two Merge input widths can share add/multiply.
+ * @brief Returns whether two Utility input widths can share add/multiply.
  * @param left First width, or zero when unknown.
  * @param right Second width, or zero when unknown.
  * @return True when the widths match or either side can broadcast from 1.
@@ -394,9 +394,9 @@ int resolvePinChannels(const openyourbox::graph::NodeGraph &graph,
                        std::unordered_set<std::int32_t> &visiting);
 
 /**
- * @brief Computes merge output channels from currently connected inputs.
+ * @brief Computes Utility output channels from currently connected inputs.
  * @param graph Graph document used for upstream resolution.
- * @param node Merge node to inspect.
+ * @param node Utility node to inspect.
  * @param visiting Active pin-resolution stack for cycle detection.
  * @return Output channel count, or zero when unknown.
  */
@@ -532,9 +532,9 @@ int resolvePinChannels(const openyourbox::graph::NodeGraph &graph,
 }
 
 /**
- * @brief Updates the declared output channels on one merge node.
+ * @brief Updates the declared output channels on one Utility node.
  * @param graph Graph document to mutate.
- * @param node Merge node to refresh.
+ * @param node Utility node to refresh.
  */
 void updateMergeOutputShape(openyourbox::graph::NodeGraph &graph,
                             openyourbox::graph::GraphNode &node) {
@@ -546,7 +546,7 @@ void updateMergeOutputShape(openyourbox::graph::NodeGraph &graph,
 }
 
 /**
- * @brief Refreshes output channel declarations on every merge node.
+ * @brief Refreshes output channel declarations on every Utility node.
  * @param graph Graph document to mutate.
  */
 void refreshAllMergeOutputShapes(openyourbox::graph::NodeGraph &graph) {
@@ -556,7 +556,7 @@ void refreshAllMergeOutputShapes(openyourbox::graph::NodeGraph &graph) {
 /**
  * @brief Returns true when downstream consumers accept the merge output width.
  * @param graph Graph document to inspect.
- * @param merge Merge node whose output width was computed.
+ * @param merge Utility node whose output width was computed.
  * @return False when a connected destination requires a different channel count.
  */
 bool mergeDownstreamIsCompatible(const openyourbox::graph::NodeGraph &graph,
@@ -585,10 +585,10 @@ bool mergeDownstreamIsCompatible(const openyourbox::graph::NodeGraph &graph,
 }
 
 /**
- * @brief Validates a new merge input for add/multiply channel agreement.
+ * @brief Validates a new Utility input for add/multiply channel agreement.
  * @param graph Graph document to inspect.
- * @param merge Destination merge node.
- * @param newSourcePinId Source pin proposed for one merge input.
+ * @param merge Destination Utility node.
+ * @param newSourcePinId Source pin proposed for one Utility input.
  * @return False when add/multiply mode would mix incompatible channel counts.
  */
 bool mergeInputConnectionIsValid(const openyourbox::graph::NodeGraph &graph,
@@ -1409,7 +1409,7 @@ const char *nodeTypeName(openyourbox::graph::NodeType type) noexcept {
   case NodeType::tcn:
     return "tcn";
   case NodeType::merge:
-    return "merge";
+    return "utility";
   case NodeType::blackBox:
     return "blackbox";
   case NodeType::knobInput:
@@ -1445,7 +1445,7 @@ openyourbox::graph::NodeType nodeTypeFromName(const juce::String &name) {
   if (name == "activation")
     return NodeType::activation;
   if (name == "sum" || name == "multiply" || name == "concatenate" ||
-      name == "merge")
+      name == "merge" || name == "utility")
     return NodeType::merge;
   if (name == "blackbox")
     return NodeType::blackBox;
@@ -1475,7 +1475,7 @@ openyourbox::graph::NodeType nodeTypeFromName(const juce::String &name) {
  * @param name ValueTree `type` token.
  */
 bool isKnownPersistedNodeType(const juce::String &name) {
-  static const std::array<const char *, 20> known{
+  static const std::array<const char *, 21> known{
       "audio_input",
       "audio_output",
       "linear",
@@ -1484,6 +1484,7 @@ bool isKnownPersistedNodeType(const juce::String &name) {
       "multiply",
       "concatenate",
       "merge",
+      "utility",
       "blackbox",
       "knob_input",
       "xy_trackpad",
@@ -1897,7 +1898,7 @@ void writeRandomizedWeightSlots(openyourbox::graph::GraphNode &node,
 }
 
 /**
- * @brief Upgrades persisted mixer nodes to the unified Merge element.
+ * @brief Upgrades persisted mixer nodes to the unified Utility element.
  * @param node Loaded graph node to normalize in place.
  * @param storedType Serialized type name from the graph document.
  */
@@ -1917,8 +1918,8 @@ void migrateLegacyMixerNode(openyourbox::graph::GraphNode &node,
 
   node.type = NodeType::merge;
   if (node.label == "Sum" || node.label == "Multiply" ||
-      node.label == "Concatenate")
-    node.label = "Merge";
+      node.label == "Concatenate" || node.label == "Merge")
+    node.label = "Utility";
 
   for (auto &property : node.properties) {
     if (property.key == "mode") {
@@ -1939,19 +1940,28 @@ void migrateLegacyMixerNode(openyourbox::graph::GraphNode &node,
 }
 
 /**
- * @brief Ensures persisted merge nodes expose the current mode choices.
- * @param node Loaded or migrated merge node.
+ * @brief Ensures persisted Utility nodes expose current labels, modes, and input bounds.
+ * @param node Loaded or migrated Utility node.
  */
 void normalizeMergeNodeProperties(openyourbox::graph::GraphNode &node) {
   if (node.type != openyourbox::graph::NodeType::merge)
     return;
+  if (node.label == "Merge")
+    node.label = "Utility";
+  using openyourbox::graph::minimumPositiveProperty;
+  using openyourbox::graph::unlimitedPropertyMaximum;
   for (auto &property : node.properties) {
-    if (property.key != "mode")
-      continue;
-    property.maximum = 2;
-    property.choices = {"Add", "Multiply", "Concatenate"};
-    property.value = std::clamp(property.value, property.minimum, property.maximum);
-    return;
+    if (property.key == "mode") {
+      property.maximum = 2;
+      property.choices = {"Add", "Multiply", "Concatenate"};
+      property.value =
+          std::clamp(property.value, property.minimum, property.maximum);
+    } else if (property.key == "inputs") {
+      property.minimum = minimumPositiveProperty;
+      property.maximum = unlimitedPropertyMaximum;
+      property.value =
+          std::max(property.value, minimumPositiveProperty);
+    }
   }
 }
 
@@ -3179,7 +3189,7 @@ ConnectionResult NodeGraph::connect(std::int32_t firstPinId,
       destination->kind == PinKind::input &&
       !mergeInputConnectionIsValid(*this, *destinationNodePtr, source->id))
     return {false,
-            "Merge inputs must share temporal rate, band count, and channel count"};
+            "Utility inputs must share temporal rate, band count, and channel count"};
 
   if (sourceNodePtr != nullptr && sourceNodePtr->type == NodeType::merge)
     updateMergeOutputShape(*this, *const_cast<GraphNode *>(sourceNodePtr));
@@ -4418,14 +4428,15 @@ GraphNode NodeGraph::makeNode(NodeType type, juce::Point<float> position) {
     node.properties.push_back(gainProperty());
     break;
   case NodeType::merge:
-    node.label = "Merge";
+    node.label = "Utility";
     node.detail = "Elementwise combine";
     addOutput();
     node.outputs.front().shape = flexibleTensorShape();
     node.properties.push_back(
         property("mode", "Mode", 0, 0, 2, PropertyKind::choice,
                  {"Add", "Multiply", "Concatenate"}));
-    node.properties.push_back(property("inputs", "Inputs", 2, 2,
+    node.properties.push_back(property("inputs", "Inputs", 2,
+                                       minimumPositiveProperty,
                                        unlimitedPropertyMaximum));
     setMixerInputCount(node, 2);
     break;
@@ -4511,7 +4522,7 @@ GraphNode NodeGraph::makeNode(NodeType type, juce::Point<float> position) {
 }
 
 void NodeGraph::setMixerInputCount(GraphNode &node, int inputCount) {
-  const auto count = std::max(inputCount, 2);
+  const auto count = std::max(inputCount, 1);
   while (static_cast<int>(node.inputs.size()) > count) {
     const auto pinId = node.inputs.back().id;
     links.erase(std::remove_if(links.begin(), links.end(),

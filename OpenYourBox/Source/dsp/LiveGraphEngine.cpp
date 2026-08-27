@@ -61,7 +61,7 @@ struct CompiledElement {
   std::uint64_t parameterCount = 0;
   /** @brief True for live weighted elements that may be randomized. */
   bool randomizable = false;
-  /** @brief Merge operating mode: add, multiply, or concatenate. */
+  /** @brief Utility operating mode: add, multiply, or concatenate. */
   int mergeMode = 0;
   /** @brief Nonlinearity slope Gain for Activation and TCN elements. */
   float gain = 1.0f;
@@ -475,7 +475,7 @@ bool hasValidPortLayout(const openyourbox::graph::GraphNode &node) noexcept {
   if (node.type == NodeType::xyTrackpad)
     return node.inputs.empty() && node.outputs.size() == 2;
   if (openyourbox::graph::isMixerType(node.type))
-    return node.inputs.size() >= 2 && node.outputs.size() == 1;
+    return node.inputs.size() >= 1 && node.outputs.size() == 1;
   if (node.type == NodeType::tcn)
     return node.inputs.size() >= 1 && node.inputs.size() <= 2 &&
            node.outputs.size() == 1;
@@ -548,7 +548,7 @@ torch::Tensor broadcastChannels(const torch::Tensor &value, int channels) {
 }
 
 /**
- * @brief Returns whether two channel counts can share an add/multiply Merge.
+ * @brief Returns whether two channel counts can share an add/multiply Utility.
  * @param left First connected width, or zero when unknown.
  * @param right Second connected width, or zero when unknown.
  * @return True when the widths match or either side can broadcast from 1.
@@ -558,10 +558,10 @@ bool channelsAreBroadcastCompatible(int left, int right) noexcept {
 }
 
 /**
- * @brief Channel count contributed by one compiled Merge input.
+ * @brief Channel count contributed by one compiled Utility input.
  * @param source Upstream compiled element.
  * @param extractChannel Extracted source channel, or -1 for the full tensor.
- * @return Positive channel count used at the Merge input.
+ * @return Positive channel count used at the Utility input.
  */
 int compiledSlotChannels(const CompiledElement &source,
                          int extractChannel) noexcept {
@@ -2025,7 +2025,7 @@ LiveGraphEngine::compile(const graph::NodeGraph &graphDocument,
         int mode = static_cast<int>(MergeMode::add);
         if (!readProperty(node, "mode", mode) || mode < 0 || mode > 2)
           return failure(LiveGraphErrorCode::invalidProperty, node.id,
-                         "Merge mode must be Add, Multiply, or Concatenate");
+                         "Utility mode must be Add, Multiply, or Concatenate");
         element.mergeMode = mode;
         int width = 0;
         int connectedCount = 0;
@@ -2041,14 +2041,14 @@ LiveGraphEngine::compile(const graph::NodeGraph &graphDocument,
           const auto channels = compiledSlotChannels(source, extract);
           if (channels < 1)
             return failure(LiveGraphErrorCode::invalidShape, node.id,
-                           "Merge inputs must have positive channel counts");
+                           "Utility inputs must have positive channel counts");
           if (mode == static_cast<int>(MergeMode::concatenate)) {
             width += channels;
           } else if (connectedCount == 0) {
             width = channels;
           } else if (!channelsAreBroadcastCompatible(channels, width)) {
             return failure(LiveGraphErrorCode::invalidShape, node.id,
-                           "Merge requires connected inputs to share a channel "
+                           "Utility requires connected inputs to share a channel "
                            "count, or broadcast from 1");
           } else {
             width = std::max(width, channels);
@@ -2059,7 +2059,7 @@ LiveGraphEngine::compile(const graph::NodeGraph &graphDocument,
           width = 1;
         if (width < 1)
           return failure(LiveGraphErrorCode::invalidShape, node.id,
-                         "Merge output channels must be positive");
+                         "Utility output channels must be positive");
         element.outputChannels = width;
         break;
       }

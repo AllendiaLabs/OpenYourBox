@@ -429,7 +429,7 @@ def build_module(
                     cond_dim,
                 )
             )
-        elif element_type in {"merge", "sum", "multiply"}:
+        elif element_type in {"utility", "merge", "sum", "multiply"}:
             raise ValueError("mixer elements cannot be trained by this worker")
 
     return ConditionedSequential(modules, cond_dim) if modules else nn.Identity()

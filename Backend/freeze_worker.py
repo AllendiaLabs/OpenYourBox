@@ -491,7 +491,7 @@ def build_module(
             modules.append(module)
             if cond_dim > 0:
                 has_conditioned_tcn = True
-        elif element_type in {"merge", "sum", "multiply"}:
+        elif element_type in {"utility", "merge", "sum", "multiply"}:
             raise ValueError(
                 "mixer elements cannot be frozen by the linear freeze worker"
             )

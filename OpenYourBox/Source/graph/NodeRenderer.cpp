@@ -46,7 +46,7 @@ constexpr std::array<PaletteItem, 13> paletteItems{{
     {"BatchNorm1d", openyourbox::graph::NodeType::batchNorm},
     {"Activation", openyourbox::graph::NodeType::activation},
     {"TCN", openyourbox::graph::NodeType::tcn},
-    {"Merge", openyourbox::graph::NodeType::merge},
+    {"Utility", openyourbox::graph::NodeType::merge},
     {"Knob Input", openyourbox::graph::NodeType::knobInput},
     {"XY Trackpad", openyourbox::graph::NodeType::xyTrackpad},
     {"PQMF Analysis", openyourbox::graph::NodeType::pqmfAnalysis},

@@ -695,6 +695,84 @@ int main() {
                      "an unused merge multiply input must contribute ones");
   }
 
+  openyourbox::graph::NodeGraph utilityGraph;
+  const auto utilityInput = utilityGraph.addNode(
+      openyourbox::graph::NodeType::audioInput, {0.0f, 0.0f});
+  const auto utilityNodeId = utilityGraph.addNode(
+      openyourbox::graph::NodeType::merge, {180.0f, 0.0f});
+  const auto utilityOutput = utilityGraph.addNode(
+      openyourbox::graph::NodeType::audioOutput, {360.0f, 0.0f});
+  const auto *utilityNode = utilityGraph.findNode(utilityNodeId);
+  passed &= expect(utilityNode != nullptr && utilityNode->label == "Utility" &&
+                       utilityNode->inputs.size() == 2,
+                   "a new Utility element must default to two inputs");
+  passed &= expect(utilityGraph.setProperty(utilityNodeId, "inputs", 1),
+                   "Utility must accept Inputs >= 1");
+  utilityNode = utilityGraph.findNode(utilityNodeId);
+  passed &= expect(utilityNode != nullptr && utilityNode->inputs.size() == 1,
+                   "Utility Inputs = 1 must leave a single input pin");
+  utilityGraph.setProperty(utilityNodeId, "inputs", 0);
+  utilityNode = utilityGraph.findNode(utilityNodeId);
+  passed &= expect(utilityNode != nullptr && utilityNode->inputs.size() == 1,
+                   "Utility Inputs below 1 must clamp to one pin");
+  passed &= expect(
+      utilityGraph
+          .connect(utilityGraph.findNode(utilityInput)->outputs.front().id,
+                   utilityGraph.findNode(utilityNodeId)->inputs.front().id)
+          .accepted,
+      "a one-input Utility must accept a connection");
+  passed &= expect(
+      utilityGraph
+          .connect(utilityGraph.findNode(utilityNodeId)->outputs.front().id,
+                   utilityGraph.findNode(utilityOutput)->inputs.front().id)
+          .accepted,
+      "a one-input Utility must connect to Audio Output");
+  const auto utilityCompiled = LiveGraphEngine::compile(utilityGraph, options);
+  const auto utilityRuntime =
+      LiveGraphEngine::prepare(utilityCompiled.snapshot, error);
+  passed &= expect(utilityCompiled.succeeded() && utilityRuntime != nullptr,
+                   "a one-input Utility must compile as a passthrough");
+  if (utilityRuntime != nullptr) {
+    auto ones = torch::ones({1, 2, 8}, torch::kFloat32);
+    const auto passedThrough = utilityRuntime->processTensor(ones);
+    passed &= expect(torch::equal(passedThrough, ones),
+                     "a one-input Utility must pass its connected input through");
+  }
+
+  auto utilityTree = utilityGraph.toValueTree();
+  bool persistedUtilityType = false;
+  for (const auto child : utilityTree) {
+    if (child.hasType("Node") && child["type"].toString() == "utility")
+      persistedUtilityType = true;
+  }
+  passed &= expect(persistedUtilityType,
+                   "Utility must persist as type utility");
+  for (int index = 0; index < utilityTree.getNumChildren(); ++index) {
+    auto child = utilityTree.getChild(index);
+    if (!child.hasType("Node") || child["type"].toString() != "utility")
+      continue;
+    child.setProperty("type", "merge", nullptr);
+    child.setProperty("label", "Merge", nullptr);
+    for (int propertyIndex = 0; propertyIndex < child.getNumChildren();
+         ++propertyIndex) {
+      auto property = child.getChild(propertyIndex);
+      if (!property.hasType("Property") ||
+          property["key"].toString() != "inputs")
+        continue;
+      property.setProperty("minimum", 2, nullptr);
+      property.setProperty("value", 1, nullptr);
+    }
+  }
+  openyourbox::graph::NodeGraph restoredUtility;
+  passed &= expect(restoredUtility.restoreFromValueTree(utilityTree),
+                   "legacy merge documents must load as Utility");
+  const auto *restoredUtilityNode = restoredUtility.findNode(utilityNodeId);
+  passed &= expect(
+      restoredUtilityNode != nullptr && restoredUtilityNode->label == "Utility" &&
+          restoredUtility.setProperty(utilityNodeId, "inputs", 1) &&
+          restoredUtility.findNode(utilityNodeId)->inputs.size() == 1,
+      "loaded Merge nodes must rename to Utility and allow Inputs >= 1");
+
   openyourbox::graph::NodeGraph orphanGraph;
   const auto orphanInput = orphanGraph.addNode(
       openyourbox::graph::NodeType::audioInput, {0.0f, 0.0f});
