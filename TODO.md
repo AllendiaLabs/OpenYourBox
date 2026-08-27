@@ -45,3 +45,5 @@
 - [ ] parameters should accept simple expressions of i, i being the index in the copies list, or if 1 copy or not in group: i is always 0. accept ()+-*^
 
 - [ ] add depthwise to TCN. and to conv1d? what is it exactly? like groups?
+
+- [ ] add mod sigmoid?
