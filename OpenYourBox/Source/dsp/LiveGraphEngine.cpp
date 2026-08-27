@@ -18,6 +18,7 @@
 #include <optional>
 #include <queue>
 #include <stdexcept>
+#include <vector>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -112,7 +113,7 @@ struct CompiledElement {
   torch::Tensor latentMean;
   /** @brief Compactness PCA `[latent, latent]`. */
   torch::Tensor latentPca;
-  /** @brief Cumulative explained variance `[latent]`. */
+  /** @brief Linear singular-value cumulative ratios `[latent]`. */
   torch::Tensor cumulativeVariance;
   /** @brief Host Audio Input/Output channel mode when type is fixed I/O. */
   openyourbox::graph::HostIoMode hostIoMode =
@@ -351,12 +352,16 @@ void randomizeElementWeights(CompiledElement &element, std::int32_t seed) {
     element.weights.push_back(torch::ones({channels}));
     break;
   }
-  case openyourbox::graph::NodeType::variationalBottleneck:
+  case openyourbox::graph::NodeType::variationalBottleneck: {
+    const auto latent = std::max(1, element.outputChannels);
+    const auto groupedIn =
+        std::max(1, element.inputChannels /
+                         openyourbox::graph::variationalBottleneckGroups);
+    const auto kernel = std::max(1, element.kernelSize);
     element.weights.push_back(
-        makeWeight(element.outputChannels, element.inputChannels, 1, state));
-    element.weights.push_back(
-        makeWeight(element.outputChannels, element.inputChannels, 1, state));
+        makeWeight(2 * latent, groupedIn, kernel, state));
     break;
+  }
   case openyourbox::graph::NodeType::noiseSynthesizer:
     element.weights.push_back(makeWeight(
         std::max(1, element.kernelSize), element.inputChannels, 1, state));
@@ -1233,7 +1238,7 @@ void LiveGraphRuntime::executeElement(std::size_t index,
         if (found != controls->fidelityByNodeId.end())
           fidelity = found->second;
       }
-      if (latent.defined())
+      if (latent.defined() && kernel->compactnessReady())
         latent = VariationalBottleneck::applyFidelity(
             latent, fidelity, kernel->compactnessMean(), kernel->compactnessPca(),
             kernel->compactnessCumulative());
@@ -1283,10 +1288,13 @@ void LiveGraphRuntime::executeElement(std::size_t index,
       if (found != controls->fidelityByNodeId.end())
         fidelity = found->second;
     }
-    output = VariationalBottleneck::encode(
-        upstream, element.weights[0], element.weights[1], fidelity,
-        element.compactnessReady, element.latentMean, element.latentPca,
-        element.cumulativeVariance);
+    const auto historyLength =
+        static_cast<std::int64_t>(element.receptiveField - 1);
+    auto extended =
+        extendCausalInput(upstream, runtime.histories[index], historyLength);
+    output = VariationalBottleneck::encodeMean(
+        extended, element.weights.front(), fidelity, element.compactnessReady,
+        element.latentMean, element.latentPca, element.cumulativeVariance);
     break;
   }
   case openyourbox::graph::NodeType::noiseSynthesizer:
@@ -2142,16 +2150,53 @@ LiveGraphEngine::compile(const graph::NodeGraph &graphDocument,
       case NodeType::variationalBottleneck: {
         int latent = graph::defaultLatentSize;
         readProperty(node, "latent_size", latent);
+        if (graph::variationalBottleneckLatentIsError(latent))
+          return failure(LiveGraphErrorCode::invalidGraph, node.id,
+                         graph::variationalBottleneckLatentMessage(latent));
+        if (graph::variationalBottleneckChannelIsError(element.inputChannels))
+          return failure(
+              LiveGraphErrorCode::invalidGraph, node.id,
+              graph::variationalBottleneckChannelMessage(element.inputChannels));
+        int kernel = graph::defaultBottleneckKernelSize;
+        readProperty(node, "kernel_size", kernel);
+        element.kernelSize = std::max(1, kernel);
         element.outputChannels = std::max(1, latent);
+        element.receptiveField =
+            static_cast<std::uint64_t>(element.kernelSize);
         element.randomizable = true;
         readFloatProperty(node, "fidelity", element.fidelityPercent);
         element.fidelityPercent = graph::clampFidelity(
             node.fidelityPercent > 0.0f ? node.fidelityPercent
                                         : element.fidelityPercent);
+        element.compactnessReady = node.compactnessReady;
+        const auto copyBuffer = [](const std::vector<float> &values,
+                                   const std::vector<std::int64_t> &shape) {
+          if (values.empty())
+            return torch::Tensor{};
+          auto tensor = torch::from_blob(
+              const_cast<float *>(values.data()), shape,
+              torch::TensorOptions().dtype(torch::kFloat32));
+          return tensor.clone();
+        };
+        element.latentMean = copyBuffer(
+            node.latentMean, {static_cast<std::int64_t>(node.latentMean.size())});
+        if (!node.latentPca.empty() &&
+            node.latentPca.size() ==
+                static_cast<std::size_t>(element.outputChannels) *
+                    static_cast<std::size_t>(element.outputChannels))
+          element.latentPca = copyBuffer(
+              node.latentPca,
+              {static_cast<std::int64_t>(element.outputChannels),
+               static_cast<std::int64_t>(element.outputChannels)});
+        element.cumulativeVariance = copyBuffer(
+            node.cumulativeVariance,
+            {static_cast<std::int64_t>(node.cumulativeVariance.size())});
+        const auto groupedIn = static_cast<std::uint64_t>(std::max(
+            1, element.inputChannels / graph::variationalBottleneckGroups));
         element.parameterCount = saturatedMultiply(
-            2ull, saturatedMultiply(
-                      static_cast<std::uint64_t>(element.outputChannels),
-                      static_cast<std::uint64_t>(element.inputChannels)));
+            static_cast<std::uint64_t>(2 * element.outputChannels),
+            saturatedMultiply(groupedIn,
+                              static_cast<std::uint64_t>(element.kernelSize)));
         randomizeElementWeights(element, node.seed);
         break;
       }
@@ -2266,7 +2311,8 @@ LiveGraphEngine::prepare(std::shared_ptr<const LiveGraphSnapshot> snapshot,
            element.type == graph::NodeType::blackBox ||
            element.type == graph::NodeType::rateConv ||
            element.type == graph::NodeType::pqmfAnalysis ||
-           element.type == graph::NodeType::pqmfSynthesis) &&
+           element.type == graph::NodeType::pqmfSynthesis ||
+           element.type == graph::NodeType::variationalBottleneck) &&
           element.receptiveField > 1) {
         runtime->histories[index] = torch::zeros(
             {1, element.inputChannels,

@@ -15,6 +15,7 @@ Validate reference-parity bottleneck behavior after implementation. Assumes spec
 3. **Expect**: `Kernel Size = 5`, `Latent = 128`.
 4. Trace encoder → bottleneck: upstream channel count **even** (layout default satisfies).
 
+**Automated**: `Tests/LiveGraphEngineTests.cpp` layout kernel default.
 **Fail if**: kernel defaults to 3 or bottleneck uses 1×1-only weights in inspector.
 
 ## 2. Shape gate (odd channels)
@@ -24,12 +25,16 @@ Validate reference-parity bottleneck behavior after implementation. Assumes spec
 
 **Expect**: Red cable / tooltip — even channel count required.
 
+**Automated**: `Tests/LiveGraphEngineTests.cpp` odd-channel rejection.
+
 ## 3. Live mean-only (untrained)
 
 1. Play audio through the layout (random weights).
 2. Capture two consecutive encode outputs with identical input (debug hook or test harness).
 
 **Expect**: Bit-identical latent outputs (no sampling noise).
+
+**Automated**: `Tests/VariationalBottleneckTests.cpp` and live-graph deterministic encode.
 
 ## 4. Reconstruction train + validation PCA
 
@@ -44,12 +49,16 @@ Validate reference-parity bottleneck behavior after implementation. Assumes spec
 - Fidelity inactive / full width
 - Live audio still deterministic (μ-only)
 
+**Automated**: `Tests/test_train_worker.py` reconstruction export + compactness payload.
+
 ## 5. Fidelity sweep (post-train)
 
 1. After success auto-load (Gold), sweep fidelity **100 → 50**.
 2. Listen to forward reconstruction.
 
 **Expect**: Audible coarsening at lower fidelity; monotonic effective rank (debug log if available).
+
+**Automated**: `Tests/test_train_worker.py` linear singular-value rank; `Tests/VariationalBottleneckTests.cpp` `keptRank`.
 
 ## 6. Unfreeze buffer parity
 
@@ -58,6 +67,8 @@ Validate reference-parity bottleneck behavior after implementation. Assumes spec
 3. Repeat fidelity sweep on Blue bottleneck.
 
 **Expect**: Same qualitative behavior as Gold at same fidelity setting.
+
+**Covered by**: Unfreeze copies PCA tensors from the Gold `.pt` onto the Blue bottleneck.
 
 ## 7. Worker vs live sampling (automated)
 
@@ -70,7 +81,7 @@ python3 -m pytest Tests/test_train_worker.py -k "bottleneck or compactness or sp
 ```
 
 **Expect**:
-- Train forward ≠ eval forward for same module/weights
+- Train forward ≠ eval forward for the same module/weights
 - Split 98/2 reproducible with seed 42
 - Val paths excluded from stage-1 train sampler
 
@@ -82,7 +93,7 @@ Compare:
 - Eval μ latent histograms (qualitative)
 - Fidelity 50% vs 90% rank direction
 
-**Pass**: Practitioner sign-off per SC-007 (no bit-exact weights required).
+**Pass**: Practitioner sign-off per SC-007 (no bit-exact weights required). Not executed in this implement pass.
 
 ## Contracts
 

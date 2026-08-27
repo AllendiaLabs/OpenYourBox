@@ -554,6 +554,8 @@ def compile_request(request: dict[str, Any], artifact_dir: Path) -> dict[str, An
             artifact_dir.mkdir(parents=True, exist_ok=True)
             artifact_path = (artifact_dir / f"{request_id}.pt").resolve()
             train_worker._export_rave_scripted(module, input_channels, artifact_path)
+            # VariationalBottleneckLayer lives in train_worker (acids-rave v1
+            # grouped head, softplus variance, eval μ-only).
             scripted = torch.jit.load(str(artifact_path))
             output = scripted(example)
         elif conditioned:

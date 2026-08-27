@@ -512,7 +512,10 @@ class TrainWorkerMlflowTests(unittest.TestCase):
                 {
                     "id": 2,
                     "type": "variational_bottleneck",
-                    "properties": [{"key": "latent_size", "value": 4}],
+                    "properties": [
+                        {"key": "latent_size", "value": 4},
+                        {"key": "kernel_size", "value": 5},
+                    ],
                 },
                 {
                     "id": 3,
@@ -580,6 +583,70 @@ class TrainWorkerMlflowTests(unittest.TestCase):
             self.assertEqual(encoded.dim(), 3)
             self.assertEqual(decoded.dim(), 3)
             self.assertEqual(forwarded.dim(), 3)
+            compactness = result.get("compactness", {})
+            self.assertIn("ready", compactness)
+            self.assertIn("status", compactness)
+
+
+class VariationalBottleneckParityTests(unittest.TestCase):
+    """RAVE variational-head parity against acids-rave v1 rules."""
+
+    def test_train_forward_differs_from_eval(self) -> None:
+        """Worker sampling is active only in train mode."""
+        torch.manual_seed(0)
+        layer = train_worker.VariationalBottleneckLayer(8, 4, kernel_size=5)
+        samples = torch.randn(2, 8, 16)
+        layer.train()
+        train_a = layer(samples)
+        train_b = layer(samples)
+        layer.eval()
+        eval_a = layer(samples)
+        eval_b = layer(samples)
+        self.assertFalse(torch.equal(train_a, train_b))
+        self.assertTrue(torch.equal(eval_a, eval_b))
+        self.assertTrue(torch.equal(eval_a, layer.encode_mean(samples)))
+
+    def test_split_reproducible_seed_42(self) -> None:
+        """98/2 split with seed 42 is deterministic and caps validation at 1000."""
+        paths = [f"clip-{index}" for index in range(200)]
+        train_a, val_a = train_worker.split_reconstruction_corpus(paths)
+        train_b, val_b = train_worker.split_reconstruction_corpus(paths)
+        self.assertEqual(train_a, train_b)
+        self.assertEqual(val_a, val_b)
+        self.assertEqual(len(val_a), 4)
+        self.assertEqual(len(train_a), 196)
+        huge = [f"clip-{index}" for index in range(80_000)]
+        _train, val_huge = train_worker.split_reconstruction_corpus(huge)
+        self.assertEqual(len(val_huge), 1000)
+
+    def test_train_sampler_excludes_val_paths(self) -> None:
+        """Stage-1 sampling draws only from the train split."""
+        paths = [f"p{index}" for index in range(50)]
+        train_paths, val_paths = train_worker.split_reconstruction_corpus(paths)
+        self.assertTrue(set(train_paths).isdisjoint(set(val_paths)))
+        self.assertEqual(sorted(train_paths + val_paths), sorted(paths))
+
+    def test_compactness_uses_linear_singular_values(self) -> None:
+        """Fidelity rank uses cumulative singular values, not s²."""
+        torch.manual_seed(1)
+        rows = torch.randn(32, 4)
+        _mean, _pca, cumulative = train_worker.compute_compactness(rows)
+        self.assertEqual(tuple(cumulative.shape), (4,))
+        self.assertGreaterEqual(float(cumulative[-1]), 0.999)
+        keep_high = int((cumulative >= 0.9).nonzero()[0]) + 1
+        keep_low = int((cumulative >= 0.5).nonzero()[0]) + 1
+        self.assertGreaterEqual(keep_high, keep_low)
+
+    def test_eval_mu_not_sampled_z(self) -> None:
+        """Validation μ collection must not use reparameterized samples."""
+        torch.manual_seed(2)
+        layer = train_worker.VariationalBottleneckLayer(8, 4, kernel_size=5)
+        samples = torch.randn(1, 8, 32)
+        layer.train()
+        sampled = layer(samples)
+        layer.eval()
+        mu = layer.encode_mean(samples)
+        self.assertFalse(torch.allclose(sampled, mu))
 
 
 if __name__ == "__main__":

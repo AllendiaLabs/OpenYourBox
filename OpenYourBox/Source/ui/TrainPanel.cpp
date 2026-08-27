@@ -172,6 +172,14 @@ void TrainPanel::render(const train::TrainCoordinator &coordinator,
   ImGui::Text("Step %d / %d", progress.step, progress.totalSteps);
   if (progress.stage.empty() == false)
     ImGui::Text("Stage: %s", progress.stage.c_str());
+  if (objective == graph::TrainObjective::reconstruction ||
+      progress.objective == "reconstruction") {
+    if (progress.compactnessReady)
+      ImGui::Text("Compactness: ready (%d val segments)",
+                  progress.compactnessValidationSegments);
+    else
+      ImGui::TextDisabled("Compactness not ready");
+  }
   ImGui::Text("Loss %.4f   Best %.4f   LR %.2e", progress.loss,
               progress.bestLoss > 0.0 ? progress.bestLoss : progress.loss,
               progress.learningRate);

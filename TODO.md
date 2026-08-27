@@ -28,8 +28,11 @@
 
 
 - [ ] check rf same as in rave paper
-- [ ] update pin shapes with list when multiple copies in group
-- [ ] oyb should reproduce acids-ircam rave code more faithfully, starting with:
-  - [ ] add softplus to vae and perform exactly the same parameterization/sampling
-  - [ ] kernel size of variational convs should be 5 (but add as bottleneck parameter for flexibility). and instead of 2 convs that see all input channels, use grouped head: Conv 1024→256, k=5, groups=2 (or equivalent channel split)
-  - [ ] PCA on μ in eval mode over a validation pass, use linear singular-value cumulative sum for r_f, and load compactness buffers onto the live bottleneck after Unfreeze.
+- [x] update pin shapes with list when multiple copies in group
+- [x] oyb should reproduce acids-ircam rave code more faithfully, starting with (`specs/009-rave-vae-parity/`):
+  - [x] add softplus to vae and perform exactly the same parameterization/sampling
+  - [x] kernel size of variational convs should be 5 (but add as bottleneck parameter for flexibility). and instead of 2 convs that see all input channels, use grouped head: Conv 1024→256, k=5, groups=2 (or equivalent channel split)
+  - [x] PCA on μ in eval mode over a validation pass, use linear singular-value cumulative sum for r_f, and load compactness buffers onto the live bottleneck after Unfreeze.
+
+
+- [ ] add leakyrelu negative slope parameter, defaults to .01, rave mostly uses 0.2

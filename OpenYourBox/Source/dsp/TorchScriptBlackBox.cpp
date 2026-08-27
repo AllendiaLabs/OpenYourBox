@@ -178,6 +178,9 @@ public:
       if (module.hasattr("cumulative_variance"))
         cumulativeVariance =
             module.attr("cumulative_variance").toTensor().contiguous();
+      if (module.hasattr("compactness_ready"))
+        compactnessBuffersReady =
+            module.attr("compactness_ready").toTensor().item<float>() > 0.5f;
     } catch (const std::exception &) {
     }
   }
@@ -246,6 +249,10 @@ public:
     return cumulativeVariance;
   }
 
+  bool compactnessReady() const noexcept override {
+    return compactnessBuffersReady;
+  }
+
 private:
   /**
    * @brief Returns the control time length the artifact will accept.
@@ -276,6 +283,8 @@ private:
   torch::Tensor latentPca;
   /** @brief Optional cumulative variance loaded from the artifact. */
   torch::Tensor cumulativeVariance;
+  /** @brief True when the artifact marked compactness PCA as ready. */
+  bool compactnessBuffersReady = false;
 };
 } // namespace
 

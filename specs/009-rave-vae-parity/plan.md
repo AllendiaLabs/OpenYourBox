@@ -4,7 +4,7 @@
 
 **Input**: Feature specification from `specs/009-rave-vae-parity/spec.md`
 
-**Status**: Design complete. Ready for `/speckit-tasks`.
+**Status**: Implementation complete.
 
 Refine the existing RAVE variational bottleneck (spec 005) to match **acids-ircam RAVE** rules:
 

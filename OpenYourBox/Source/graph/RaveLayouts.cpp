@@ -58,7 +58,11 @@ std::uint64_t raveNodeDelaySamples(const GraphNode &node) {
     return static_cast<std::uint64_t>(kernel - 1) * static_cast<std::uint64_t>(dilation) *
            static_cast<std::uint64_t>(stride);
   }
-  case NodeType::variationalBottleneck:
+  case NodeType::variationalBottleneck: {
+    const auto kernel =
+        std::max(1, readInt(node, "kernel_size", defaultBottleneckKernelSize));
+    return static_cast<std::uint64_t>(kernel - 1);
+  }
   case NodeType::noiseSynthesizer:
   case NodeType::batchNorm:
   case NodeType::activation:
@@ -142,6 +146,7 @@ std::string insertRaveLayout(NodeGraph &graph, RaveLayoutId layout,
 
   const auto bottleneckId = place(NodeType::variationalBottleneck);
   graph.setProperty(bottleneckId, "latent_size", defaultLatentSize);
+  graph.setProperty(bottleneckId, "kernel_size", defaultBottleneckKernelSize);
 
   std::vector<std::int32_t> decoder;
   const int upStrides[4] = {2, 4, 4, 4};

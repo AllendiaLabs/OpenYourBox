@@ -851,9 +851,16 @@ void NodeRenderer::renderNode(NodeGraph &graph, GraphNode &node,
   if (frozen)
     ImGui::BeginDisabled();
   for (auto &property : node.properties) {
-    const bool liveOnGold = frozen && property.key == "fidelity";
+    const bool fidelityLocked =
+        property.key == "fidelity" && !node.compactnessReady &&
+        (node.type == NodeType::variationalBottleneck ||
+         node.type == NodeType::blackBox);
+    const bool liveOnGold =
+        frozen && property.key == "fidelity" && !fidelityLocked;
     if (liveOnGold)
       ImGui::EndDisabled();
+    if (!frozen && fidelityLocked)
+      ImGui::BeginDisabled();
     ImGui::PushID(property.key.c_str());
     auto value = property.value;
     bool changed = false;
@@ -970,6 +977,10 @@ void NodeRenderer::renderNode(NodeGraph &graph, GraphNode &node,
         }
       }
       ImGui::PopID();
+      if (fidelityLocked)
+        ImGui::TextDisabled("Compactness not ready");
+      if (!frozen && fidelityLocked)
+        ImGui::EndDisabled();
       if (liveOnGold)
         ImGui::BeginDisabled();
       continue;
@@ -1096,6 +1107,10 @@ void NodeRenderer::renderNode(NodeGraph &graph, GraphNode &node,
       }
     }
     ImGui::PopID();
+    if (fidelityLocked)
+      ImGui::TextDisabled("Compactness not ready");
+    if (!frozen && fidelityLocked)
+      ImGui::EndDisabled();
     if (liveOnGold)
       ImGui::BeginDisabled();
   }
@@ -1247,7 +1262,8 @@ void NodeRenderer::renderNode(NodeGraph &graph, GraphNode &node,
 
   for (const auto &pin : node.outputs) {
     ed::BeginPin(ed::PinId(editorIdentifier(pin.id)), ed::PinKind::Output);
-    const auto shapeLabel = pin.shape.displayLabel();
+    const auto shapeLabel =
+        formatShapeCopyList(pin.copyShapes, pin.shape);
     if (!shapeLabel.empty())
       ImGui::Text("%s (%s) ->", pin.label.c_str(), shapeLabel.c_str());
     else
@@ -1395,12 +1411,20 @@ void NodeRenderer::renderGroup(NodeGraph &graph, GraphGroup &group,
     else
       outputs.push_back(port);
   }
-  const auto drawPort = [](const GroupBoundaryPort &port) {
+  const auto drawPort = [&graph](const GroupBoundaryPort &port) {
     const auto pinId = collapsedGroupPinId(port.memberPinId);
     ed::BeginPin(ed::PinId(editorIdentifier(pinId)),
                  port.kind == PinKind::input ? ed::PinKind::Input
                                              : ed::PinKind::Output);
-    const auto shapeLabel = port.shape.displayLabel();
+    // Group outputs leave the serial stack after the last copy; inputs enter
+    // at the first copy (member pin.shape / copyShapes.front()).
+    ShapeSignature displayShape = port.shape;
+    if (port.kind == PinKind::output) {
+      if (const auto *memberPin = graph.findPin(port.memberPinId);
+          memberPin != nullptr && !memberPin->copyShapes.empty())
+        displayShape = memberPin->copyShapes.back();
+    }
+    const auto shapeLabel = displayShape.displayLabel();
     if (port.kind == PinKind::input) {
       if (!shapeLabel.empty())
         ImGui::Text("<- %s (%s)", port.label.c_str(), shapeLabel.c_str());

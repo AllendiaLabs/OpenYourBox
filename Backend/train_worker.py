@@ -8,6 +8,7 @@ import base64
 import json
 import math
 import os
+import random
 import shutil
 import struct
 import sys
@@ -392,6 +393,8 @@ def _module_receptive_field(module: nn.Module) -> int:
     for layer in module.modules():
         if isinstance(layer, CausalConv1d):
             field += layer.left_padding
+        if isinstance(layer, VariationalBottleneckLayer):
+            field += layer.left_padding
         if isinstance(layer, RateConvLayer):
             field += max(0, int(layer.kernel_size) - 1) * int(layer.dilation)
     return field
@@ -554,34 +557,75 @@ def _make_conv_transpose(
 
 
 class VariationalBottleneckLayer(nn.Module):
-    """Reparameterized latent head."""
+    """Acids-rave v1 grouped variational head with softplus variance.
 
-    def __init__(self, in_channels: int, latent_size: int) -> None:
-        """Create mean/log-variance 1x1 projections."""
+    Geometry matches the original RAVE encoder tail: causal ``Conv1d`` from
+    even ``in_channels`` to ``2 * latent_size`` with ``groups=2``, kernel
+    default 5. Group 0 is μ; group 1 is the variance pre-activation. Live and
+    eval paths return μ only; ``train()`` samples ``z = μ + σ ⊙ ε``.
+    """
+
+    softplus_eps = 1e-4
+
+    def __init__(
+        self, in_channels: int, latent_size: int, kernel_size: int = 5
+    ) -> None:
+        """Create the grouped causal mean/variance convolution."""
         super().__init__()
-        self.mean = nn.Conv1d(in_channels, latent_size, 1, bias=False)
-        self.logvar = nn.Conv1d(in_channels, latent_size, 1, bias=False)
-        self.latent_size = latent_size
+        if in_channels % 2 != 0:
+            raise ValueError(
+                "variational bottleneck requires an even channel count "
+                "(grouped mean/variance head)."
+            )
+        if latent_size % 2 != 0:
+            raise ValueError(
+                "variational bottleneck latent size must be even "
+                "(grouped mean/variance head)."
+            )
+        self.latent_size = int(latent_size)
+        self.kernel_size = max(1, int(kernel_size))
+        self.left_padding = self.kernel_size - 1
+        self.head = nn.Conv1d(
+            in_channels,
+            2 * self.latent_size,
+            self.kernel_size,
+            groups=2,
+            bias=False,
+        )
         self.last_mean: torch.Tensor | None = None
-        self.last_logvar: torch.Tensor | None = None
+        self.last_std: torch.Tensor | None = None
+
+    def _project(self, samples: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """Return ``(μ, σ)`` from the grouped causal convolution."""
+        padded = functional.pad(samples, (self.left_padding, 0))
+        projected = self.head(padded)
+        mean, scale = torch.split(projected, self.latent_size, 1)
+        std = functional.softplus(scale) + self.softplus_eps
+        return mean, std
+
+    def encode_mean(self, samples: torch.Tensor) -> torch.Tensor:
+        """Return μ only (eval / live / validation-PCA path)."""
+        mean, std = self._project(samples)
+        self.last_mean = mean
+        self.last_std = std
+        return mean
 
     def forward(self, samples: torch.Tensor) -> torch.Tensor:
-        """Sample z = μ + σ ⊙ ε while training; use μ at eval."""
-        mean = self.mean(samples)
-        logvar = self.logvar(samples).clamp(-8.0, 8.0)
+        """Sample ``z = μ + σ ⊙ ε`` while training; return μ at eval."""
+        mean, std = self._project(samples)
         self.last_mean = mean
-        self.last_logvar = logvar
+        self.last_std = std
         if self.training:
-            return mean + torch.exp(0.5 * logvar) * torch.randn_like(mean)
+            return mean + std * torch.randn_like(mean)
         return mean
 
     def kl(self) -> torch.Tensor:
-        """Return the closed-form unit-Gaussian KL of the last forward."""
-        if self.last_mean is None or self.last_logvar is None:
+        """Return the acids-rave unit-Gaussian KL of the last forward."""
+        if self.last_mean is None or self.last_std is None:
             return torch.zeros(())
-        return -0.5 * (
-            1.0 + self.last_logvar - self.last_mean.square() - self.last_logvar.exp()
-        ).mean()
+        var = self.last_std * self.last_std
+        logvar = torch.log(var)
+        return (self.last_mean * self.last_mean + var - logvar - 1).sum(1).mean()
 
 
 class NoiseSynthLayer(nn.Module):
@@ -622,6 +666,7 @@ class RaveGraphModule(nn.Module):
         self.latent_mean: torch.Tensor | None = None
         self.latent_pca: torch.Tensor | None = None
         self.cumulative_variance: torch.Tensor | None = None
+        self.compactness_ready = False
         self.fidelity = 0.99
 
     def _run(self, audio: torch.Tensor, stop_at: int | None = None, start_from: tuple[int, torch.Tensor] | None = None) -> torch.Tensor:
@@ -720,7 +765,8 @@ def build_rave_graph_module(
             channels_by_id[node_id] = in_ch
         elif element_type == "variational_bottleneck":
             latent = int(properties.get("latent_size", 128))
-            layers[node_id] = VariationalBottleneckLayer(in_ch, latent)
+            kernel = int(properties.get("kernel_size", 5))
+            layers[node_id] = VariationalBottleneckLayer(in_ch, latent, kernel)
             channels_by_id[node_id] = latent
             bottleneck_id = node_id
         elif element_type == "noise_synthesizer":
@@ -776,6 +822,33 @@ def flatten_reconstruction_clips(capture_set: dict[str, Any]) -> list[str]:
         if path:
             paths.append(path)
     return paths
+
+
+def split_reconstruction_corpus(
+    paths: list[str],
+    train_percent: int = 98,
+    seed: int = 42,
+    max_val: int = 1000,
+) -> tuple[list[str], list[str]]:
+    """Split reconstruction paths 98/2 with seed 42 and a 1000-clip val cap.
+
+    Matches acids-rave v1 ``random_split(..., generator seed 42)`` plus the
+    later ``max_residual=1000`` cap. At least one train clip is kept whenever
+    the corpus is non-empty so stage 1 can still run.
+    """
+    shuffled = list(paths)
+    rng = random.Random(int(seed))
+    rng.shuffle(shuffled)
+    count = len(shuffled)
+    if count == 0:
+        return [], []
+    train_percent = int(train_percent)
+    n_val = min(int(max_val), (100 - train_percent) * count // 100)
+    if n_val < 1 and count >= 2:
+        n_val = 1
+    if n_val >= count:
+        n_val = count - 1
+    return shuffled[n_val:], shuffled[:n_val]
 
 
 def mapping_rejects_unpaired(capture_set: dict[str, Any]) -> bool:
@@ -852,9 +925,8 @@ def compute_compactness(latents: torch.Tensor) -> tuple[torch.Tensor, torch.Tens
     mean = latents.mean(0)
     centered = latents - mean
     _, singular, right = torch.linalg.svd(centered, full_matrices=False)
-    variance = singular.square()
-    total = float(variance.sum().clamp_min(1e-8))
-    cumulative = torch.cumsum(variance, 0) / total
+    total = float(singular.sum().clamp_min(1e-8))
+    cumulative = torch.cumsum(singular, 0) / total
     return mean.detach(), right.detach(), cumulative.detach()
 
 
@@ -901,6 +973,9 @@ def _export_rave_scripted(module: RaveGraphModule, input_channels: int, path: Pa
         if module.cumulative_variance is not None
         else torch.linspace(1.0 / latent_size, 1.0, latent_size)
     )
+    ready_flag = torch.tensor(
+        1.0 if getattr(module, "compactness_ready", False) else 0.0
+    )
 
     class Wrapper(nn.Module):
         """TorchScript-friendly encode/decode/forward wrapper."""
@@ -911,6 +986,7 @@ def _export_rave_scripted(module: RaveGraphModule, input_channels: int, path: Pa
             self.register_buffer("latent_mean", mean)
             self.register_buffer("latent_pca", pca)
             self.register_buffer("cumulative_variance", cumulative)
+            self.register_buffer("compactness_ready", ready_flag)
 
         def encode(self, audio: torch.Tensor) -> torch.Tensor:
             return self.inner.encode(audio)
@@ -934,6 +1010,82 @@ def _export_rave_scripted(module: RaveGraphModule, input_channels: int, path: Pa
     temporary.replace(path)
 
 
+def _load_reconstruction_clips(
+    paths: list[str],
+) -> tuple[dict[str, torch.Tensor], int, int]:
+    """Load WAV paths to ``[1, C, T]`` tensors sharing a sample rate."""
+    loaded: dict[str, torch.Tensor] = {}
+    rate = None
+    channels = 1
+    for path in paths:
+        samples, sample_rate = read_wav(path)
+        if rate is None:
+            rate = sample_rate
+            channels = int(samples.shape[0])
+        elif sample_rate != rate:
+            raise ValueError("selected reconstruction clips mix sample rates")
+        if int(samples.shape[0]) != channels:
+            raise ValueError("selected reconstruction clips must share a channel count")
+        loaded[path] = samples.unsqueeze(0)
+    if rate is None:
+        raise ValueError("reconstruction train request contains no clips")
+    return loaded, int(rate), channels
+
+
+def _match_clip_channels(clips: dict[str, torch.Tensor], channels: int) -> dict[str, torch.Tensor]:
+    """Broadcast each stored clip to the host input width."""
+    return {path: _match_channels(tensor, channels) for path, tensor in clips.items()}
+
+
+def _sample_segment(clips: list[torch.Tensor], segment_length: int) -> torch.Tensor:
+    """Draw one random window from the train-split clips."""
+    clip = clips[int(torch.randint(0, len(clips), (1,)).item())]
+    length = min(int(clip.shape[-1]), max(64, int(segment_length)))
+    start = (
+        0
+        if clip.shape[-1] <= length
+        else int(torch.randint(0, clip.shape[-1] - length, (1,)).item())
+    )
+    return clip[..., start : start + length]
+
+
+def _collect_validation_mu(
+    module: RaveGraphModule, val_clips: list[torch.Tensor], segment_length: int
+) -> torch.Tensor | None:
+    """Stack eval-mode μ rows from every validation clip."""
+    if module.bottleneck_id is None or not val_clips:
+        return None
+    module.eval()
+    rows: list[torch.Tensor] = []
+    with torch.no_grad():
+        for clip in val_clips:
+            length = min(int(clip.shape[-1]), max(64, int(segment_length)))
+            start = 0
+            while start < clip.shape[-1]:
+                audio = clip[..., start : start + length]
+                if audio.shape[-1] < 8:
+                    break
+                latent = module.encode(audio)
+                rows.append(
+                    latent.permute(0, 2, 1).reshape(-1, latent.shape[1]).cpu()
+                )
+                if start + length >= clip.shape[-1]:
+                    break
+                start += length
+    if not rows:
+        return None
+    return torch.cat(rows, 0)
+
+
+def _compactness_payload(ready: bool, segments: int) -> dict[str, Any]:
+    """Build the train-IPC compactness object."""
+    return {
+        "ready": bool(ready),
+        "validation_segments": int(segments),
+        "status": "ready" if ready else "not_ready",
+    }
+
+
 def train_reconstruction(
     request: dict[str, Any], artifact_dir: Path, command_file: Path | None
 ) -> dict[str, Any]:
@@ -951,22 +1103,14 @@ def train_reconstruction(
     paths = flatten_reconstruction_clips(capture_set)
     if not paths:
         raise ValueError("reconstruction train request contains no clips")
-    clips: list[torch.Tensor] = []
-    rate = None
-    for path in paths:
-        samples, sample_rate = read_wav(path)
-        if rate is None:
-            rate = sample_rate
-        elif sample_rate != rate:
-            raise ValueError("selected reconstruction clips mix sample rates")
-        clips.append(samples.unsqueeze(0))
-    channels = clips[0].shape[1]
-    for clip in clips[1:]:
-        if clip.shape[1] != channels:
-            raise ValueError("selected reconstruction clips must share a channel count")
-    corpus = torch.cat(clips, dim=-1)
+    train_paths, val_paths = split_reconstruction_corpus(paths)
+    loaded, _rate, channels = _load_reconstruction_clips(paths)
     input_channels = max(1, int(options.get("host_input_channels", channels)))
-    corpus = _match_channels(corpus, input_channels)
+    loaded = _match_clip_channels(loaded, input_channels)
+    train_clips = [loaded[path] for path in train_paths if path in loaded]
+    val_clips = [loaded[path] for path in val_paths if path in loaded]
+    if not train_clips:
+        raise ValueError("reconstruction train split is empty")
     module = build_rave_graph_module(request["graph_fragment"], input_channels, 1)
     if module.bottleneck_id is None:
         raise ValueError("reconstruction requires a variational bottleneck")
@@ -983,7 +1127,8 @@ def train_reconstruction(
     last_loss = 0.0
     step = 0
     paused = False
-    compactness_latents: list[torch.Tensor] = []
+    compactness_ready = False
+    validation_segments = len(val_clips)
     while step < total_steps:
         command = _read_command(command_file)
         if command == "stop":
@@ -994,6 +1139,7 @@ def train_reconstruction(
         elif command == "resume":
             paused = False
         stage = "representation" if step < stage1_steps else "quality"
+        compactness = _compactness_payload(compactness_ready, validation_segments)
         if paused:
             _emit(
                 {
@@ -1004,13 +1150,17 @@ def train_reconstruction(
                     "stage": stage,
                     "objective": "reconstruction",
                     "loss": last_loss,
+                    "compactness": compactness,
                 }
             )
             time.sleep(0.05)
             continue
-        length = min(corpus.shape[-1], max(64, int(options.get("segment_length", 8192))))
-        start = 0 if corpus.shape[-1] <= length else int(torch.randint(0, corpus.shape[-1] - length, (1,)).item())
-        audio = corpus[..., start : start + length]
+        length = max(64, int(options.get("segment_length", 8192)))
+        if stage == "representation":
+            module.train()
+            audio = _sample_segment(train_clips, length)
+        else:
+            audio = _sample_segment(train_clips, length)
         reconstructed = module(audio)
         if reconstructed.shape[-1] != audio.shape[-1]:
             reconstructed = reconstructed[..., -audio.shape[-1] :]
@@ -1023,11 +1173,25 @@ def train_reconstruction(
             optimizer.step()
             if step == stage1_steps - 1:
                 _freeze_rave_encoder(module)
-                with torch.no_grad():
-                    latent = module.encode(audio)
-                    compactness_latents.append(
-                        latent.mean(-1).reshape(-1, latent.shape[1]).cpu()
-                    )
+                stacked = _collect_validation_mu(module, val_clips, length)
+                latent_size = 1
+                key = str(module.bottleneck_id)
+                if key in module.layers and isinstance(
+                    module.layers[key], VariationalBottleneckLayer
+                ):
+                    latent_size = max(1, int(module.layers[key].latent_size))
+                if stacked is not None and stacked.shape[0] >= latent_size:
+                    mean, pca, cumulative = compute_compactness(stacked)
+                    module.latent_mean = mean
+                    module.latent_pca = pca
+                    module.cumulative_variance = cumulative
+                    module.compactness_ready = True
+                    compactness_ready = True
+                    validation_segments = int(stacked.shape[0])
+                else:
+                    module.compactness_ready = False
+                    compactness_ready = False
+                module.train()
         else:
             real_score, _real_feats = discriminator.features(audio)
             fake_score, _ = discriminator.features(reconstructed.detach())
@@ -1056,22 +1220,14 @@ def train_reconstruction(
             "loss": last_loss,
             "best_loss": last_loss,
             "learning_rate": optimizer.param_groups[0]["lr"],
+            "compactness": _compactness_payload(compactness_ready, validation_segments),
         }
         if export_checkpoints and checkpoint_interval and step % checkpoint_interval == 0:
             _export_rave_scripted(module, input_channels, checkpoint_path)
-            module.train()
+            if stage == "representation":
+                module.train()
             event["artifact_path"] = str(checkpoint_path)
         _emit(event)
-    if compactness_latents:
-        stacked = torch.cat(compactness_latents, 0)
-    else:
-        with torch.no_grad():
-            fallback = module.encode(corpus[..., : min(corpus.shape[-1], 256)])
-            stacked = fallback.mean(-1).reshape(-1, fallback.shape[1]).cpu()
-    mean, pca, cumulative = compute_compactness(stacked)
-    module.latent_mean = mean
-    module.latent_pca = pca
-    module.cumulative_variance = cumulative
     _export_rave_scripted(module, input_channels, artifact_path)
     return {
         "request_id": request_id,
@@ -1083,6 +1239,7 @@ def train_reconstruction(
         "artifact_path": str(artifact_path),
         "objective": "reconstruction",
         "has_encode_decode": True,
+        "compactness": _compactness_payload(compactness_ready, validation_segments),
         "blackbox_metadata": {
             "origin": "train_autoload",
             "display_name": "Trained RAVE",
@@ -1093,9 +1250,7 @@ def train_reconstruction(
             "receptive_field_samples": _module_receptive_field(module),
             "conditioning": False,
             "methods": ["forward", "encode", "decode"],
-            "compactness": {
-                "ready": bool(compactness_latents),
-            },
+            "compactness": _compactness_payload(compactness_ready, validation_segments),
         },
     }
 

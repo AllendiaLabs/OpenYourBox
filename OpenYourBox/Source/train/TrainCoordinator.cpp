@@ -222,6 +222,15 @@ void TrainCoordinator::applyProgressObject(const juce::var &parsed) {
   progress.objective = jsonString(parsed, "objective");
   progress.hasEncodeDecode =
       static_cast<bool>(parsed.getProperty("has_encode_decode", false));
+  const auto compactness = parsed.getProperty("compactness", {});
+  if (compactness.isObject()) {
+    progress.compactnessReady =
+        static_cast<bool>(compactness.getProperty("ready", false));
+    progress.compactnessValidationSegments = static_cast<int>(
+        compactness.getProperty("validation_segments", 0));
+    progress.compactnessStatus =
+        compactness.getProperty("status", "not_ready").toString().toStdString();
+  }
   if (progress.errorMessage.empty())
     progress.errorMessage = jsonString(parsed, "message");
   if (!progress.artifactPath.empty())
@@ -239,6 +248,22 @@ void TrainCoordinator::applyProgressObject(const juce::var &parsed) {
         static_cast<int>(shape.getProperty("input_channels", 0));
     progress.outputChannels =
         static_cast<int>(shape.getProperty("output_channels", 0));
+    const auto metaCompactness = metadata.getProperty("compactness", {});
+    if (metaCompactness.isObject()) {
+      progress.compactnessReady =
+          static_cast<bool>(metaCompactness.getProperty(
+              "ready", progress.compactnessReady));
+      progress.compactnessValidationSegments = static_cast<int>(
+          metaCompactness.getProperty("validation_segments",
+                                      progress.compactnessValidationSegments));
+      const auto statusToken =
+          metaCompactness
+              .getProperty("status", juce::String(progress.compactnessStatus))
+              .toString()
+              .toStdString();
+      if (!statusToken.empty())
+        progress.compactnessStatus = statusToken;
+    }
   }
 
   {

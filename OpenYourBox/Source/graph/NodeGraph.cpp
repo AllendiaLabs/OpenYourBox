@@ -3,13 +3,17 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstring>
 #include <limits>
 #include <optional>
 #include <queue>
+#include <stdexcept>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
+
+#include <torch/script.h>
 
 namespace {
 void migrateLegacyMixerNode(openyourbox::graph::GraphNode &node,
@@ -18,6 +22,8 @@ void migrateLegacyMixerNode(openyourbox::graph::GraphNode &node,
 void normalizeMergeNodeProperties(openyourbox::graph::GraphNode &node);
 
 void refreshPropagatedPinShapes(openyourbox::graph::NodeGraph &graph);
+void refreshPropagatedPinShapesCore(openyourbox::graph::NodeGraph &graph);
+void refreshOutputCopyShapes(openyourbox::graph::NodeGraph &graph);
 
 /**
  * @brief Returns true when @p id is a member of @p group, including nested groups.
@@ -822,6 +828,95 @@ void normalizeHostIoProperties(openyourbox::graph::GraphNode &node) {
  *        Conv1D stride properties exist.
  * @param node Loaded or newly created convolution node.
  */
+void storeFloatVector(juce::ValueTree &tree, const char *key,
+                      const std::vector<float> &values) {
+  if (values.empty())
+    return;
+  juce::MemoryBlock block(values.data(), values.size() * sizeof(float));
+  tree.setProperty(key, block.toBase64Encoding(), nullptr);
+}
+
+void loadFloatVector(const juce::ValueTree &tree, const char *key,
+                     std::vector<float> &values) {
+  if (!tree.hasProperty(key))
+    return;
+  juce::MemoryBlock block;
+  if (!block.fromBase64Encoding(tree[key].toString()))
+    return;
+  const auto count = block.getSize() / sizeof(float);
+  values.resize(count);
+  if (count > 0)
+    std::memcpy(values.data(), block.getData(), count * sizeof(float));
+}
+
+void copyTensorToVector(const torch::Tensor &tensor, std::vector<float> &out) {
+  if (!tensor.defined() || tensor.numel() < 1) {
+    out.clear();
+    return;
+  }
+  auto cpu = tensor.contiguous().to(torch::kCPU).to(torch::kFloat32);
+  const auto *data = cpu.data_ptr<float>();
+  out.assign(data, data + cpu.numel());
+}
+
+void copyCompactnessFromArtifact(openyourbox::graph::GraphNode &node,
+                                 const std::string &path) {
+  using openyourbox::graph::clearCompactness;
+  if (path.empty()) {
+    clearCompactness(node);
+    return;
+  }
+  try {
+    auto module = torch::jit::load(path, torch::kCPU);
+    module.eval();
+    bool ready = false;
+    if (module.hasattr("compactness_ready"))
+      ready = module.attr("compactness_ready").toTensor().item<float>() > 0.5f;
+    node.compactnessReady = ready;
+    if (!ready) {
+      node.latentMean.clear();
+      node.latentPca.clear();
+      node.cumulativeVariance.clear();
+      return;
+    }
+    if (module.hasattr("latent_mean"))
+      copyTensorToVector(module.attr("latent_mean").toTensor(), node.latentMean);
+    if (module.hasattr("latent_pca"))
+      copyTensorToVector(module.attr("latent_pca").toTensor(), node.latentPca);
+    if (module.hasattr("cumulative_variance"))
+      copyTensorToVector(module.attr("cumulative_variance").toTensor(),
+                         node.cumulativeVariance);
+  } catch (const std::exception &) {
+    clearCompactness(node);
+  }
+}
+
+void normalizeBottleneckProperties(openyourbox::graph::GraphNode &node) {
+  using openyourbox::graph::NodeProperty;
+  using openyourbox::graph::NodeType;
+  using openyourbox::graph::defaultBottleneckKernelSize;
+  using openyourbox::graph::minimumPositiveProperty;
+  using openyourbox::graph::unlimitedPropertyMaximum;
+  if (node.type != NodeType::variationalBottleneck)
+    return;
+  for (auto &property : node.properties) {
+    if (property.key == "kernel_size") {
+      property.minimum = minimumPositiveProperty;
+      property.maximum = unlimitedPropertyMaximum;
+      if (property.value < 1)
+        property.value = defaultBottleneckKernelSize;
+      return;
+    }
+  }
+  NodeProperty kernel;
+  kernel.key = "kernel_size";
+  kernel.label = "Kernel Size";
+  kernel.value = defaultBottleneckKernelSize;
+  kernel.minimum = minimumPositiveProperty;
+  kernel.maximum = unlimitedPropertyMaximum;
+  node.properties.push_back(std::move(kernel));
+}
+
 /**
  * @brief Removes persisted upper bounds on numeric node properties.
  * @param node Loaded or newly created graph node.
@@ -937,10 +1032,10 @@ void applyNodePinShapes(openyourbox::graph::NodeGraph &graph,
                         openyourbox::graph::GraphNode &node);
 
 /**
- * @brief Refreshes inherited hop rate and nBand on every node.
+ * @brief Refreshes inherited hop rate and nBand on every node (first copy only).
  * @param graph Graph document to mutate.
  */
-void refreshPropagatedPinShapes(openyourbox::graph::NodeGraph &graph) {
+void refreshPropagatedPinShapesCore(openyourbox::graph::NodeGraph &graph) {
   std::unordered_map<std::int32_t, int> indegree;
   std::unordered_map<std::int32_t, std::vector<std::int32_t>> outgoing;
   for (const auto &node : graph.getNodes())
@@ -979,6 +1074,97 @@ void refreshPropagatedPinShapes(openyourbox::graph::NodeGraph &graph) {
     if (visited.count(node.id) == 0)
       applyNodePinShapes(graph, node);
   }
+}
+
+/**
+ * @brief Fills @c Pin::copyShapes from an unrolled serial stack.
+ * @param graph Editable graph whose first-copy shapes are already current.
+ */
+void refreshOutputCopyShapes(openyourbox::graph::NodeGraph &graph) {
+  // Materialize restores via ValueTree, which refreshes shapes again. Skip the
+  // nested copy-shape pass so we only unroll once per outer refresh.
+  static thread_local int depth = 0;
+  if (depth > 0)
+    return;
+  struct DepthGuard {
+    int &value;
+    explicit DepthGuard(int &depthValue) : value(depthValue) { ++value; }
+    ~DepthGuard() { --value; }
+  } guard(depth);
+
+  for (auto &node : graph.getNodes()) {
+    for (auto &pin : node.outputs)
+      pin.copyShapes.clear();
+    for (auto &pin : node.inputs)
+      pin.copyShapes.clear();
+  }
+  bool anyMultiCopy = false;
+  for (const auto &group : graph.getGroups()) {
+    if (group.copies > 1) {
+      anyMultiCopy = true;
+      break;
+    }
+  }
+  if (!anyMultiCopy)
+    return;
+
+  std::unordered_map<std::int32_t, std::pair<std::int32_t, int>> provenance;
+  auto expanded = graph.withInvisibleCopiesMaterialized(&provenance);
+  refreshPropagatedPinShapesCore(expanded);
+
+  std::unordered_map<std::int64_t, const openyourbox::graph::GraphNode *>
+      nodeAtSlot;
+  const auto slotKey = [](std::int32_t originalId, int slot) -> std::int64_t {
+    return (static_cast<std::int64_t>(originalId) << 32) |
+           static_cast<std::uint32_t>(slot);
+  };
+  for (const auto &entry : provenance) {
+    const auto *expandedNode = expanded.findNode(entry.first);
+    if (expandedNode == nullptr)
+      continue;
+    nodeAtSlot[slotKey(entry.second.first, entry.second.second)] = expandedNode;
+  }
+
+  for (auto &node : graph.getNodes()) {
+    const auto copies = graph.effectiveCopyCount(node.id);
+    if (copies <= 1)
+      continue;
+    for (std::size_t pinIndex = 0; pinIndex < node.outputs.size(); ++pinIndex) {
+      auto &pin = node.outputs[pinIndex];
+      pin.copyShapes.assign(static_cast<std::size_t>(copies), pin.shape);
+      for (int slot = 0; slot < copies; ++slot) {
+        const auto found = nodeAtSlot.find(slotKey(node.id, slot));
+        if (found == nodeAtSlot.end() || found->second == nullptr)
+          continue;
+        if (pinIndex >= found->second->outputs.size())
+          continue;
+        pin.copyShapes[static_cast<std::size_t>(slot)] =
+            found->second->outputs[pinIndex].shape;
+      }
+    }
+    for (std::size_t pinIndex = 0; pinIndex < node.inputs.size(); ++pinIndex) {
+      auto &pin = node.inputs[pinIndex];
+      pin.copyShapes.assign(static_cast<std::size_t>(copies), pin.shape);
+      for (int slot = 0; slot < copies; ++slot) {
+        const auto found = nodeAtSlot.find(slotKey(node.id, slot));
+        if (found == nodeAtSlot.end() || found->second == nullptr)
+          continue;
+        if (pinIndex >= found->second->inputs.size())
+          continue;
+        pin.copyShapes[static_cast<std::size_t>(slot)] =
+            found->second->inputs[pinIndex].shape;
+      }
+    }
+  }
+}
+
+/**
+ * @brief Refreshes first-copy pin shapes and per-copy shape lists.
+ * @param graph Graph document to mutate.
+ */
+void refreshPropagatedPinShapes(openyourbox::graph::NodeGraph &graph) {
+  refreshPropagatedPinShapesCore(graph);
+  refreshOutputCopyShapes(graph);
 }
 
 /**
@@ -1119,6 +1305,8 @@ std::string firstIncompatibleLinkMessage(const openyourbox::graph::NodeGraph &gr
   using openyourbox::graph::NodeType;
   using openyourbox::graph::pqmfSynthesisChannelIsError;
   using openyourbox::graph::pqmfSynthesisChannelMessage;
+  using openyourbox::graph::variationalBottleneckChannelIsError;
+  using openyourbox::graph::variationalBottleneckChannelMessage;
   for (const auto &link : graph.getLinks()) {
     const auto *source = graph.findPin(link.sourcePinId);
     const auto *destination = graph.findPin(link.destinationPinId);
@@ -1144,6 +1332,9 @@ std::string firstIncompatibleLinkMessage(const openyourbox::graph::NodeGraph &gr
       return pqmfSynthesisChannelMessage(
           source->shape.channels,
           std::max(2, readNodeProperty(*node, "n_band", defaultPqmfBands)));
+    if (node->type == NodeType::variationalBottleneck &&
+        variationalBottleneckChannelIsError(source->shape.channels))
+      return variationalBottleneckChannelMessage(source->shape.channels);
     if (!isConvolutionType(node->type) && !isConvTransposeType(node->type))
       continue;
     const auto stride = std::max(1, readNodeProperty(*node, "stride", 1));
@@ -1329,6 +1520,9 @@ juce::ValueTree nodeToTree(const openyourbox::graph::GraphNode &node) {
                    nullptr);
   tree.setProperty("fidelityPercent", node.fidelityPercent, nullptr);
   tree.setProperty("compactnessReady", node.compactnessReady, nullptr);
+  storeFloatVector(tree, "latentMean", node.latentMean);
+  storeFloatVector(tree, "latentPca", node.latentPca);
+  storeFloatVector(tree, "cumulativeVariance", node.cumulativeVariance);
   if (node.parentGroupId.has_value())
     tree.setProperty("parentGroupId", *node.parentGroupId, nullptr);
 
@@ -1453,6 +1647,9 @@ openyourbox::graph::GraphNode nodeFromTree(const juce::ValueTree &tree) {
       tree.getProperty("fidelityPercent", defaultFidelityPercent)));
   node.compactnessReady =
       static_cast<bool>(tree.getProperty("compactnessReady", false));
+  loadFloatVector(tree, "latentMean", node.latentMean);
+  loadFloatVector(tree, "latentPca", node.latentPca);
+  loadFloatVector(tree, "cumulativeVariance", node.cumulativeVariance);
   if (tree.hasProperty("parentGroupId"))
     node.parentGroupId =
         static_cast<std::int32_t>(tree.getProperty("parentGroupId"));
@@ -1527,6 +1724,7 @@ openyourbox::graph::GraphNode nodeFromTree(const juce::ValueTree &tree) {
   normalizeConditioningPins(node);
   normalizePhase3Node(node);
   normalizeConvolutionProperties(node);
+  normalizeBottleneckProperties(node);
   normalizePropertyBounds(node);
   normalizeHostIoProperties(node);
   return node;
@@ -1665,6 +1863,9 @@ void writeRandomizedWeightSlots(openyourbox::graph::GraphNode &node,
     slot.weightsPath.clear();
     slot.artifactPath.clear();
   }
+  if (node.type == openyourbox::graph::NodeType::variationalBottleneck ||
+      node.type == openyourbox::graph::NodeType::blackBox)
+    openyourbox::graph::clearCompactness(node);
 }
 
 /**
@@ -2699,6 +2900,7 @@ GroupActionResult NodeGraph::setGroupCopies(std::int32_t groupId, int copies) {
   }
   group->copies = copies;
   refreshCopySlotsForGroup(*this, groupId);
+  refreshPropagatedPinShapes(*this);
   return {true, {}, groupId};
 }
 
@@ -2726,8 +2928,16 @@ bool NodeGraph::randomizeGroupWeights(std::int32_t groupId) {
 }
 
 NodeGraph NodeGraph::withInvisibleCopiesMaterialized() const {
+  return withInvisibleCopiesMaterialized(nullptr);
+}
+
+NodeGraph NodeGraph::withInvisibleCopiesMaterialized(
+    std::unordered_map<std::int32_t, std::pair<std::int32_t, int>> *provenance)
+    const {
   NodeGraph expanded;
   expanded.restoreFromValueTree(toValueTree());
+  if (provenance != nullptr)
+    provenance->clear();
   std::vector<std::int32_t> ordered;
   ordered.reserve(expanded.groups.size());
   for (const auto &group : expanded.groups)
@@ -2742,8 +2952,11 @@ NodeGraph NodeGraph::withInvisibleCopiesMaterialized() const {
     int slotIndex = 0;
   };
   std::unordered_map<std::int32_t, WorkingNode> working;
-  for (const auto &node : expanded.nodes)
+  for (const auto &node : expanded.nodes) {
     working[node.id] = WorkingNode{node.id, 0};
+    if (provenance != nullptr)
+      (*provenance)[node.id] = {node.id, 0};
+  }
 
   for (const auto groupId : ordered) {
     auto *group = expanded.findGroup(groupId);
@@ -2780,10 +2993,10 @@ NodeGraph NodeGraph::withInvisibleCopiesMaterialized() const {
                                                  templateNodes.end());
     std::vector<GraphLink> internalLinks;
     for (const auto &link : expanded.links) {
-      const auto source = expanded.findNodeForPin(link.sourcePinId);
+      const auto sourceNode = expanded.findNodeForPin(link.sourcePinId);
       const auto dest = expanded.findNodeForPin(link.destinationPinId);
-      if (source.has_value() && dest.has_value() &&
-          templateSet.count(*source) != 0 && templateSet.count(*dest) != 0)
+      if (sourceNode.has_value() && dest.has_value() &&
+          templateSet.count(*sourceNode) != 0 && templateSet.count(*dest) != 0)
         internalLinks.push_back(link);
     }
     std::vector<GroupBoundaryPort> inputs;
@@ -2808,22 +3021,25 @@ NodeGraph NodeGraph::withInvisibleCopiesMaterialized() const {
         const auto originalId = working[nodeId].originalId;
         if (const auto *original = findNode(originalId))
           node->properties = original->properties;
-        ensureCopySlotCount(*node, std::max(slot + 1, effectiveCopyCount(working[nodeId].originalId)));
+        ensureCopySlotCount(
+            *node, std::max(slot + 1, effectiveCopyCount(originalId)));
         if (slot < static_cast<int>(node->copySlots.size()))
           applyCopySlot(*node, node->copySlots[static_cast<std::size_t>(slot)]);
         applyCopyPropertyValues(*node, slot);
+        if (provenance != nullptr)
+          (*provenance)[nodeId] = {originalId, slot};
       }
     }
 
     for (int copy = 1; copy < copies; ++copy) {
       auto &instance = instances[static_cast<std::size_t>(copy)];
       for (const auto nodeId : templateNodes) {
-        const auto *source = expanded.findNode(nodeId);
-        if (source == nullptr)
+        const auto *templateNode = expanded.findNode(nodeId);
+        if (templateNode == nullptr)
           continue;
-        GraphNode clone = *source;
+        GraphNode clone = *templateNode;
         clone.id = expanded.nextNodeId++;
-        clone.parentGroupId = source->parentGroupId;
+        clone.parentGroupId = templateNode->parentGroupId;
         for (auto &pin : clone.inputs) {
           const auto originalPin = pin.id;
           pin.id = expanded.nextPinId++;
@@ -2840,8 +3056,9 @@ NodeGraph NodeGraph::withInvisibleCopiesMaterialized() const {
         if (const auto *original = findNode(originalId)) {
           clone.copySlots = original->copySlots;
           clone.properties = original->properties;
-          ensureCopySlotCount(clone, std::max(slot + 1,
-                                              static_cast<int>(original->copySlots.size())));
+          ensureCopySlotCount(
+              clone, std::max(slot + 1,
+                              static_cast<int>(original->copySlots.size())));
           if (slot < static_cast<int>(clone.copySlots.size()))
             applyCopySlot(clone,
                           clone.copySlots[static_cast<std::size_t>(slot)]);
@@ -2849,6 +3066,8 @@ NodeGraph NodeGraph::withInvisibleCopiesMaterialized() const {
         }
         instance.nodeMap[nodeId] = clone.id;
         working[clone.id] = WorkingNode{originalId, slot};
+        if (provenance != nullptr)
+          (*provenance)[clone.id] = {originalId, slot};
         expanded.nodes.push_back(std::move(clone));
       }
       for (const auto &link : internalLinks) {
@@ -2870,8 +3089,8 @@ NodeGraph NodeGraph::withInvisibleCopiesMaterialized() const {
     // onto the last copy and create a directed cycle.
     const auto &last = instances.back();
     for (auto &link : expanded.links) {
-      const auto source = expanded.findNodeForPin(link.sourcePinId);
-      if (!source.has_value() || templateSet.count(*source) == 0)
+      const auto sourceNode = expanded.findNodeForPin(link.sourcePinId);
+      if (!sourceNode.has_value() || templateSet.count(*sourceNode) == 0)
         continue;
       const auto dest = expanded.findNodeForPin(link.destinationPinId);
       if (dest.has_value() && templateSet.count(*dest) != 0)
@@ -2981,6 +3200,12 @@ ConnectionResult NodeGraph::connect(std::int32_t firstPinId,
                        std::max(2, readNodeProperty(*destinationNodePtr,
                                                       "n_band",
                                                       defaultPqmfBands)))};
+
+  if (destinationNodePtr != nullptr &&
+      destinationNodePtr->type == NodeType::variationalBottleneck &&
+      variationalBottleneckChannelIsError(source->shape.channels))
+    return {false,
+            variationalBottleneckChannelMessage(source->shape.channels)};
 
   const auto duplicate = std::any_of(
       links.begin(), links.end(), [source, destination](const GraphLink &link) {
@@ -3120,6 +3345,11 @@ bool NodeGraph::setProperty(std::int32_t nodeId, const std::string &key,
     property->value = std::max(minimumPqmfBands, property->value);
   } else if (key == "latent_size" &&
              node->type == NodeType::variationalBottleneck) {
+    if (variationalBottleneckLatentIsError(property->value)) {
+      property->setValue(previousValue);
+      restoreCopyValues();
+      return false;
+    }
     for (auto &pin : node->outputs) {
       pin.shape.channels = property->value;
     }
@@ -3201,6 +3431,7 @@ bool NodeGraph::setPropertyCopyValues(std::int32_t nodeId,
     return false;
   property->copyIntValues = std::move(clamped);
   property->value = property->copyIntValues.front();
+  refreshPropagatedPinShapes(*this);
   return true;
 }
 
@@ -3238,6 +3469,7 @@ bool NodeGraph::setFloatPropertyCopyValues(std::int32_t nodeId,
   property->floatValue = property->copyFloatValues.front();
   if (key == "fidelity")
     node->fidelityPercent = clampFidelity(property->floatValue);
+  refreshPropagatedPinShapes(*this);
   return true;
 }
 
@@ -3382,6 +3614,7 @@ bool NodeGraph::unfreeze(std::int32_t nodeId) {
           if (property.key == "fidelity")
             property.floatValue = fidelity;
         }
+        copyCompactnessFromArtifact(restored, trainedPath);
       }
       nodes.push_back(std::move(restored));
     }
@@ -4224,6 +4457,10 @@ GraphNode NodeGraph::makeNode(NodeType type, juce::Point<float> position) {
     node.properties.push_back(property("latent_size", "Latent", defaultLatentSize,
                                        minimumPositiveProperty,
                                        unlimitedPropertyMaximum));
+    node.properties.push_back(property("kernel_size", "Kernel Size",
+                                       defaultBottleneckKernelSize,
+                                       minimumPositiveProperty,
+                                       unlimitedPropertyMaximum));
     node.properties.push_back(fidelityProperty());
     break;
   case NodeType::noiseSynthesizer:
@@ -4614,7 +4851,9 @@ NodeGraph::absorbArmedChain(const TrainJobResult &result) {
   box.weightsProvenance = WeightsProvenance::file;
   box.blackBoxOrigin = BlackBoxOrigin::trainAutoload;
   box.hasWeights = true;
-  box.compactnessReady = result.hasEncodeDecode;
+  box.compactnessReady = result.compactnessReady;
+  if (result.compactnessReady)
+    copyCompactnessFromArtifact(box, result.artifactPath);
   box.sourceSubgraph = fragment.toXmlString().toStdString();
   if (result.hasEncodeDecode) {
     box.outputs.push_back({nextPinId++, latentPinLabel, PinKind::output,

@@ -5,31 +5,40 @@
 namespace openyourbox::dsp {
 /**
  * @class VariationalBottleneck
- * @brief Encoder-head reparameterization with optional compactness fidelity.
+ * @brief Acids-rave v1 grouped variational head with optional compactness.
  *
- * Live inference samples `z = μ + σ ⊙ ε`. Compactness (when buffers are
- * present) keeps the leading PCA dimensions implied by `fidelityPercent` and
- * fills the remainder with prior noise so the latent port width stays fixed.
+ * Live, Gold, and eval paths return the mean branch only (`encodeMean`). The
+ * training worker samples `z = μ + σ ⊙ ε` off the audio thread. Compactness
+ * (when buffers are ready) keeps the leading PCA dimensions implied by
+ * `fidelityPercent` and fills the remainder with prior noise so the latent
+ * port width stays fixed.
  */
 class VariationalBottleneck {
 public:
+  /** @brief Softplus floor matching acids-rave `std = softplus(scale) + 1e-4`. */
+  static constexpr double softplusEpsilon = 1e-4;
+
   /**
-   * @brief Reparameterizes encoder features into a latent trajectory.
+   * @brief Encodes encoder features to the mean latent (no sampling).
+   *
+   * @p features must already include causal left context of `kernel−1`
+   * samples (live streaming history or an explicit pad). The grouped conv
+   * uses PyTorch layout `[2 * latent, in/2, kernel]` with `groups=2`.
+   *
    * @param features Encoder tensor `[batch, inChannels, time]`.
-   * @param meanWeight 1×1 conv weight `[latent, in, 1]`.
-   * @param logVarWeight 1×1 conv weight `[latent, in, 1]`.
+   * @param groupedWeight Grouped conv weight `[2 * latent, in/2, kernel]`.
    * @param fidelityPercent 0–100 compactness keep ratio.
    * @param compactnessReady True when PCA buffers are defined.
    * @param latentMean Optional `[latent]` mean.
    * @param latentPca Optional `[latent, latent]` basis (rows = components).
-   * @param cumulativeVariance Optional `[latent]` cumulative explained ratio.
+   * @param cumulativeVariance Optional `[latent]` cumulative singular-value ratio.
    * @return Latent tensor `[batch, latent, time]`.
    */
-  [[nodiscard]] static torch::Tensor encode(
-      const torch::Tensor &features, const torch::Tensor &meanWeight,
-      const torch::Tensor &logVarWeight, float fidelityPercent,
-      bool compactnessReady, const torch::Tensor &latentMean,
-      const torch::Tensor &latentPca, const torch::Tensor &cumulativeVariance);
+  [[nodiscard]] static torch::Tensor encodeMean(
+      const torch::Tensor &features, const torch::Tensor &groupedWeight,
+      float fidelityPercent, bool compactnessReady,
+      const torch::Tensor &latentMean, const torch::Tensor &latentPca,
+      const torch::Tensor &cumulativeVariance);
 
   /**
    * @brief Applies compactness crop in the PCA basis then projects back.
@@ -44,5 +53,14 @@ public:
   applyFidelity(const torch::Tensor &latent, float fidelityPercent,
                 const torch::Tensor &latentMean, const torch::Tensor &latentPca,
                 const torch::Tensor &cumulativeVariance);
+
+  /**
+   * @brief Rank kept by cumulative singular-value thresholding.
+   * @param fidelityPercent 0–100 keep ratio.
+   * @param cumulativeVariance `[latent]` ratios in `[0, 1]`.
+   * @return Kept component count in `[1, latent]`.
+   */
+  [[nodiscard]] static int keptRank(float fidelityPercent,
+                                    const torch::Tensor &cumulativeVariance);
 };
 } // namespace openyourbox::dsp

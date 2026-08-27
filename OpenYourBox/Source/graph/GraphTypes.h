@@ -225,6 +225,16 @@ inline constexpr int minimumPqmfBands = 2;
 inline constexpr int maximumPqmfBands = 64;
 /** @brief Default variational latent width. */
 inline constexpr int defaultLatentSize = 128;
+/**
+ * @brief Default variational-head temporal kernel (acids-rave v1).
+ *
+ * The grouped mean/variance convolution uses this width unless the user edits
+ * `kernel_size`. Input channel count must be even so `groups=2` can split the
+ * encoder features across the μ branch and the variance branch.
+ */
+inline constexpr int defaultBottleneckKernelSize = 5;
+/** @brief Fixed grouped-head group count (mean branch + variance branch). */
+inline constexpr int variationalBottleneckGroups = 2;
 /** @brief Default reconstruction stage-1 (representation) steps. */
 inline constexpr int defaultReconstructionStage1Steps = 1000000;
 /** @brief Default reconstruction stage-2 (quality) steps. */
@@ -395,6 +405,31 @@ struct ShapeSignature {
     return label;
   }
 };
+
+/**
+ * @brief Formats per-copy pin shapes as a comma-separated display label.
+ * @param shapes Ordered shapes (one per copy). Falls back to @p fallback when
+ *        empty.
+ * @param fallback Shape used when @p shapes is empty (typically the first copy).
+ * @return Empty when no concrete shape fields are known yet.
+ */
+inline std::string formatShapeCopyList(const std::vector<ShapeSignature> &shapes,
+                                       const ShapeSignature &fallback) {
+  if (shapes.size() <= 1) {
+    const auto &shape = shapes.empty() ? fallback : shapes.front();
+    return shape.displayLabel();
+  }
+  std::string text;
+  for (std::size_t index = 0; index < shapes.size(); ++index) {
+    auto part = shapes[index].displayLabel();
+    if (part.empty())
+      part = "?";
+    if (index > 0)
+      text += ", ";
+    text += part;
+  }
+  return text;
+}
 
 /**
  * @brief Declared host Audio Input/Output channel mode.
@@ -590,6 +625,46 @@ inline bool pqmfSynthesisChannelIsError(int channels, int nBand) noexcept {
   return channels > 0 && nBand > 0 && channels % nBand != 0;
 }
 
+/**
+ * @brief User-facing error when a variational bottleneck sees an odd width.
+ * @param channels Incoming encoder feature count.
+ * @return Empty when @p channels is unknown or even.
+ */
+inline std::string variationalBottleneckChannelMessage(int channels) {
+  if (channels <= 0 || channels % variationalBottleneckGroups == 0)
+    return {};
+  return "Variational bottleneck requires an even channel count "
+         "(grouped mean/variance head).";
+}
+
+/**
+ * @brief Returns true when @p variationalBottleneckChannelMessage is an error.
+ * @param channels Incoming encoder feature count.
+ */
+inline bool variationalBottleneckChannelIsError(int channels) noexcept {
+  return channels > 0 && channels % variationalBottleneckGroups != 0;
+}
+
+/**
+ * @brief User-facing error when latent width cannot split across two groups.
+ * @param latentSize Proposed latent width.
+ * @return Empty when @p latentSize is even and positive.
+ */
+inline std::string variationalBottleneckLatentMessage(int latentSize) {
+  if (latentSize > 0 && latentSize % variationalBottleneckGroups == 0)
+    return {};
+  return "Variational bottleneck latent size must be even "
+         "(grouped mean/variance head).";
+}
+
+/**
+ * @brief Returns true when @p variationalBottleneckLatentMessage is an error.
+ * @param latentSize Proposed latent width.
+ */
+inline bool variationalBottleneckLatentIsError(int latentSize) noexcept {
+  return latentSize < 1 || latentSize % variationalBottleneckGroups != 0;
+}
+
 /** @brief User-visible label of the TCN/BlackBox control (former FiLM) pin. */
 inline constexpr const char *controlPinLabel = "control";
 /** @brief User-visible label of Gold RAVE encode/decode latent pins. */
@@ -603,8 +678,20 @@ struct Pin {
   std::string label;
   /** @brief Input or output direction. */
   PinKind kind = PinKind::input;
-  /** @brief Tensor shape accepted or produced by the endpoint. */
+  /**
+   * @brief Tensor shape for the visible (first) copy.
+   *
+   * External cables into a multi-copy group still validate against this shape.
+   * Group outputs that leave the stack use @ref copyShapes when present.
+   */
   ShapeSignature shape;
+  /**
+   * @brief Per-copy shapes when the owner participates in N&gt;1 group copies.
+   *
+   * Empty when N==1. Index 0 matches @ref shape; the last entry is the shape
+   * after the full serial stack (used for group output display).
+   */
+  std::vector<ShapeSignature> copyShapes;
 };
 
 /**
@@ -848,6 +935,12 @@ struct GraphNode {
   float fidelityPercent = defaultFidelityPercent;
   /** @brief True when compactness PCA buffers are present on the artifact. */
   bool compactnessReady = false;
+  /** @brief Validation-PCA mean `[latent]`, empty until compactness is ready. */
+  std::vector<float> latentMean;
+  /** @brief Validation-PCA basis `[latent × latent]` row-major. */
+  std::vector<float> latentPca;
+  /** @brief Linear singular-value cumulative ratios `[latent]`. */
+  std::vector<float> cumulativeVariance;
   /** @brief Owning group, or empty when the node is on the root canvas. */
   std::optional<std::int32_t> parentGroupId;
   /**
@@ -973,7 +1066,24 @@ struct TrainJobResult {
   std::string objective;
   /** @brief True when the artifact exposes encode/decode methods. */
   bool hasEncodeDecode = false;
+  /** @brief True when validation-PCA compactness buffers are ready. */
+  bool compactnessReady = false;
+  /** @brief Validation segments used for PCA, or 0 when not ready. */
+  int compactnessValidationSegments = 0;
+  /** @brief Compactness status token (`ready`|`not_ready`). */
+  std::string compactnessStatus = "not_ready";
 };
+
+/**
+ * @brief Clears compactness PCA state after weight randomization.
+ * @param node Bottleneck or Gold node to reset.
+ */
+inline void clearCompactness(GraphNode &node) noexcept {
+  node.compactnessReady = false;
+  node.latentMean.clear();
+  node.latentPca.clear();
+  node.cumulativeVariance.clear();
+}
 
 /** @brief Inclusive lower bound for element randomization seeds. */
 inline constexpr std::int32_t minimumSeed = 0;

@@ -5,6 +5,8 @@
 
 #include <optional>
 #include <string>
+#include <unordered_map>
+#include <utility>
 #include <vector>
 
 namespace openyourbox::graph {
@@ -231,6 +233,15 @@ public:
    * @brief Returns a compile-only graph with invisible copies unrolled in series.
    */
   [[nodiscard]] NodeGraph withInvisibleCopiesMaterialized() const;
+
+  /**
+   * @brief Same as @ref withInvisibleCopiesMaterialized, optionally recording
+   *        which expanded node came from which original slot.
+   * @param provenance Expanded node id → (original node id, absolute slot).
+   */
+  [[nodiscard]] NodeGraph withInvisibleCopiesMaterialized(
+      std::unordered_map<std::int32_t, std::pair<std::int32_t, int>> *provenance)
+      const;
 
   /** @brief Returns groups in stable insertion order. */
   [[nodiscard]] const std::vector<GraphGroup> &getGroups() const noexcept;

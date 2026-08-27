@@ -582,6 +582,76 @@ int main() {
     }
   }
 
+  {
+    NodeGraph shapeGraph;
+    const auto inId =
+        shapeGraph.addNode(NodeType::audioInput, {0.0f, 0.0f});
+    const auto linearId =
+        shapeGraph.addNode(NodeType::linear, {200.0f, 0.0f});
+    const auto actId =
+        shapeGraph.addNode(NodeType::activation, {320.0f, 0.0f});
+    const auto outId =
+        shapeGraph.addNode(NodeType::audioOutput, {480.0f, 0.0f});
+    const auto *inNode = shapeGraph.findNode(inId);
+    const auto *linearNode = shapeGraph.findNode(linearId);
+    const auto *actNode = shapeGraph.findNode(actId);
+    const auto *outNode = shapeGraph.findNode(outId);
+    passed &= expect(inNode != nullptr && linearNode != nullptr &&
+                         actNode != nullptr && outNode != nullptr,
+                     "shape-list graph nodes exist");
+    if (inNode != nullptr && linearNode != nullptr && actNode != nullptr &&
+        outNode != nullptr) {
+      passed &= expect(shapeGraph.setProperty(linearId, "features", 2),
+                       "linear features match stereo width for chaining");
+      passed &= expect(shapeGraph
+                           .connect(inNode->outputs.front().id,
+                                    linearNode->inputs.front().id)
+                           .accepted &&
+                           shapeGraph
+                               .connect(linearNode->outputs.front().id,
+                                        actNode->inputs.front().id)
+                               .accepted &&
+                           shapeGraph
+                               .connect(actNode->outputs.front().id,
+                                        outNode->inputs.front().id)
+                               .accepted,
+                       "shape-list graph cables");
+      const auto grouped = shapeGraph.createGroup({linearId, actId});
+      passed &= expect(grouped.accepted, "linear group for shape lists");
+      passed &= expect(shapeGraph.setGroupCopies(grouped.groupId, 3).accepted,
+                       "linear with matching I/O accepts N=3");
+      passed &= expect(
+          shapeGraph.setPropertyCopyValues(linearId, "features", {2, 4, 8}),
+          "per-copy features 2,4,8");
+      const auto *linear = shapeGraph.findNode(linearId);
+      passed &= expect(
+          linear != nullptr && !linear->outputs.empty() &&
+              linear->outputs.front().copyShapes.size() == 3 &&
+              linear->outputs.front().copyShapes[0].channels == 2 &&
+              linear->outputs.front().copyShapes[1].channels == 4 &&
+              linear->outputs.front().copyShapes[2].channels == 8,
+          "element output lists a shape per copy");
+      const auto listLabel = openyourbox::graph::formatShapeCopyList(
+          linear->outputs.front().copyShapes, linear->outputs.front().shape);
+      passed &= expect(listLabel == "2ch, 4ch, 8ch",
+                       "element display label joins per-copy shapes");
+      openyourbox::graph::ShapeSignature groupOutShape;
+      for (const auto &port : shapeGraph.groupInterfacePorts(grouped.groupId)) {
+        if (port.kind != openyourbox::graph::PinKind::output)
+          continue;
+        if (const auto *memberPin = shapeGraph.findPin(port.memberPinId);
+            memberPin != nullptr && !memberPin->copyShapes.empty())
+          groupOutShape = memberPin->copyShapes.back();
+        else
+          groupOutShape = port.shape;
+      }
+      passed &= expect(groupOutShape.channels == 8,
+                       "group output displays shape after all copies");
+      passed &= expect(linear->outputs.front().shape.channels == 2,
+                       "visible pin.shape stays first-copy for chaining");
+    }
+  }
+
   const auto worldBeforeUngroup = restored.worldPositionOfNode(convA);
   const auto lifted = restored.ungroup(created.groupId);
   passed &= expect(lifted.accepted && restored.getGroups().empty(),

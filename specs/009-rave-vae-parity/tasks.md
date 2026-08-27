@@ -33,9 +33,9 @@ description: "Task list for RAVE Variational Bottleneck Parity"
 
 **Purpose**: Confirm design artifacts and build wiring before bottleneck changes.
 
-- [ ] T001 Verify design artifact cross-links and execution order in `specs/009-rave-vae-parity/plan.md`
-- [ ] T002 [P] Register `Tests/VariationalBottleneckTests.cpp` in `CMakeLists.txt`
-- [ ] T003 [P] Confirm `Backend/train_worker.py` and `Backend/freeze_worker.py` remain embedded in plug-in bundle via `CMakeLists.txt`
+- [x] T001 Verify design artifact cross-links and execution order in `specs/009-rave-vae-parity/plan.md`
+- [x] T002 [P] Register `Tests/VariationalBottleneckTests.cpp` in `CMakeLists.txt`
+- [x] T003 [P] Confirm `Backend/train_worker.py` and `Backend/freeze_worker.py` remain embedded in plug-in bundle via `CMakeLists.txt`
 
 ---
 
@@ -45,10 +45,10 @@ description: "Task list for RAVE Variational Bottleneck Parity"
 
 **⚠️ CRITICAL**: No user story work can begin until this phase is complete.
 
-- [ ] T004 Add `defaultBottleneckKernelSize = 5` and document even-channel requirement in `OpenYourBox/Source/graph/GraphTypes.h`
-- [ ] T005 Refactor `OpenYourBox/Source/dsp/VariationalBottleneck.h` for grouped causal conv, softplus variance, separate `encodeMean` vs `encodeTrainSample` (or equivalent mode flag) with Doxygen
-- [ ] T006 [P] Remove legacy dual 1×1 weight initialization from `OpenYourBox/Source/dsp/LiveGraphEngine.cpp` (`variationalBottleneck` randomize/prepare cases)
-- [ ] T007 [P] Remove legacy 1×1 `VariationalBottleneckLayer` (mean/logvar 1×1 convs) from `Backend/train_worker.py` in favour of placeholder stub wired in Phase 3
+- [x] T004 Add `defaultBottleneckKernelSize = 5` and document even-channel requirement in `OpenYourBox/Source/graph/GraphTypes.h`
+- [x] T005 Refactor `OpenYourBox/Source/dsp/VariationalBottleneck.h` for grouped causal conv, softplus variance, separate `encodeMean` vs `encodeTrainSample` (or equivalent mode flag) with Doxygen
+- [x] T006 [P] Remove legacy dual 1×1 weight initialization from `OpenYourBox/Source/dsp/LiveGraphEngine.cpp` (`variationalBottleneck` randomize/prepare cases)
+- [x] T007 [P] Remove legacy 1×1 `VariationalBottleneckLayer` (mean/logvar 1×1 convs) from `Backend/train_worker.py` in favour of placeholder stub wired in Phase 3
 
 **Checkpoint**: Foundation ready — no code path emits legacy 1×1 bottleneck weights.
 
@@ -62,14 +62,14 @@ description: "Task list for RAVE Variational Bottleneck Parity"
 
 ### Implementation for User Story 1
 
-- [ ] T008 [US1] Implement `VariationalBottleneckLayer` with softplus variance, reparameterized sampling in `train()` mode, and μ-only in `eval()` mode in `Backend/train_worker.py` per `specs/009-rave-vae-parity/contracts/variational-bottleneck-contract.md`
-- [ ] T009 [US1] Update `_bottleneck_kl()` for softplus/log-σ² parameterization in `Backend/train_worker.py`
-- [ ] T010 [P] [US1] Mirror parity `VariationalBottleneckLayer` forward modes in `Backend/freeze_worker.py`
-- [ ] T011 [US1] Implement softplus variance and μ-only `encodeMean` in `OpenYourBox/Source/dsp/VariationalBottleneck.cpp`
-- [ ] T012 [US1] Wire live variational bottleneck to call μ-only path (never sample) in `OpenYourBox/Source/dsp/LiveGraphEngine.cpp`
-- [ ] T013 [US1] Ensure Gold blackbox encode/forward applies μ-only before fidelity in `OpenYourBox/Source/dsp/LiveGraphEngine.cpp`
-- [ ] T014 [P] [US1] Add worker train-vs-eval forward tests in `Tests/test_train_worker.py`
-- [ ] T015 [P] [US1] Add live deterministic encode tests in `Tests/VariationalBottleneckTests.cpp`
+- [x] T008 [US1] Implement `VariationalBottleneckLayer` with softplus variance, reparameterized sampling in `train()` mode, and μ-only in `eval()` mode in `Backend/train_worker.py` per `specs/009-rave-vae-parity/contracts/variational-bottleneck-contract.md`
+- [x] T009 [US1] Update `_bottleneck_kl()` for softplus/log-σ² parameterization in `Backend/train_worker.py`
+- [x] T010 [P] [US1] Mirror parity `VariationalBottleneckLayer` forward modes in `Backend/freeze_worker.py`
+- [x] T011 [US1] Implement softplus variance and μ-only `encodeMean` in `OpenYourBox/Source/dsp/VariationalBottleneck.cpp`
+- [x] T012 [US1] Wire live variational bottleneck to call μ-only path (never sample) in `OpenYourBox/Source/dsp/LiveGraphEngine.cpp`
+- [x] T013 [US1] Ensure Gold blackbox encode/forward applies μ-only before fidelity in `OpenYourBox/Source/dsp/LiveGraphEngine.cpp`
+- [x] T014 [P] [US1] Add worker train-vs-eval forward tests in `Tests/test_train_worker.py`
+- [x] T015 [P] [US1] Add live deterministic encode tests in `Tests/VariationalBottleneckTests.cpp`
 
 **Checkpoint**: US1 complete — live path stable; worker samples only off audio thread.
 
@@ -83,14 +83,14 @@ description: "Task list for RAVE Variational Bottleneck Parity"
 
 ### Implementation for User Story 2
 
-- [ ] T016 [US2] Add grouped causal `Conv1d(groups=2)` head with per-group channel split in `Backend/train_worker.py` `VariationalBottleneckLayer`
-- [ ] T017 [US2] Implement grouped causal conv with preallocated `(kernel_size−1)` history (zero audio-thread alloc) in `OpenYourBox/Source/dsp/VariationalBottleneck.cpp`
-- [ ] T018 [US2] Update grouped weight randomization and `parameterCount` for k× grouped layout in `OpenYourBox/Source/dsp/LiveGraphEngine.cpp`
-- [ ] T019 [US2] Add `kernel_size` property (default 5) to `variationalBottleneck` palette in `OpenYourBox/Source/graph/NodeGraph.cpp`
-- [ ] T020 [US2] Read `kernel_size` during live prepare and pass to `VariationalBottleneck` in `OpenYourBox/Source/dsp/LiveGraphEngine.cpp`
-- [ ] T021 [US2] Add even input-channel shape gate with tooltip on connect/arm in `OpenYourBox/Source/graph/NodeGraph.cpp`
-- [ ] T022 [US2] Set `kernel_size=5` on bottleneck node in `OpenYourBox/Source/graph/RaveLayouts.cpp` for original and latest-continuous layouts
-- [ ] T023 [P] [US2] Add layout kernel default and odd-channel rejection tests in `Tests/LiveGraphEngineTests.cpp`
+- [x] T016 [US2] Add grouped causal `Conv1d(groups=2)` head with per-group channel split in `Backend/train_worker.py` `VariationalBottleneckLayer`
+- [x] T017 [US2] Implement grouped causal conv with preallocated `(kernel_size−1)` history (zero audio-thread alloc) in `OpenYourBox/Source/dsp/VariationalBottleneck.cpp`
+- [x] T018 [US2] Update grouped weight randomization and `parameterCount` for k× grouped layout in `OpenYourBox/Source/dsp/LiveGraphEngine.cpp`
+- [x] T019 [US2] Add `kernel_size` property (default 5) to `variationalBottleneck` palette in `OpenYourBox/Source/graph/NodeGraph.cpp`
+- [x] T020 [US2] Read `kernel_size` during live prepare and pass to `VariationalBottleneck` in `OpenYourBox/Source/dsp/LiveGraphEngine.cpp`
+- [x] T021 [US2] Add even input-channel shape gate with tooltip on connect/arm in `OpenYourBox/Source/graph/NodeGraph.cpp`
+- [x] T022 [US2] Set `kernel_size=5` on bottleneck node in `OpenYourBox/Source/graph/RaveLayouts.cpp` for original and latest-continuous layouts
+- [x] T023 [P] [US2] Add layout kernel default and odd-channel rejection tests in `Tests/LiveGraphEngineTests.cpp`
 
 **Checkpoint**: US2 complete — reference head geometry end-to-end (Python + C++ + UI).
 
@@ -104,17 +104,17 @@ description: "Task list for RAVE Variational Bottleneck Parity"
 
 ### Implementation for User Story 3
 
-- [ ] T024 [US3] Implement `split_reconstruction_corpus()` (98% train / 2% val, seed 42, max 1000 val) in `Backend/train_worker.py` per `specs/009-rave-vae-parity/contracts/compactness-pca-contract.md`
-- [ ] T025 [US3] Restrict stage-1 minibatch sampling to train paths only in `Backend/train_worker.py`
-- [ ] T026 [US3] Replace single-batch PCA with full validation-pass μ collection at stage-1 end in `Backend/train_worker.py`
-- [ ] T027 [US3] Emit `compactness.ready` / `status` in train IPC events and checkpoint metadata in `Backend/train_worker.py`
-- [ ] T028 [US3] Embed `latent_mean`, `latent_pca`, `cumulative_variance` buffers in `_export_rave_scripted()` in `Backend/train_worker.py`
-- [ ] T029 [US3] Load compactness buffers into Gold runtime tensors in `OpenYourBox/Source/dsp/LiveGraphEngine.cpp`
-- [ ] T030 [US3] Copy compactness buffers and `compactnessReady` to Blue bottleneck on Unfreeze in `OpenYourBox/Source/graph/NodeGraph.cpp`
-- [ ] T031 [US3] Persist `kernel_size`, `compactnessReady`, and PCA tensor refs in graph ValueTree in `OpenYourBox/Source/graph/NodeGraph.cpp`
-- [ ] T032 [US3] Gate fidelity slider/display until `compactnessReady` in `OpenYourBox/Source/ui/TrainPanel.cpp` and bottleneck property UI in `OpenYourBox/Source/graph/NodeGraph.cpp`
-- [ ] T033 [US3] Clear `compactnessReady` and PCA tensors on bottleneck weight randomize in `OpenYourBox/Source/graph/NodeGraph.cpp`
-- [ ] T034 [P] [US3] Add split reproducibility, train-only sampler, and val-μ PCA source tests in `Tests/test_train_worker.py`
+- [x] T024 [US3] Implement `split_reconstruction_corpus()` (98% train / 2% val, seed 42, max 1000 val) in `Backend/train_worker.py` per `specs/009-rave-vae-parity/contracts/compactness-pca-contract.md`
+- [x] T025 [US3] Restrict stage-1 minibatch sampling to train paths only in `Backend/train_worker.py`
+- [x] T026 [US3] Replace single-batch PCA with full validation-pass μ collection at stage-1 end in `Backend/train_worker.py`
+- [x] T027 [US3] Emit `compactness.ready` / `status` in train IPC events and checkpoint metadata in `Backend/train_worker.py`
+- [x] T028 [US3] Embed `latent_mean`, `latent_pca`, `cumulative_variance` buffers in `_export_rave_scripted()` in `Backend/train_worker.py`
+- [x] T029 [US3] Load compactness buffers into Gold runtime tensors in `OpenYourBox/Source/dsp/LiveGraphEngine.cpp`
+- [x] T030 [US3] Copy compactness buffers and `compactnessReady` to Blue bottleneck on Unfreeze in `OpenYourBox/Source/graph/NodeGraph.cpp`
+- [x] T031 [US3] Persist `kernel_size`, `compactnessReady`, and PCA tensor refs in graph ValueTree in `OpenYourBox/Source/graph/NodeGraph.cpp`
+- [x] T032 [US3] Gate fidelity slider/display until `compactnessReady` in `OpenYourBox/Source/ui/TrainPanel.cpp` and bottleneck property UI in `OpenYourBox/Source/graph/NodeGraph.cpp`
+- [x] T033 [US3] Clear `compactnessReady` and PCA tensors on bottleneck weight randomize in `OpenYourBox/Source/graph/NodeGraph.cpp`
+- [x] T034 [P] [US3] Add split reproducibility, train-only sampler, and val-μ PCA source tests in `Tests/test_train_worker.py`
 
 **Checkpoint**: US3 complete — fidelity/compactness matches acids-rave validation PCA rules.
 
@@ -128,9 +128,9 @@ description: "Task list for RAVE Variational Bottleneck Parity"
 
 ### Implementation for User Story 4
 
-- [ ] T035 [US4] Add worker-eval μ vs live-encode μ parity test harness in `Tests/LiveGraphEngineTests.cpp`
-- [ ] T036 [US4] Add post-train fidelity monotonic rank assertion in `Tests/ProcessorIntegrationTests.cpp` or `Tests/test_train_worker.py`
-- [ ] T037 [P] [US4] Execute and tick off manual quickstart steps in `specs/009-rave-vae-parity/quickstart.md`
+- [x] T035 [US4] Add worker-eval μ vs live-encode μ parity test harness in `Tests/LiveGraphEngineTests.cpp`
+- [x] T036 [US4] Add post-train fidelity monotonic rank assertion in `Tests/ProcessorIntegrationTests.cpp` or `Tests/test_train_worker.py`
+- [x] T037 [P] [US4] Execute and tick off manual quickstart steps in `specs/009-rave-vae-parity/quickstart.md`
 
 **Checkpoint**: US4 complete — end-to-end parity smoke documented.
 
@@ -140,9 +140,9 @@ description: "Task list for RAVE Variational Bottleneck Parity"
 
 **Purpose**: Regression sweep, TODO hygiene, plan status.
 
-- [ ] T038 [P] Mark completed RAVE parity bullets in `TODO.md` referencing `specs/009-rave-vae-parity/`
-- [ ] T039 Run `ctest -R "VariationalBottleneck|LiveGraphEngine|ProcessorIntegration" --output-on-failure` and `python3 -m pytest Tests/test_train_worker.py -k "bottleneck or compactness or split" -v`
-- [ ] T040 Update plan status to "Ready for implement" in `specs/009-rave-vae-parity/plan.md` after all checkpoints pass
+- [x] T038 [P] Mark completed RAVE parity bullets in `TODO.md` referencing `specs/009-rave-vae-parity/`
+- [x] T039 Run `ctest --test-dir OpenYourBox/Builds/Release -R "VariationalBottleneck|OpenYourBoxLiveGraph|OpenYourBoxProcessor" --output-on-failure` and `.venv/bin/python Tests/test_train_worker.py -v`
+- [x] T040 Update plan status to "Ready for implement" in `specs/009-rave-vae-parity/plan.md` after all checkpoints pass
 
 ---
 

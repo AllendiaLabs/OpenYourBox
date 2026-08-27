@@ -241,6 +241,22 @@ if(BUILD_TESTING)
         juce::juce_recommended_warning_flags)
     add_test(NAME OpenYourBoxProcessor COMMAND OpenYourBoxProcessorTests)
 
+    juce_add_console_app(OpenYourBoxVariationalBottleneckTests PRODUCT_NAME "OpenYourBox Variational Bottleneck Tests")
+    target_sources(OpenYourBoxVariationalBottleneckTests PRIVATE Tests/VariationalBottleneckTests.cpp)
+    target_include_directories(OpenYourBoxVariationalBottleneckTests BEFORE PRIVATE
+        "${CMAKE_CURRENT_BINARY_DIR}/OpenYourBox_artefacts/JuceLibraryCode"
+        OpenYourBox/Source
+        "${TORCH_INCLUDE_DIRS}")
+    target_link_libraries(OpenYourBoxVariationalBottleneckTests PRIVATE
+        OpenYourBox
+        OpenYourBoxResources
+        juce::juce_audio_utils
+        juce::juce_dsp
+        juce::juce_opengl
+        juce::juce_recommended_config_flags
+        juce::juce_recommended_warning_flags)
+    add_test(NAME VariationalBottleneck COMMAND OpenYourBoxVariationalBottleneckTests)
+
     juce_add_console_app(OpenYourBoxLiveGraphTests PRODUCT_NAME "OpenYourBox Live Graph Tests")
     target_sources(OpenYourBoxLiveGraphTests PRIVATE Tests/LiveGraphEngineTests.cpp)
     target_include_directories(OpenYourBoxLiveGraphTests BEFORE PRIVATE

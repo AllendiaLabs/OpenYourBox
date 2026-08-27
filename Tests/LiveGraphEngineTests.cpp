@@ -1620,6 +1620,113 @@ int main() {
             : xyMixCompiled.error.message.c_str());
   }
 
+  {
+    openyourbox::graph::NodeGraph layoutGraph;
+    const auto layoutError = openyourbox::graph::insertRaveLayout(
+        layoutGraph, openyourbox::graph::RaveLayoutId::latestContinuous, 1);
+    passed &= expect(layoutError.empty(),
+                     layoutError.empty()
+                         ? "latest continuous RAVE layout must insert"
+                         : layoutError.c_str());
+    bool foundKernel = false;
+    for (const auto &node : layoutGraph.getNodes()) {
+      if (node.type != openyourbox::graph::NodeType::variationalBottleneck)
+        continue;
+      for (const auto &property : node.properties) {
+        if (property.key == "kernel_size") {
+          foundKernel = true;
+          passed &= expect(property.value ==
+                               openyourbox::graph::defaultBottleneckKernelSize,
+                           "layout bottleneck kernel_size must default to 5");
+        }
+      }
+    }
+    passed &= expect(foundKernel,
+                     "inserted RAVE layout must expose bottleneck kernel_size");
+  }
+
+  {
+    openyourbox::graph::NodeGraph oddGraph;
+    oddGraph.ensureFixedHostIo();
+    const auto linear = oddGraph.addNode(
+        openyourbox::graph::NodeType::linear, {180.0f, 0.0f});
+    const auto bottleneck = oddGraph.addNode(
+        openyourbox::graph::NodeType::variationalBottleneck, {360.0f, 0.0f});
+    passed &= expect(oddGraph.setProperty(linear, "features", 3),
+                     "linear features can be set to an odd width");
+    const auto *linearNode = oddGraph.findNode(linear);
+    const auto *bottleneckNode = oddGraph.findNode(bottleneck);
+    passed &= expect(
+        linearNode != nullptr && bottleneckNode != nullptr &&
+            !oddGraph
+                 .connect(linearNode->outputs.front().id,
+                          bottleneckNode->inputs.front().id)
+                 .accepted,
+        "variational bottleneck must refuse odd upstream channels");
+  }
+
+  {
+    openyourbox::graph::NodeGraph bottleneckGraph;
+    bottleneckGraph.ensureFixedHostIo();
+    std::int32_t inputId = 0;
+    std::int32_t outputId = 0;
+    for (const auto &node : bottleneckGraph.getNodes()) {
+      if (node.type == openyourbox::graph::NodeType::audioInput)
+        inputId = node.id;
+      if (node.type == openyourbox::graph::NodeType::audioOutput)
+        outputId = node.id;
+    }
+    const auto bottleneckId = bottleneckGraph.addNode(
+        openyourbox::graph::NodeType::variationalBottleneck, {220.0f, 0.0f});
+    const auto linearId = bottleneckGraph.addNode(
+        openyourbox::graph::NodeType::linear, {400.0f, 0.0f});
+    const auto *input = bottleneckGraph.findNode(inputId);
+    const auto *output = bottleneckGraph.findNode(outputId);
+    const auto *bottleneck = bottleneckGraph.findNode(bottleneckId);
+    const auto *linear = bottleneckGraph.findNode(linearId);
+    passed &= expect(
+        input != nullptr && output != nullptr && bottleneck != nullptr &&
+            linear != nullptr &&
+            bottleneckGraph.setProperty(bottleneckId, "latent_size", 4) &&
+            bottleneckGraph.setProperty(linearId, "features", 2) &&
+            bottleneckGraph
+                .connect(input->outputs.front().id, bottleneck->inputs.front().id)
+                .accepted &&
+            bottleneckGraph
+                .connect(bottleneck->outputs.front().id, linear->inputs.front().id)
+                .accepted &&
+            bottleneckGraph
+                .connect(linear->outputs.front().id, output->inputs.front().id)
+                .accepted,
+        "2ch host audio must wire through a 4-wide bottleneck");
+    openyourbox::dsp::LiveGraphCompileOptions options;
+    options.hostInputChannels = 2;
+    options.hostOutputChannels = 2;
+    options.maximumBlockSize = 32;
+    const auto compiled =
+        openyourbox::dsp::LiveGraphEngine::compile(bottleneckGraph, options);
+    passed &= expect(compiled.succeeded(),
+                     compiled.succeeded()
+                         ? "bottleneck graph must compile"
+                         : compiled.error.message.c_str());
+    if (compiled.succeeded()) {
+      openyourbox::dsp::LiveGraphCompileError prepareError;
+      const auto runtimeA = openyourbox::dsp::LiveGraphEngine::prepare(
+          compiled.snapshot, prepareError);
+      const auto runtimeB = openyourbox::dsp::LiveGraphEngine::prepare(
+          compiled.snapshot, prepareError);
+      auto inputTensor = torch::randn({1, 2, 32});
+      const auto outA =
+          runtimeA != nullptr ? runtimeA->processTensor(inputTensor)
+                              : torch::Tensor{};
+      const auto outB =
+          runtimeB != nullptr ? runtimeB->processTensor(inputTensor)
+                              : torch::Tensor{};
+      passed &= expect(outA.defined() && outB.defined() && torch::equal(outA, outB),
+                       "live bottleneck encode must be deterministic μ-only");
+    }
+  }
+
   if (passed)
     std::cout << "OpenYourBox live graph engine tests passed\n";
   return passed ? 0 : 1;

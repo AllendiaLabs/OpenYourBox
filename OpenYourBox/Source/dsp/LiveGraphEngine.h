@@ -105,8 +105,11 @@ public:
   /** @brief Compactness PCA basis, or undefined. */
   [[nodiscard]] virtual torch::Tensor compactnessPca() const { return {}; }
 
-  /** @brief Cumulative explained-variance ratios, or undefined. */
+  /** @brief Cumulative singular-value ratios, or undefined. */
   [[nodiscard]] virtual torch::Tensor compactnessCumulative() const { return {}; }
+
+  /** @brief True when validation-PCA compactness may be applied. */
+  [[nodiscard]] virtual bool compactnessReady() const noexcept { return false; }
 };
 
 /**

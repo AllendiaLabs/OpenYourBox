@@ -151,6 +151,12 @@ int main() {
   passed &= expect(waitForGraphRuntime(original, 3),
                    "live graph must compile before audio assertions");
 
+  juce::AudioBuffer<float> silence(2, blockSize);
+  silence.clear();
+  original.processBlock(silence, midi);
+  passed &= expect(silence.getMagnitude(0, 0, blockSize) == 0.0f,
+                   "digital silence must remain digital silence");
+
   juce::AudioBuffer<float> input(2, blockSize);
   fillSine(input, sampleRate);
   auto processed = input;
@@ -164,12 +170,6 @@ int main() {
                                                input.getSample(0, sample)));
   passed &= expect(difference > 1.0e-5f,
                    "default wet model must audibly differ from the dry input");
-
-  juce::AudioBuffer<float> silence(2, blockSize);
-  silence.clear();
-  original.processBlock(silence, midi);
-  passed &= expect(silence.getMagnitude(0, 0, blockSize) == 0.0f,
-                   "digital silence must remain digital silence");
 
   juce::MemoryBlock savedState;
   original.getStateInformation(savedState);
