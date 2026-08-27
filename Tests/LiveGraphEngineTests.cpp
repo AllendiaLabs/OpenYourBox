@@ -7,9 +7,11 @@
 #include <torch/torch.h>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <iostream>
 #include <memory>
+#include <string>
 
 namespace {
 /**
@@ -736,6 +738,127 @@ int main() {
     const auto passedThrough = utilityRuntime->processTensor(ones);
     passed &= expect(torch::equal(passedThrough, ones),
                      "a one-input Utility must pass its connected input through");
+  }
+
+  {
+    using openyourbox::graph::MergeMode;
+    using openyourbox::graph::NodeType;
+    auto propertyValue = [](const openyourbox::graph::NodeGraph &document,
+                            std::int32_t nodeId, const char *key, int fallback) {
+      const auto *node = document.findNode(nodeId);
+      if (node == nullptr)
+        return fallback;
+      for (const auto &property : node->properties) {
+        if (property.key == key)
+          return property.value;
+      }
+      return fallback;
+    };
+    auto wireTwoLinears = [](openyourbox::graph::NodeGraph &document, int leftFeatures,
+                             int rightFeatures, int mode, int inputs = 2) {
+      const auto audioIn = document.addNode(NodeType::audioInput, {0.0f, 0.0f});
+      const auto left = document.addNode(NodeType::linear, {180.0f, -40.0f});
+      const auto right = document.addNode(NodeType::linear, {180.0f, 80.0f});
+      const auto merge = document.addNode(NodeType::merge, {360.0f, 20.0f});
+      document.setProperty(left, "features", leftFeatures);
+      document.setProperty(right, "features", rightFeatures);
+      document.setProperty(merge, "mode", mode);
+      document.setProperty(merge, "inputs", inputs);
+      const auto *inNode = document.findNode(audioIn);
+      const auto *leftNode = document.findNode(left);
+      const auto *rightNode = document.findNode(right);
+      document.connect(inNode->outputs.front().id, leftNode->inputs.front().id);
+      document.connect(inNode->outputs.front().id, rightNode->inputs.front().id);
+      return std::array<std::int32_t, 4>{audioIn, left, right, merge};
+    };
+
+    openyourbox::graph::NodeGraph addMismatch;
+    const auto addIds = wireTwoLinears(addMismatch, 2, 3,
+                                       static_cast<int>(MergeMode::add));
+    const auto *addLeft = addMismatch.findNode(addIds[1]);
+    const auto *addRight = addMismatch.findNode(addIds[2]);
+    const auto *addMerge = addMismatch.findNode(addIds[3]);
+    passed &= expect(
+        addLeft != nullptr && addRight != nullptr && addMerge != nullptr &&
+            addMismatch
+                .connect(addLeft->outputs.front().id, addMerge->inputs[0].id)
+                .accepted,
+        "Utility add must accept the first 2ch input");
+    addMerge = addMismatch.findNode(addIds[3]);
+    const auto addSecond = addMismatch.connect(addRight->outputs.front().id,
+                                               addMerge->inputs[1].id);
+    passed &= expect(!addSecond.accepted &&
+                         addSecond.message.find("cannot combine") !=
+                             std::string::npos,
+                     "Utility add must refuse 2ch vs 3ch");
+
+    openyourbox::graph::NodeGraph multiplyMismatch;
+    const auto mulIds = wireTwoLinears(multiplyMismatch, 2, 3,
+                                       static_cast<int>(MergeMode::multiply));
+    const auto *mulLeft = multiplyMismatch.findNode(mulIds[1]);
+    const auto *mulRight = multiplyMismatch.findNode(mulIds[2]);
+    const auto *mulMerge = multiplyMismatch.findNode(mulIds[3]);
+    multiplyMismatch.connect(mulLeft->outputs.front().id,
+                             mulMerge->inputs[0].id);
+    mulMerge = multiplyMismatch.findNode(mulIds[3]);
+    passed &= expect(
+        !multiplyMismatch
+             .connect(mulRight->outputs.front().id, mulMerge->inputs[1].id)
+             .accepted,
+        "Utility multiply must refuse 2ch vs 3ch");
+
+    openyourbox::graph::NodeGraph broadcastGraph;
+    const auto bcIds = wireTwoLinears(broadcastGraph, 2, 1,
+                                      static_cast<int>(MergeMode::add));
+    const auto *bcLeft = broadcastGraph.findNode(bcIds[1]);
+    const auto *bcRight = broadcastGraph.findNode(bcIds[2]);
+    const auto *bcMerge = broadcastGraph.findNode(bcIds[3]);
+    passed &= expect(
+        broadcastGraph.connect(bcLeft->outputs.front().id, bcMerge->inputs[0].id)
+                .accepted &&
+            broadcastGraph
+                .connect(bcRight->outputs.front().id, bcMerge->inputs[1].id)
+                .accepted,
+        "Utility add must accept 2ch with a 1ch broadcast");
+
+    openyourbox::graph::NodeGraph reshapeGraph;
+    const auto rsIds = wireTwoLinears(reshapeGraph, 2, 2,
+                                      static_cast<int>(MergeMode::add));
+    const auto *rsLeft = reshapeGraph.findNode(rsIds[1]);
+    const auto *rsRight = reshapeGraph.findNode(rsIds[2]);
+    const auto *rsMerge = reshapeGraph.findNode(rsIds[3]);
+    reshapeGraph.connect(rsLeft->outputs.front().id, rsMerge->inputs[0].id);
+    reshapeGraph.connect(rsRight->outputs.front().id, rsMerge->inputs[1].id);
+    passed &= expect(!reshapeGraph.setProperty(rsIds[2], "features", 3) &&
+                         propertyValue(reshapeGraph, rsIds[2], "features", 0) ==
+                             2,
+                     "changing a Utility add input from 2ch to 3ch must roll back");
+
+    openyourbox::graph::NodeGraph concatThenAdd;
+    const auto catIds = wireTwoLinears(concatThenAdd, 2, 3,
+                                       static_cast<int>(MergeMode::concatenate));
+    const auto *catLeft = concatThenAdd.findNode(catIds[1]);
+    const auto *catRight = concatThenAdd.findNode(catIds[2]);
+    const auto *catMerge = concatThenAdd.findNode(catIds[3]);
+    passed &= expect(
+        concatThenAdd.connect(catLeft->outputs.front().id, catMerge->inputs[0].id)
+                .accepted &&
+            concatThenAdd
+                .connect(catRight->outputs.front().id, catMerge->inputs[1].id)
+                .accepted,
+        "Utility concatenate must accept 2ch and 3ch");
+    passed &= expect(
+        !concatThenAdd.setProperty(catIds[3], "mode",
+                                   static_cast<int>(MergeMode::add)) &&
+            propertyValue(concatThenAdd, catIds[3], "mode", -1) ==
+                static_cast<int>(MergeMode::concatenate),
+        "switching concatenate 2ch+3ch to add must roll back");
+    passed &= expect(
+        !concatThenAdd.setProperty(catIds[3], "mode",
+                                   static_cast<int>(MergeMode::multiply)) &&
+            propertyValue(concatThenAdd, catIds[3], "mode", -1) ==
+                static_cast<int>(MergeMode::concatenate),
+        "switching concatenate 2ch+3ch to multiply must roll back");
   }
 
   auto utilityTree = utilityGraph.toValueTree();

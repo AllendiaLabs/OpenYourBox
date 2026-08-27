@@ -27,6 +27,13 @@ void refreshPropagatedPinShapes(openyourbox::graph::NodeGraph &graph);
 void refreshPropagatedPinShapesCore(openyourbox::graph::NodeGraph &graph);
 void refreshOutputRepeatShapes(openyourbox::graph::NodeGraph &graph);
 
+std::string utilityNewInputIncompatibilityMessage(
+    const openyourbox::graph::NodeGraph &graph,
+    const openyourbox::graph::GraphNode &merge, std::int32_t newSourcePinId);
+std::string utilityInputsIncompatibilityMessage(
+    const openyourbox::graph::NodeGraph &graph,
+    const openyourbox::graph::GraphNode &merge);
+
 /**
  * @brief Collects every node and nested group owned by @p groupId.
  * @param graph Graph owning membership.
@@ -815,47 +822,6 @@ bool mergeDownstreamIsCompatible(const openyourbox::graph::NodeGraph &graph,
   return true;
 }
 
-/**
- * @brief Validates a new Utility input for add/multiply channel agreement.
- * @param graph Graph document to inspect.
- * @param merge Destination Utility node.
- * @param newSourcePinId Source pin proposed for one Utility input.
- * @return False when add/multiply mode would mix incompatible channel counts.
- */
-bool mergeInputConnectionIsValid(const openyourbox::graph::NodeGraph &graph,
-                                 const openyourbox::graph::GraphNode &merge,
-                                 std::int32_t newSourcePinId) {
-  using openyourbox::graph::MergeMode;
-  const auto concatenate =
-      mergeModeFor(merge) == static_cast<int>(MergeMode::concatenate);
-  std::unordered_set<std::int32_t> visiting;
-  const auto newChannels = resolvePinChannels(graph, newSourcePinId, visiting);
-  const auto *newSourcePin = graph.findPin(newSourcePinId);
-  for (const auto &inputPin : merge.inputs) {
-    for (const auto &link : graph.getLinks()) {
-      if (link.destinationPinId != inputPin.id)
-        continue;
-      visiting.clear();
-      const auto existingChannels =
-          resolvePinChannels(graph, link.sourcePinId, visiting);
-      if (!concatenate && newChannels > 0 && existingChannels > 0 &&
-          !channelsAreBroadcastCompatible(existingChannels, newChannels))
-        return false;
-      const auto *existingSource = graph.findPin(link.sourcePinId);
-      if (newSourcePin != nullptr && existingSource != nullptr) {
-        auto left = existingSource->shape;
-        auto right = newSourcePin->shape;
-        left.channels = 0;
-        right.channels = 0;
-        if (!left.isCompatibleWith(right))
-          return false;
-      }
-      break;
-    }
-  }
-  return true;
-}
-
 const openyourbox::graph::Pin *
 findConnectedSourcePin(const openyourbox::graph::NodeGraph &graph,
                        std::int32_t destinationPinId) {
@@ -891,6 +857,139 @@ openyourbox::graph::ShapeSignature outgoingShapeOf(
   return collapsedGroupAttachShape(pin.repeatShapes, pin.shape,
                                    graph.ancestorRuntimeRepeatCounts(owner->id),
                                    true);
+}
+
+/**
+ * @brief Resolves the shape a Utility input would consume from @p sourcePinId.
+ * @param graph Graph used to walk unspecified channel counts.
+ * @param sourcePinId Upstream output pin.
+ * @return Stored outgoing shape, with channels filled from graph resolution.
+ */
+openyourbox::graph::ShapeSignature resolvedUtilitySourceShape(
+    const openyourbox::graph::NodeGraph &graph, std::int32_t sourcePinId) {
+  const auto *pin = graph.findPin(sourcePinId);
+  openyourbox::graph::ShapeSignature shape;
+  if (pin != nullptr)
+    shape = outgoingShapeOf(graph, *pin);
+  if (shape.channels <= 0) {
+    std::unordered_set<std::int32_t> visiting;
+    const auto channels = resolvePinChannels(graph, sourcePinId, visiting);
+    if (channels > 0)
+      shape.channels = channels;
+  }
+  return shape;
+}
+
+/**
+ * @brief Collects shapes of currently connected Utility inputs.
+ * @param graph Graph owning the cables.
+ * @param merge Utility node to inspect.
+ * @return One shape per connected input, in pin order.
+ */
+std::vector<openyourbox::graph::ShapeSignature> connectedUtilitySourceShapes(
+    const openyourbox::graph::NodeGraph &graph,
+    const openyourbox::graph::GraphNode &merge) {
+  std::vector<openyourbox::graph::ShapeSignature> sources;
+  sources.reserve(merge.inputs.size());
+  for (const auto &inputPin : merge.inputs) {
+    if (const auto *source = findConnectedSourcePin(graph, inputPin.id))
+      sources.push_back(resolvedUtilitySourceShape(graph, source->id));
+  }
+  return sources;
+}
+
+/**
+ * @brief Explains why two Utility sources cannot share add, multiply, or concat.
+ * @param left First connected or proposed source.
+ * @param right Second connected or proposed source.
+ * @param concatenate True when channel counts may differ (concat mode).
+ * @return Empty when the pair is legal.
+ */
+std::string utilitySourcePairIncompatibilityMessage(
+    const openyourbox::graph::ShapeSignature &left,
+    const openyourbox::graph::ShapeSignature &right, bool concatenate) {
+  auto rateLeft = left;
+  auto rateRight = right;
+  rateLeft.channels = 0;
+  rateRight.channels = 0;
+  if (!rateLeft.isCompatibleWith(rateRight)) {
+    auto message = rateLeft.incompatibilityMessage(rateRight);
+    if (message.empty())
+      message = "Utility inputs must share temporal rate and band count";
+    return message;
+  }
+  if (!concatenate &&
+      !channelsAreBroadcastCompatible(left.channels, right.channels)) {
+    const auto leftLabel =
+        left.displayLabel().empty() ? "unspecified" : left.displayLabel();
+    const auto rightLabel =
+        right.displayLabel().empty() ? "unspecified" : right.displayLabel();
+    return "Utility inputs cannot combine (" + leftLabel + " vs " + rightLabel +
+           "); channels must match or either side may be 1";
+  }
+  return {};
+}
+
+/**
+ * @brief Folds Utility sources left-to-right under add/multiply broadcast rules.
+ * @param sources Connected or proposed input shapes.
+ * @param concatenate True to skip channel broadcast and only match rate/bands.
+ * @return Empty when every fold step is legal.
+ */
+std::string utilityFoldedSourcesIncompatibilityMessage(
+    const std::vector<openyourbox::graph::ShapeSignature> &sources,
+    bool concatenate) {
+  if (sources.size() < 2)
+    return {};
+  auto combined = sources.front();
+  for (std::size_t index = 1; index < sources.size(); ++index) {
+    if (const auto message = utilitySourcePairIncompatibilityMessage(
+            combined, sources[index], concatenate);
+        !message.empty())
+      return message;
+    if (concatenate)
+      combined.channels += sources[index].channels;
+    else
+      combined.channels = std::max(combined.channels, sources[index].channels);
+  }
+  return {};
+}
+
+/**
+ * @brief Validates every connected Utility input against add/multiply rules.
+ * @param graph Graph owning the cables.
+ * @param merge Utility node to inspect.
+ * @return Empty when connected inputs are legal for the current mode.
+ */
+std::string utilityInputsIncompatibilityMessage(
+    const openyourbox::graph::NodeGraph &graph,
+    const openyourbox::graph::GraphNode &merge) {
+  using openyourbox::graph::MergeMode;
+  using openyourbox::graph::NodeType;
+  if (merge.type != NodeType::merge)
+    return {};
+  const auto concatenate =
+      mergeModeFor(merge) == static_cast<int>(MergeMode::concatenate);
+  return utilityFoldedSourcesIncompatibilityMessage(
+      connectedUtilitySourceShapes(graph, merge), concatenate);
+}
+
+/**
+ * @brief Validates a proposed Utility input against already connected sources.
+ * @param graph Graph owning the cables.
+ * @param merge Destination Utility node.
+ * @param newSourcePinId Source pin proposed for one Utility input.
+ * @return Empty when the new source is legal for the current mode.
+ */
+std::string utilityNewInputIncompatibilityMessage(
+    const openyourbox::graph::NodeGraph &graph,
+    const openyourbox::graph::GraphNode &merge, std::int32_t newSourcePinId) {
+  using openyourbox::graph::MergeMode;
+  const auto concatenate =
+      mergeModeFor(merge) == static_cast<int>(MergeMode::concatenate);
+  auto sources = connectedUtilitySourceShapes(graph, merge);
+  sources.push_back(resolvedUtilitySourceShape(graph, newSourcePinId));
+  return utilityFoldedSourcesIncompatibilityMessage(sources, concatenate);
 }
 
 /**
@@ -1696,6 +1795,11 @@ std::string firstIncompatibleLinkMessage(const openyourbox::graph::NodeGraph &gr
     for (const auto &property : node.properties) {
       if (property.repeatListInvalid && !property.repeatListInvalidMessage.empty())
         return property.repeatListInvalidMessage;
+    }
+    if (node.type == NodeType::merge) {
+      if (const auto message = utilityInputsIncompatibilityMessage(graph, node);
+          !message.empty())
+        return message;
     }
   }
   for (const auto &link : graph.getLinks()) {
@@ -4425,10 +4529,12 @@ ConnectionResult NodeGraph::connect(std::int32_t firstPinId,
 
   if (destinationNodePtr != nullptr &&
       destinationNodePtr->type == NodeType::merge &&
-      destination->kind == PinKind::input &&
-      !mergeInputConnectionIsValid(*this, *destinationNodePtr, source->id))
-    return {false,
-            "Utility inputs must share temporal rate, band count, and channel count"};
+      destination->kind == PinKind::input) {
+    if (const auto message = utilityNewInputIncompatibilityMessage(
+            *this, *destinationNodePtr, source->id);
+        !message.empty())
+      return {false, message};
+  }
 
   if (sourceNodePtr != nullptr && sourceNodePtr->type == NodeType::merge)
     updateMergeOutputShape(*this, *const_cast<GraphNode *>(sourceNodePtr));
