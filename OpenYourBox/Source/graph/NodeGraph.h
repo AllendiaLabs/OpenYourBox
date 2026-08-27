@@ -419,6 +419,14 @@ public:
   [[nodiscard]] std::vector<int> ancestorRepeatCounts(std::int32_t nodeId) const;
 
   /**
+   * @brief Ancestor repeat counts using each group's effective (chainable) N.
+   * @param nodeId Leaf or hub node.
+   * @return Outer→inner vector; empty when @p nodeId has no parent group.
+   */
+  [[nodiscard]] std::vector<int>
+  ancestorRuntimeRepeatCounts(std::int32_t nodeId) const;
+
+  /**
    * @brief Re-tiles or flags authored repeat lists after a nest change.
    * @param nodeId Leaf node whose ancestor repeats may have changed.
    */

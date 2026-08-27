@@ -49,6 +49,10 @@ constexpr float propertyValueWidth = 76.0f;
 constexpr float canvasPanSpeed = 2.0f;
 /** @brief Base scroll-wheel pan distance in screen pixels. */
 constexpr float canvasWheelPanStep = 48.0f;
+/** @brief Pixels per mouse-wheel tick when scrolling the hierarchy trail. */
+constexpr float breadcrumbWheelStep = 48.0f;
+/** @brief Width of the fade drawn when the hierarchy trail is cropped. */
+constexpr float breadcrumbCropFadeWidth = 28.0f;
 /** @brief Middle-mouse button index used for canvas drag panning. */
 constexpr int canvasDragPanButton = 2;
 
@@ -341,35 +345,6 @@ void beginRepeatListPropertyRow(const char *label,
 }
 
 /**
- * @brief Ancestor repeat counts using each group's effective (chainable) repeats.
- * @param graph Graph document.
- * @param nodeId Leaf or hub node.
- * @return Outer→inner vector; empty when @p nodeId has no parent group.
- */
-std::vector<int>
-ancestorRuntimeRepeatCounts(const openyourbox::graph::NodeGraph &graph,
-                          std::int32_t nodeId) {
-  const auto *node = graph.findNode(nodeId);
-  if (node == nullptr)
-    return {};
-  std::vector<int> innerToOuter;
-  auto parent = node->parentGroupId;
-  std::unordered_set<std::int32_t> visiting;
-  while (parent.has_value()) {
-    if (!visiting.insert(*parent).second)
-      break;
-    const auto status = graph.groupRepeatStatus(*parent);
-    innerToOuter.push_back(std::max(1, status.effectiveRepeats));
-    const auto *group = graph.findGroup(*parent);
-    if (group == nullptr)
-      break;
-    parent = group->parentGroupId;
-  }
-  std::reverse(innerToOuter.begin(), innerToOuter.end());
-  return innerToOuter;
-}
-
-/**
  * @brief Draws a pin caption, hiding the shape behind a hover info icon.
  *
  * The caption never inlines the shape, including for a single repeat and for
@@ -420,6 +395,29 @@ std::string pinExpandedShapeInfo(const openyourbox::graph::Pin &pin,
  */
 bool canInsertOnLink(openyourbox::graph::NodeType type) noexcept {
   return !openyourbox::graph::isConditioningSourceType(type);
+}
+
+/**
+ * @brief Draws a fade on cropped edges of the hierarchy trail.
+ * @param min Screen-space top-left of the trail viewport.
+ * @param max Screen-space bottom-right of the trail viewport.
+ * @param croppedLeft True when content is clipped on the left.
+ * @param croppedRight True when content is clipped on the right.
+ */
+void drawBreadcrumbCropFades(ImVec2 min, ImVec2 max, bool croppedLeft,
+                             bool croppedRight) {
+  if (!croppedLeft && !croppedRight)
+    return;
+  auto *draw = ImGui::GetWindowDrawList();
+  const ImU32 opaque = ImGui::GetColorU32(ImGuiCol_WindowBg);
+  const ImU32 clear = opaque & ~IM_COL32_A_MASK;
+  const float fade = breadcrumbCropFadeWidth;
+  if (croppedLeft)
+    draw->AddRectFilledMultiColor(min, ImVec2(min.x + fade, max.y), opaque,
+                                  clear, clear, opaque);
+  if (croppedRight)
+    draw->AddRectFilledMultiColor(ImVec2(max.x - fade, min.y), max, clear,
+                                  opaque, opaque, clear);
 }
 } // namespace
 
@@ -954,7 +952,7 @@ void NodeRenderer::renderNode(NodeGraph &graph, GraphNode &node,
   drawNodeDivider();
 
   if (node.type != NodeType::groupInput) {
-    const auto pinRepeatCounts = ancestorRuntimeRepeatCounts(graph, node.id);
+    const auto pinRepeatCounts = graph.ancestorRuntimeRepeatCounts(node.id);
     for (const auto &pin : node.inputs) {
     ed::BeginPin(ed::PinId(editorIdentifier(pin.id)), ed::PinKind::Input);
     ImGui::PushID(pin.id);
@@ -1480,7 +1478,7 @@ void NodeRenderer::renderNode(NodeGraph &graph, GraphNode &node,
   }
 
   if (node.type != NodeType::groupOutput) {
-    const auto pinRepeatCounts = ancestorRuntimeRepeatCounts(graph, node.id);
+    const auto pinRepeatCounts = graph.ancestorRuntimeRepeatCounts(node.id);
     for (const auto &pin : node.outputs) {
     ed::BeginPin(ed::PinId(editorIdentifier(pin.id)), ed::PinKind::Output);
     ImGui::PushID(pin.id);
@@ -1654,7 +1652,7 @@ void NodeRenderer::renderGroup(NodeGraph &graph, GraphGroup &group,
     std::string expandedShapes;
     if (const auto *memberPin = graph.findPin(port.memberPinId)) {
       const auto repeatCounts =
-          ancestorRuntimeRepeatCounts(graph, port.memberNodeId);
+          graph.ancestorRuntimeRepeatCounts(port.memberNodeId);
       const bool takeLast = port.kind == PinKind::output;
       if (takeLast && !memberPin->repeatShapes.empty())
         displayShape = memberPin->repeatShapes.back();
@@ -2359,9 +2357,19 @@ void NodeRenderer::renderScopeBreadcrumb(NodeGraph &graph) {
                      }),
       viewport.stickySpine.end());
   const auto focused = viewport.focusedGroupId;
+  const auto followFocus = scopeBreadcrumbFollowFocus;
+  ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
+  ImGui::BeginChild("ScopeBreadcrumb",
+                    ImVec2(0.0f, ImGui::GetFrameHeightWithSpacing()), false,
+                    ImGuiWindowFlags_HorizontalScrollbar |
+                        ImGuiWindowFlags_NoScrollbar |
+                        ImGuiWindowFlags_NoScrollWithMouse);
+  ImGui::PopStyleVar();
   ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(4.0f, 4.0f));
   if (!focused.has_value()) {
     ImGui::TextColored(ImVec4(0.75f, 0.88f, 1.0f, 1.0f), "Graph");
+    if (followFocus)
+      ImGui::SetScrollHereX(0.0f);
   } else if (ImGui::SmallButton("Graph")) {
     setCanvasFocus(graph, std::nullopt);
   }
@@ -2377,6 +2385,8 @@ void NodeRenderer::renderScopeBreadcrumb(NodeGraph &graph) {
       if (id == *focused) {
         ImGui::TextColored(ImVec4(0.75f, 0.88f, 1.0f, 1.0f), "%s",
                            group->name.c_str());
+        if (followFocus)
+          ImGui::SetScrollHereX(0.75f);
       } else if (ImGui::SmallButton(group->name.c_str())) {
         setCanvasFocus(graph, id);
       }
@@ -2396,6 +2406,30 @@ void NodeRenderer::renderScopeBreadcrumb(NodeGraph &graph) {
     ImGui::PopID();
   }
   ImGui::PopStyleVar();
+
+  auto &io = ImGui::GetIO();
+  if (ImGui::IsWindowHovered()) {
+    const auto wheel =
+        io.MouseWheelH != 0.0f ? io.MouseWheelH : io.MouseWheel;
+    if (wheel != 0.0f) {
+      ImGui::SetScrollX(ImGui::GetScrollX() - wheel * breadcrumbWheelStep);
+      io.MouseWheel = 0.0f;
+      io.MouseWheelH = 0.0f;
+    }
+    if (!ImGui::IsAnyItemActive() &&
+        (ImGui::IsMouseDragging(ImGuiMouseButton_Left, 2.0f) ||
+         ImGui::IsMouseDragging(canvasDragPanButton, 0.0f))) {
+      ImGui::SetScrollX(ImGui::GetScrollX() - io.MouseDelta.x);
+    }
+  }
+  const auto croppedLeft = ImGui::GetScrollX() > 1.0f;
+  const auto croppedRight =
+      ImGui::GetScrollX() < ImGui::GetScrollMaxX() - 1.0f;
+  ImGui::EndChild();
+  if (followFocus)
+    scopeBreadcrumbFollowFocus = false;
+  drawBreadcrumbCropFades(ImGui::GetItemRectMin(), ImGui::GetItemRectMax(),
+                          croppedLeft, croppedRight);
 }
 
 void NodeRenderer::setCanvasFocus(NodeGraph &graph,
@@ -2415,6 +2449,7 @@ void NodeRenderer::setCanvasFocus(NodeGraph &graph,
   updateHierarchyStickySpine(viewport.stickySpine, previousChain, nextChain);
   viewport.focusedGroupId = groupId;
   restoreViewPending = true;
+  scopeBreadcrumbFollowFocus = true;
   layoutMutatedThisFrame = true;
   mutatedThisFrame = true;
 }

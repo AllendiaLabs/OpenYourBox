@@ -35,6 +35,7 @@ int main() {
   using openyourbox::graph::formatExpandedPropertyRepeatList;
   using openyourbox::graph::formatHierarchicalRepeatList;
   using openyourbox::graph::formatCollapsedGroupPinShapes;
+  using openyourbox::graph::collapsedGroupAttachShape;
   using openyourbox::graph::formatShapeRepeatList;
   using openyourbox::graph::isDividingSetLength;
   using openyourbox::graph::parsePropertyRepeatList;
@@ -99,6 +100,15 @@ int main() {
   passed &= expect(formatCollapsedGroupPinShapes({twoCh, fourCh, eightCh},
                                                  twoCh, {3}, true) == "8ch",
                    "collapsed group output shows last repeat, not the inner list");
+  passed &= expect(collapsedGroupAttachShape({twoCh, fourCh, eightCh}, twoCh,
+                                             {3}, true)
+                           .channels == 8,
+                   "parent-canvas group output attaches at last-out");
+  passed &= expect(collapsedGroupAttachShape(
+                       {twoCh, fourCh, eightCh, twoCh, fourCh, sixteenCh},
+                       twoCh, {2, 3}, true)
+                           .channels == 8,
+                   "nested attach shape is first outer slot's last-out, not 16");
   passed &= expect(formatCollapsedGroupPinShapes({twoCh, fourCh, eightCh},
                                                  twoCh, {3}, false) == "2ch",
                    "collapsed group input shows first repeat, not the inner list");

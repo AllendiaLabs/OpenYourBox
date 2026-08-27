@@ -125,6 +125,9 @@ private:
                    const NodeRendererCallbacks &callbacks);
   /**
    * @brief Draws Graph > group breadcrumb navigation above the canvas.
+   *
+   * The trail stays on one line. When it is wider than the canvas it
+   * scrolls horizontally, and cropped edges fade out.
    * @param graph Message-thread graph document.
    */
   void renderScopeBreadcrumb(NodeGraph &graph);
@@ -259,6 +262,8 @@ private:
   const char *patchGestureLabel = "Parameter edit";
   /** @brief Whether persisted canvas navigation still needs restoring. */
   bool restoreViewPending = true;
+  /** @brief True to keep the focused hierarchy trail entry in view. */
+  bool scopeBreadcrumbFollowFocus = true;
   /** @brief Last known canvas-space centre used when spawning from the palette. */
   ImVec2 lastCanvasCentre{250.0f, 140.0f};
   /** @brief True when the overview map captured the pointer on the previous frame. */

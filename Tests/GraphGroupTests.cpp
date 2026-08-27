@@ -1066,8 +1066,102 @@ int main() {
                   innerOutHub->outputs.front().repeatShapes,
                   innerOutHub->outputs.front().shape, {3}, true) == "8ch",
           "collapsed group output label is last repeat, not [2ch, 4ch, 8ch]");
+      passed &= expect(innerOutHub != nullptr && !innerOutHub->outputs.empty() &&
+                           innerOutHub->outputs.front().shape.channels == 8,
+                       "group output hub shape is last-out for parent-canvas cables");
       passed &= expect(linear->outputs.front().shape.channels == 2,
                        "visible pin.shape stays first-repeat for chaining");
+      outNode = shapeGraph.findNode(outId);
+      if (outNode != nullptr && !outNode->inputs.empty()) {
+        const auto outPin = outNode->inputs.front().id;
+        std::vector<std::int32_t> stale;
+        for (const auto &link : shapeGraph.getLinks()) {
+          if (link.destinationPinId == outPin)
+            stale.push_back(link.id);
+        }
+        for (const auto linkId : stale)
+          shapeGraph.removeLink(linkId);
+      }
+      const auto downstreamId =
+          shapeGraph.addNode(NodeType::convolution, {400.0f, 80.0f});
+      const auto *downstream = shapeGraph.findNode(downstreamId);
+      passed &= expect(
+          innerOutHub != nullptr && !innerOutHub->outputs.empty() &&
+              downstream != nullptr && !downstream->inputs.empty() &&
+              shapeGraph
+                  .connect(innerOutHub->outputs.front().id,
+                           downstream->inputs.front().id)
+                  .accepted,
+          "group output connects to a downstream conv");
+      downstream = shapeGraph.findNode(downstreamId);
+      passed &= expect(downstream != nullptr && !downstream->inputs.empty() &&
+                           downstream->inputs.front().shape.channels == 8,
+                       "downstream conv input inherits last-out, not first-repeat");
+    }
+  }
+
+  {
+    NodeGraph convExit;
+    const auto inId = convExit.addNode(NodeType::audioInput, {0.0f, 0.0f});
+    const auto convId =
+        convExit.addNode(NodeType::convolution, {160.0f, 0.0f});
+    const auto actId = convExit.addNode(NodeType::activation, {280.0f, 0.0f});
+    const auto downstreamId =
+        convExit.addNode(NodeType::convolution, {400.0f, 0.0f});
+    const auto *inNode = convExit.findNode(inId);
+    const auto *convNode = convExit.findNode(convId);
+    const auto *actNode = convExit.findNode(actId);
+    const auto *downstreamNode = convExit.findNode(downstreamId);
+    passed &= expect(inNode != nullptr && convNode != nullptr &&
+                         actNode != nullptr && downstreamNode != nullptr,
+                     "conv last-out graph nodes exist");
+    if (inNode != nullptr && convNode != nullptr && actNode != nullptr &&
+        downstreamNode != nullptr) {
+      passed &= expect(convExit
+                           .connect(inNode->outputs.front().id,
+                                    convNode->inputs.front().id)
+                           .accepted &&
+                           convExit
+                               .connect(convNode->outputs.front().id,
+                                        actNode->inputs.front().id)
+                               .accepted &&
+                           convExit
+                               .connect(actNode->outputs.front().id,
+                                        downstreamNode->inputs.front().id)
+                               .accepted,
+                       "audio to conv to act to downstream conv");
+      const auto grouped = convExit.createGroup({convId, actId});
+      passed &= expect(grouped.accepted, "group around conv [512, 128]");
+      passed &= expect(convExit.setGroupRepeats(grouped.groupId, 2).accepted,
+                       "conv group N=2");
+      passed &= expect(
+          convExit.setPropertyRepeatValues(convId, "channels", {512, 128}),
+          "per-repeat conv channels 512,128");
+      const auto convStatus = convExit.groupRepeatStatus(grouped.groupId);
+      passed &= expect(convStatus.active && convStatus.effectiveRepeats == 2,
+                       convStatus.message.empty()
+                           ? "conv group N=2 is active"
+                           : convStatus.message.c_str());
+      convNode = convExit.findNode(convId);
+      passed &= expect(
+          convNode != nullptr && !convNode->outputs.empty() &&
+              convNode->outputs.front().repeatShapes.size() == 2 &&
+              convNode->outputs.front().repeatShapes[0].channels == 512 &&
+              convNode->outputs.front().repeatShapes[1].channels == 128,
+          "grouped conv lists per-repeat output shapes 512,128");
+      const auto *outHub = convExit.findNode(
+          findBoundary(convExit, grouped.groupId, NodeType::groupOutput));
+      downstreamNode = convExit.findNode(downstreamId);
+      passed &= expect(convNode != nullptr && !convNode->outputs.empty() &&
+                           convNode->outputs.front().shape.channels == 512,
+                       "grouped conv visible output stays first-repeat 512");
+      passed &= expect(outHub != nullptr && !outHub->outputs.empty() &&
+                           outHub->outputs.front().shape.channels == 128,
+                       "group output pin is last-out 128");
+      passed &= expect(
+          downstreamNode != nullptr && !downstreamNode->inputs.empty() &&
+              downstreamNode->inputs.front().shape.channels == 128,
+          "downstream conv input inherits last-out 128, not first-repeat 512");
     }
   }
 
@@ -1122,6 +1216,10 @@ int main() {
       passed &= expect(
           nestedShapes.setPropertyRepeatValues(linearId, "features", {2, 4, 8}),
           "inner per-repeat features 2,4,8");
+      extraNode = nestedShapes.findNode(extraId);
+      passed &= expect(extraNode != nullptr && !extraNode->inputs.empty() &&
+                           extraNode->inputs.front().shape.channels == 8,
+                       "node after inner group inherits last-out, not first-repeat");
       const auto outer =
           nestedShapes.createGroup({inner.groupId, extraId});
       passed &= expect(outer.accepted, "outer group wraps inner group and tail");

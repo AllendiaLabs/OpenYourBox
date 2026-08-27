@@ -867,6 +867,51 @@ findConnectedSourcePin(const openyourbox::graph::NodeGraph &graph,
 }
 
 /**
+ * @brief Shape a source pin presents to downstream consumers.
+ *
+ * Group Output hub exits attach to last-out of the serial stack; every other
+ * pin uses its stored @c shape.
+ * @param graph Graph owning the pin.
+ * @param pin Source endpoint.
+ */
+openyourbox::graph::ShapeSignature outgoingShapeOf(
+    const openyourbox::graph::NodeGraph &graph,
+    const openyourbox::graph::Pin &pin) {
+  using openyourbox::graph::NodeType;
+  using openyourbox::graph::PinKind;
+  using openyourbox::graph::collapsedGroupAttachShape;
+  if (pin.kind != PinKind::output)
+    return pin.shape;
+  const auto ownerId = graph.findNodeForPin(pin.id);
+  if (!ownerId.has_value())
+    return pin.shape;
+  const auto *owner = graph.findNode(*ownerId);
+  if (owner == nullptr || owner->type != NodeType::groupOutput)
+    return pin.shape;
+  return collapsedGroupAttachShape(pin.repeatShapes, pin.shape,
+                                   graph.ancestorRuntimeRepeatCounts(owner->id),
+                                   true);
+}
+
+/**
+ * @brief Writes the parent-canvas last-out attach shape onto a Group Output hub.
+ * @param graph Graph owning the hub.
+ * @param node Group Output hub to update.
+ */
+void applyGroupOutputExitShapes(openyourbox::graph::NodeGraph &graph,
+                                openyourbox::graph::GraphNode &node) {
+  using openyourbox::graph::collapsedGroupAttachShape;
+  const auto counts = graph.ancestorRuntimeRepeatCounts(node.id);
+  const auto laneCount = std::min(node.inputs.size(), node.outputs.size());
+  for (std::size_t index = 0; index < laneCount; ++index) {
+    auto &output = node.outputs[index];
+    output.shape = collapsedGroupAttachShape(output.repeatShapes,
+                                             node.inputs[index].shape, counts,
+                                             true);
+  }
+}
+
+/**
  * @brief Returns the first connected tensor source shape, or a wildcard.
  * @param graph Graph document to inspect.
  * @param node Node whose non-control inputs are scanned.
@@ -880,7 +925,7 @@ firstConnectedTensorSource(const openyourbox::graph::NodeGraph &graph,
     if (isControlInputPin(pin))
       continue;
     if (const auto *source = findConnectedSourcePin(graph, pin.id))
-      return source->shape;
+      return outgoingShapeOf(graph, *source);
   }
   return flexibleTensorShape();
 }
@@ -1438,6 +1483,7 @@ void refreshOutputRepeatShapes(openyourbox::graph::NodeGraph &graph) {
           break;
         }
       }
+      applyGroupOutputExitShapes(graph, node);
     } else if (node.type == openyourbox::graph::NodeType::groupInput) {
       const auto laneCount = std::min(node.inputs.size(), node.outputs.size());
       for (std::size_t index = 0; index < laneCount; ++index) {
@@ -1471,6 +1517,9 @@ void refreshOutputRepeatShapes(openyourbox::graph::NodeGraph &graph) {
 void refreshPropagatedPinShapes(openyourbox::graph::NodeGraph &graph) {
   refreshPropagatedPinShapesCore(graph);
   refreshOutputRepeatShapes(graph);
+  // Repeat-shape unroll fills Group Output last-out lists after the first
+  // pass, so consumers on the parent canvas inherit again from those exits.
+  refreshPropagatedPinShapesCore(graph);
 }
 
 /**
@@ -1495,19 +1544,23 @@ void applyNodePinShapes(openyourbox::graph::NodeGraph &graph,
       if (isControlInputPin(pin))
         continue;
       if (const auto *connected = findConnectedSourcePin(graph, pin.id))
-        inheritTensorFields(pin, connected->shape, true);
+        inheritTensorFields(pin, outgoingShapeOf(graph, *connected), true);
       else
         pin.shape = flexibleTensorShape();
     }
   };
 
   switch (node.type) {
-  case NodeType::groupInput:
-  case NodeType::groupOutput: {
+  case NodeType::groupInput: {
     inheritInputs();
     const auto laneCount = std::min(node.inputs.size(), node.outputs.size());
     for (std::size_t index = 0; index < laneCount; ++index)
       node.outputs[index].shape = node.inputs[index].shape;
+    break;
+  }
+  case NodeType::groupOutput: {
+    inheritInputs();
+    applyGroupOutputExitShapes(graph, node);
     break;
   }
   case NodeType::pqmfAnalysis: {
@@ -1518,9 +1571,10 @@ void applyNodePinShapes(openyourbox::graph::NodeGraph &graph,
       pin.shape.temporalRate = 1;
       pin.shape.nBand = 0;
       if (const auto *connected = findConnectedSourcePin(graph, pin.id)) {
-        pin.shape.channels = connected->shape.channels;
-        if (connected->shape.channels > 0)
-          audioChannels = connected->shape.channels;
+        const auto incoming = outgoingShapeOf(graph, *connected);
+        pin.shape.channels = incoming.channels;
+        if (incoming.channels > 0)
+          audioChannels = incoming.channels;
       } else {
         pin.shape.channels = 0;
       }
@@ -1541,9 +1595,10 @@ void applyNodePinShapes(openyourbox::graph::NodeGraph &graph,
       pin.shape.temporalRate = nBand;
       pin.shape.nBand = nBand;
       if (const auto *connected = findConnectedSourcePin(graph, pin.id)) {
-        pin.shape.channels = connected->shape.channels;
-        if (connected->shape.channels > 0)
-          bandChannels = connected->shape.channels;
+        const auto incoming = outgoingShapeOf(graph, *connected);
+        pin.shape.channels = incoming.channels;
+        if (incoming.channels > 0)
+          bandChannels = incoming.channels;
       } else {
         pin.shape.channels = 0;
       }
@@ -1648,8 +1703,9 @@ std::string firstIncompatibleLinkMessage(const openyourbox::graph::NodeGraph &gr
     const auto *destination = graph.findPin(link.destinationPinId);
     if (source == nullptr || destination == nullptr)
       continue;
-    if (!source->shape.isCompatibleWith(destination->shape)) {
-      auto message = source->shape.incompatibilityMessage(destination->shape);
+    const auto sourceShape = outgoingShapeOf(graph, *source);
+    if (!sourceShape.isCompatibleWith(destination->shape)) {
+      auto message = sourceShape.incompatibilityMessage(destination->shape);
       if (message.empty())
         message = "Shape mismatch: channel counts are incompatible";
       return message;
@@ -1661,23 +1717,23 @@ std::string firstIncompatibleLinkMessage(const openyourbox::graph::NodeGraph &gr
     if (node == nullptr)
       continue;
     if (node->type == NodeType::pqmfSynthesis &&
-        pqmfSynthesisChannelIsError(source->shape.channels,
+        pqmfSynthesisChannelIsError(sourceShape.channels,
                                     std::max(2, readNodeProperty(
                                                     *node, "n_band",
                                                     defaultPqmfBands))))
       return pqmfSynthesisChannelMessage(
-          source->shape.channels,
+          sourceShape.channels,
           std::max(2, readNodeProperty(*node, "n_band", defaultPqmfBands)));
     if (node->type == NodeType::variationalBottleneck &&
-        variationalBottleneckChannelIsError(source->shape.channels))
-      return variationalBottleneckChannelMessage(source->shape.channels);
+        variationalBottleneckChannelIsError(sourceShape.channels))
+      return variationalBottleneckChannelMessage(sourceShape.channels);
     if (!isConvolutionType(node->type) && !isConvTransposeType(node->type))
       continue;
     const auto stride = std::max(1, readNodeProperty(*node, "stride", 1));
     const auto upsample = isConvTransposeType(node->type);
-    if (convolutionRateIsError(stride, upsample, source->shape.temporalRate))
+    if (convolutionRateIsError(stride, upsample, sourceShape.temporalRate))
       return convolutionRateMessage(stride, upsample,
-                                    source->shape.temporalRate);
+                                    sourceShape.temporalRate);
   }
   return {};
 }
@@ -3332,6 +3388,28 @@ std::vector<int> NodeGraph::ancestorRepeatCounts(std::int32_t nodeId) const {
   return innerToOuter;
 }
 
+std::vector<int>
+NodeGraph::ancestorRuntimeRepeatCounts(std::int32_t nodeId) const {
+  const auto *node = findNode(nodeId);
+  if (node == nullptr)
+    return {};
+  std::vector<int> innerToOuter;
+  auto parent = node->parentGroupId;
+  std::unordered_set<std::int32_t> visiting;
+  while (parent.has_value()) {
+    if (!visiting.insert(*parent).second)
+      break;
+    const auto status = groupRepeatStatus(*parent);
+    innerToOuter.push_back(std::max(1, status.effectiveRepeats));
+    const auto *group = findGroup(*parent);
+    if (group == nullptr)
+      break;
+    parent = group->parentGroupId;
+  }
+  std::reverse(innerToOuter.begin(), innerToOuter.end());
+  return innerToOuter;
+}
+
 void NodeGraph::validateAuthoredRepeatLists(std::int32_t nodeId) {
   auto *node = findNode(nodeId);
   if (node == nullptr)
@@ -4355,12 +4433,13 @@ ConnectionResult NodeGraph::connect(std::int32_t firstPinId,
   if (sourceNodePtr != nullptr && sourceNodePtr->type == NodeType::merge)
     updateMergeOutputShape(*this, *const_cast<GraphNode *>(sourceNodePtr));
 
-  if (!source->shape.isCompatibleWith(destination->shape)) {
+  const auto sourceShape = outgoingShapeOf(*this, *source);
+  if (!sourceShape.isCompatibleWith(destination->shape)) {
     if (sourceNodePtr != nullptr && sourceNodePtr->type == NodeType::merge) {
       std::unordered_set<std::int32_t> visiting;
       const auto outputChannels =
           computeMergeOutputChannels(*this, *sourceNodePtr, visiting);
-      ShapeSignature mergeShape = source->shape;
+      ShapeSignature mergeShape = sourceShape;
       if (outputChannels > 0)
         mergeShape.channels = outputChannels;
       if (!mergeShape.isCompatibleWith(destination->shape)) {
@@ -4370,7 +4449,7 @@ ConnectionResult NodeGraph::connect(std::int32_t firstPinId,
         return {false, message};
       }
     } else {
-      auto message = source->shape.incompatibilityMessage(destination->shape);
+      auto message = sourceShape.incompatibilityMessage(destination->shape);
       if (message.empty())
         message = "Shape mismatch: channel counts are incompatible";
       return {false, message};
@@ -4383,28 +4462,28 @@ ConnectionResult NodeGraph::connect(std::int32_t firstPinId,
     const auto stride =
         std::max(1, readNodeProperty(*destinationNodePtr, "stride", 1));
     const auto upsample = isConvTransposeType(destinationNodePtr->type);
-    if (convolutionRateIsError(stride, upsample, source->shape.temporalRate))
+    if (convolutionRateIsError(stride, upsample, sourceShape.temporalRate))
       return {false, convolutionRateMessage(stride, upsample,
-                                            source->shape.temporalRate)};
+                                            sourceShape.temporalRate)};
   }
 
   if (destinationNodePtr != nullptr &&
       destinationNodePtr->type == NodeType::pqmfSynthesis &&
       pqmfSynthesisChannelIsError(
-          source->shape.channels,
+          sourceShape.channels,
           std::max(2, readNodeProperty(*destinationNodePtr, "n_band",
                                        defaultPqmfBands))))
     return {false, pqmfSynthesisChannelMessage(
-                       source->shape.channels,
+                       sourceShape.channels,
                        std::max(2, readNodeProperty(*destinationNodePtr,
                                                       "n_band",
                                                       defaultPqmfBands)))};
 
   if (destinationNodePtr != nullptr &&
       destinationNodePtr->type == NodeType::variationalBottleneck &&
-      variationalBottleneckChannelIsError(source->shape.channels))
+      variationalBottleneckChannelIsError(sourceShape.channels))
     return {false,
-            variationalBottleneckChannelMessage(source->shape.channels)};
+            variationalBottleneckChannelMessage(sourceShape.channels)};
 
   const auto duplicate = std::any_of(
       links.begin(), links.end(), [source, destination](const GraphLink &link) {

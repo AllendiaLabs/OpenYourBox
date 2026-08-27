@@ -575,12 +575,67 @@ foldInnerRepeatShapes(const std::vector<ShapeSignature> &shapes, int innerFold,
 }
 
 /**
- * @brief Formats collapsed group-box pin shapes for the parent canvas.
+ * @brief Folds a collapsed group-box pin to first-in or last-out per outer slot.
  *
  * Repeats of the group itself — and of any nested groups whose repeat axes
  * leaked onto this hub — chain serially, so the parent canvas only attaches
  * to first-repeat inputs and last-repeat outputs. Those inner shapes are folded
- * away. Strict ancestor repeat axes remain as a nested list.
+ * away. Strict ancestor repeat axes remain as one entry per outer slot.
+ *
+ * @param shapes Per-repeat shapes; may include the group's own axis and nested
+ *        descendant repeat axes inside it.
+ * @param ancestorRepeatCounts Outer→inner runtime repeat counts for the hub,
+ *        including the collapsed group's own N as the last entry.
+ * @param takeLast True for outputs (last repeat of each inner chunk); false for
+ *        inputs (first repeat of each inner chunk).
+ * @return One shape per remaining outer slot; empty when @p shapes is empty.
+ */
+inline std::vector<ShapeSignature> collapsedGroupPinShapes(
+    const std::vector<ShapeSignature> &shapes,
+    const std::vector<int> &ancestorRepeatCounts, bool takeLast) {
+  std::vector<int> outerCounts = ancestorRepeatCounts;
+  if (!outerCounts.empty())
+    outerCounts.pop_back();
+  int outerProduct = 1;
+  for (const auto repeats : outerCounts)
+    outerProduct *= std::max(1, repeats);
+  outerProduct = std::max(1, outerProduct);
+  const int shapeCount = static_cast<int>(shapes.size());
+  int innerFold = 1;
+  if (shapeCount > 0 && shapeCount % outerProduct == 0)
+    innerFold = std::max(1, shapeCount / outerProduct);
+  else if (shapeCount > 0)
+    innerFold = shapeCount;
+  return foldInnerRepeatShapes(shapes, innerFold, takeLast);
+}
+
+/**
+ * @brief Parent-canvas attach shape for a collapsed group pin.
+ *
+ * For outputs this is last-out of the first remaining outer slot; for inputs
+ * it is first-in of that slot.
+ *
+ * @param shapes Per-repeat shapes; may include the group's own axis.
+ * @param fallback Shape used when @p shapes is empty (typically first-repeat).
+ * @param ancestorRepeatCounts Outer→inner runtime repeat counts for the hub,
+ *        including the collapsed group's own N as the last entry.
+ * @param takeLast True for outputs; false for inputs.
+ * @return Attach shape consumed by cables on the parent canvas.
+ */
+inline ShapeSignature collapsedGroupAttachShape(
+    const std::vector<ShapeSignature> &shapes, const ShapeSignature &fallback,
+    const std::vector<int> &ancestorRepeatCounts, bool takeLast) {
+  const auto folded =
+      collapsedGroupPinShapes(shapes, ancestorRepeatCounts, takeLast);
+  if (!folded.empty())
+    return folded.front();
+  if (takeLast && !shapes.empty())
+    return shapes.back();
+  return fallback;
+}
+
+/**
+ * @brief Formats collapsed group-box pin shapes for the parent canvas.
  *
  * @param shapes Per-repeat shapes; may include the group's own axis and nested
  *        descendant repeat axes inside it.
@@ -597,17 +652,8 @@ inline std::string formatCollapsedGroupPinShapes(
   std::vector<int> outerCounts = ancestorRepeatCounts;
   if (!outerCounts.empty())
     outerCounts.pop_back();
-  int outerProduct = 1;
-  for (const auto repeats : outerCounts)
-    outerProduct *= std::max(1, repeats);
-  outerProduct = std::max(1, outerProduct);
-  const int shapeCount = static_cast<int>(shapes.size());
-  int innerFold = 1;
-  if (shapeCount > 0 && shapeCount % outerProduct == 0)
-    innerFold = std::max(1, shapeCount / outerProduct);
-  else if (shapeCount > 0)
-    innerFold = shapeCount;
-  const auto folded = foldInnerRepeatShapes(shapes, innerFold, takeLast);
+  const auto folded =
+      collapsedGroupPinShapes(shapes, ancestorRepeatCounts, takeLast);
   const ShapeSignature &effectiveFallback =
       !folded.empty()
           ? folded.front()
@@ -863,18 +909,22 @@ struct Pin {
   /** @brief Input or output direction. */
   PinKind kind = PinKind::input;
   /**
-   * @brief Tensor shape for the visible (first) repeat.
+   * @brief Tensor shape presented by this pin on its canvas.
    *
-   * External cables into a multi-repeat group still validate against this shape.
-   * Group outputs that leave the stack use @ref repeatShapes when present.
+   * Ordinary pins and Group Input hubs keep the visible first repeat. Group
+   * Output hub outputs store the parent-canvas attach shape (last-out of this
+   * group's serial axis for the first remaining outer slot). External cables
+   * into a multi-repeat group still validate against first-repeat input;
+   * cables that leave the stack consume last-repeat output.
    */
   ShapeSignature shape;
   /**
    * @brief Per-repeat shapes when the owner participates in N&gt;1 group repeats.
    *
-   * Empty when the runtime repeat product is 1. Index 0 matches @ref shape.
+   * Empty when the runtime repeat product is 1. Index 0 is the first repeat.
    * The innermost axis is the owner's group; ancestor axes nest outside it.
-   * Collapsed group boxes fold that inner axis to first-in / last-out.
+   * Collapsed group boxes fold that inner axis to first-in / last-out. Group
+   * Output hub @ref shape may therefore differ from index 0.
    */
   std::vector<ShapeSignature> repeatShapes;
 };
