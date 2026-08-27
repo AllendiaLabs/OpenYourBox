@@ -378,6 +378,10 @@ public:
 
   /**
    * @brief Evaluates a group's requested serial copies without mutating it.
+   *
+   * Copies are active when lanes match, a through-path exists, and each copy
+   * can feed the next after per-copy properties (`in`, channel lists). First-copy
+   * output need not match first-copy input.
    * @param groupId Target group.
    * @return Effective count and actionable diagnostics.
    */

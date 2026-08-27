@@ -22,7 +22,7 @@ Defines the per-group requested **copies** parameter N, the derived effective ru
 - Requested N &gt; 1 is active only when all of the following hold:
   1. Group Input and Group Output declare the same nonzero lane count.
   2. A directed graph path exists from Group Input through the group to Group Output.
-  3. Every Group Output lane shape is compatible with the corresponding Group Input lane shape.
+  3. Each serial copy can feed the next after applying that copy’s properties (per-copy channel/feature/stride lists and `in` bindings). First-copy output need not equal first-copy input. Residual joins that cannot combine at a copy keep N inactive.
 - Optional conditioning/control inputs do not by themselves prevent a legal signal through-path.
 
 ## Requested and effective behavior
@@ -41,7 +41,7 @@ Defines the per-group requested **copies** parameter N, the derived effective ru
 - When inactive, show requested N and **effective 1**, followed by a persistent actionable reason:
   - unequal/missing declared Group Input and Group Output lanes;
   - no Group Input-to-Group Output path; or
-  - the incompatible output/input lane number and both shape values.
+  - the incompatible serial-copy join (copy i cannot feed copy i+1, or a residual Utility cannot combine) and both shape values.
 - For a shape failure, highlight candidate shape-driving properties upstream of the affected Group Output lane (for example `channels`, `features`, `latent_size`, `stride`, or `n_band`). Where supported, the hint may suggest using `in` to preserve incoming width.
 - Diagnostics MUST NOT automatically alter model properties, links, hub lane counts, or requested N. They identify user-editable repair points only.
 

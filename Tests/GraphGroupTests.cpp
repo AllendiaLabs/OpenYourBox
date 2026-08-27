@@ -766,21 +766,87 @@ int main() {
     const auto grouped = mismatch.createGroup({linear, inside});
     mismatch.setGroupCopies(grouped.groupId, 3);
     const auto status = mismatch.groupCopyStatus(grouped.groupId);
-    const auto hint = mismatch.groupCopyPropertyHint(linear, "features");
+    passed &= expect(status.active && status.effectiveCopies == 3,
+                     "width-changing feedforward copies chain without matching I/O");
+    const auto *groupedLinear = mismatch.findNode(linear);
+    passed &= expect(
+        groupedLinear != nullptr && !groupedLinear->outputs.empty() &&
+            groupedLinear->outputs.front().copyShapes.size() == 3 &&
+            groupedLinear->outputs.front().copyShapes[0].channels == 4 &&
+            groupedLinear->outputs.front().copyShapes[1].channels == 4 &&
+            groupedLinear->outputs.front().copyShapes[2].channels == 4,
+        "feedforward Linear lists 4ch on every copy");
+  }
+
+  {
+    NodeGraph residualMismatch;
+    const auto input =
+        residualMismatch.addNode(NodeType::audioInput, {0.0f, 0.0f});
+    const auto linear =
+        residualMismatch.addNode(NodeType::linear, {120.0f, 0.0f});
+    const auto add =
+        residualMismatch.addNode(NodeType::merge, {300.0f, 0.0f});
+    residualMismatch.setProperty(linear, "features", 4);
+    residualMismatch.setProperty(add, "inputs", 2);
+    const auto grouped = residualMismatch.createGroup({linear, add});
+    passed &= expect(grouped.accepted, "residual mismatch fixture groups");
+    const auto inputId =
+        findBoundary(residualMismatch, grouped.groupId, NodeType::groupInput);
+    const auto outputId =
+        findBoundary(residualMismatch, grouped.groupId, NodeType::groupOutput);
+    const auto *audio = residualMismatch.findNode(input);
+    const auto *inputHub = residualMismatch.findNode(inputId);
+    const auto *outputHub = residualMismatch.findNode(outputId);
+    const auto *linearNode = residualMismatch.findNode(linear);
+    const auto *addNode = residualMismatch.findNode(add);
+    passed &= expect(audio != nullptr && inputHub != nullptr &&
+                         outputHub != nullptr && linearNode != nullptr &&
+                         addNode != nullptr && addNode->inputs.size() >= 2,
+                     "residual mismatch nodes exist");
+    if (audio != nullptr && inputHub != nullptr && outputHub != nullptr &&
+        linearNode != nullptr && addNode != nullptr &&
+        addNode->inputs.size() >= 2) {
+      passed &= expect(
+          residualMismatch
+                  .connect(inputHub->outputs.front().id,
+                           linearNode->inputs.front().id)
+                  .accepted &&
+              residualMismatch
+                  .connect(linearNode->outputs.front().id,
+                           addNode->inputs.front().id)
+                  .accepted &&
+              residualMismatch
+                  .connect(inputHub->outputs.front().id, addNode->inputs[1].id)
+                  .accepted &&
+              residualMismatch
+                  .connect(addNode->outputs.front().id,
+                           outputHub->inputs.front().id)
+                  .accepted,
+          "residual skip joins group input with Linear before host audio");
+      residualMismatch.setGroupCopies(grouped.groupId, 3);
+      passed &= expect(
+          residualMismatch
+              .connect(audio->outputs.front().id, inputHub->inputs.front().id)
+              .accepted,
+          "host audio can enter the residual group");
+    }
+    const auto status = residualMismatch.groupCopyStatus(grouped.groupId);
+    const auto hint = residualMismatch.groupCopyPropertyHint(linear, "features");
     passed &= expect(!status.active && status.effectiveCopies == 1 &&
                          hint.has_value() &&
                          hint->find("use 'in'") != std::string::npos,
-                     "shape mismatch flags the property that can preserve input");
-    const auto warnings = mismatch.collectGraphWarnings();
+                     "residual skip mismatch flags the property that can preserve input");
+    const auto warnings = residualMismatch.collectGraphWarnings();
     passed &=
         expect(!warnings.empty() &&
                    warnings.front().find("copies are inactive") !=
                        std::string::npos,
-               "inactive copies surface as graph warnings");
-    passed &= expect(mismatch.setPropertyPreserveIn(linear, "features", 1) &&
-                         mismatch.groupCopyStatus(grouped.groupId).active &&
-                         mismatch.collectGraphWarnings().empty(),
-                     "fixing the flagged property automatically activates N");
+               "inactive residual copies surface as graph warnings");
+    passed &= expect(
+        residualMismatch.setPropertyPreserveIn(linear, "features", 1) &&
+            residualMismatch.groupCopyStatus(grouped.groupId).active &&
+            residualMismatch.collectGraphWarnings().empty(),
+        "fixing the residual skip with 'in' activates N");
   }
 
   {
@@ -994,6 +1060,68 @@ int main() {
                        "group output displays shape after all copies");
       passed &= expect(linear->outputs.front().shape.channels == 2,
                        "visible pin.shape stays first-copy for chaining");
+    }
+  }
+
+  {
+    NodeGraph decoder;
+    const auto inId = decoder.addNode(NodeType::audioInput, {0.0f, 0.0f});
+    const auto pqmfId =
+        decoder.addNode(NodeType::pqmfAnalysis, {160.0f, 0.0f});
+    const auto actId = decoder.addNode(NodeType::activation, {320.0f, 0.0f});
+    const auto convTId =
+        decoder.addNode(NodeType::convTranspose, {480.0f, 0.0f});
+    const auto *inNode = decoder.findNode(inId);
+    const auto *pqmfNode = decoder.findNode(pqmfId);
+    const auto *actNode = decoder.findNode(actId);
+    const auto *convTNode = decoder.findNode(convTId);
+    passed &= expect(inNode != nullptr && pqmfNode != nullptr &&
+                         actNode != nullptr && convTNode != nullptr,
+                     "decoder copy-list nodes exist");
+    if (inNode != nullptr && pqmfNode != nullptr && actNode != nullptr &&
+        convTNode != nullptr) {
+      passed &= expect(decoder
+                           .connect(inNode->outputs.front().id,
+                                    pqmfNode->inputs.front().id)
+                           .accepted &&
+                           decoder
+                               .connect(actNode->outputs.front().id,
+                                        convTNode->inputs.front().id)
+                               .accepted,
+                       "audio to PQMF and Activation to ConvTranspose");
+      const auto grouped = decoder.createGroup({actId, convTId});
+      passed &= expect(grouped.accepted &&
+                           connectDeclaredThrough(decoder, grouped.groupId,
+                                                  actId, convTId),
+                       "ConvTranspose group wires through");
+      const auto inputId =
+          findBoundary(decoder, grouped.groupId, NodeType::groupInput);
+      const auto *inputHub = decoder.findNode(inputId);
+      const auto *pqmfAfterGroup = decoder.findNode(pqmfId);
+      passed &= expect(
+          inputHub != nullptr && pqmfAfterGroup != nullptr &&
+              decoder
+                  .connect(pqmfAfterGroup->outputs.front().id,
+                           inputHub->inputs.front().id)
+                  .accepted,
+          "PQMF feeds the ConvTranspose group");
+      passed &= expect(decoder.setGroupCopies(grouped.groupId, 4).accepted,
+                       "ConvTranspose group stores N=4");
+      passed &= expect(decoder.setPropertyCopyValues(
+                           convTId, "channels", {512, 256, 128, 64}),
+                       "ConvTranspose channels 512,256,128,64");
+      const auto status = decoder.groupCopyStatus(grouped.groupId);
+      passed &= expect(status.active && status.effectiveCopies == 4,
+                       "per-copy channel list keeps serial copies active");
+      const auto *convT = decoder.findNode(convTId);
+      passed &= expect(
+          convT != nullptr && !convT->outputs.empty() &&
+              convT->outputs.front().copyShapes.size() == 4 &&
+              convT->outputs.front().copyShapes[0].channels == 512 &&
+              convT->outputs.front().copyShapes[1].channels == 256 &&
+              convT->outputs.front().copyShapes[2].channels == 128 &&
+              convT->outputs.front().copyShapes[3].channels == 64,
+          "ConvTranspose output lists 512,256,128,64");
     }
   }
 

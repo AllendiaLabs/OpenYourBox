@@ -43,3 +43,5 @@
 - [x] when a group with N copies is in a group with M copies, which itself is in a group with O copies, its elements display a list of M*N*O parameter values. It should also accept N values, or M*N, or 1 value. The values should be copied under the hood. 
 
 - [ ] parameters should accept simple expressions of i, i being the index in the copies list, or if 1 copy or not in group: i is always 0. accept ()+-*^
+
+- [ ] add depthwise to TCN. and to conv1d? what is it exactly? like groups?

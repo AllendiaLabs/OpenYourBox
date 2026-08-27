@@ -2296,6 +2296,440 @@ openyourbox::graph::GraphLink linkFromTree(const juce::ValueTree &tree) {
           static_cast<std::int32_t>(tree["sourcePin"]),
           static_cast<std::int32_t>(tree["destinationPin"])};
 }
+
+/**
+ * @brief Result of simulating whether serial copies can chain by shape.
+ */
+struct SerialCopyShapeResult {
+  /** @brief True when every copy can feed the next. */
+  bool ok = true;
+  /** @brief User-facing reason when @ref ok is false. */
+  std::string message;
+  /** @brief Properties that can repair an internal join mismatch. */
+  std::vector<openyourbox::graph::GroupCopyPropertyHint> hints;
+};
+
+/**
+ * @brief Copy-slot index for a leaf relative to an enclosing group's slot.
+ * @param graph Graph owning membership.
+ * @param nodeId Leaf node.
+ * @param groupId Group whose serial copies are being simulated.
+ * @param groupSlot Outer copy index of @p groupId.
+ * @return Slot passed to @c integerValueForCopy.
+ */
+int leafCopySlotForGroup(const openyourbox::graph::NodeGraph &graph,
+                         std::int32_t nodeId, std::int32_t groupId,
+                         int groupSlot) {
+  const auto *node = graph.findNode(nodeId);
+  if (node == nullptr)
+    return groupSlot;
+  int innerProduct = 1;
+  auto parent = node->parentGroupId;
+  std::unordered_set<std::int32_t> visiting;
+  while (parent.has_value() && *parent != groupId) {
+    if (!visiting.insert(*parent).second)
+      break;
+    const auto *ancestor = graph.findGroup(*parent);
+    if (ancestor == nullptr)
+      break;
+    innerProduct *= std::max(1, ancestor->copies);
+    parent = ancestor->parentGroupId;
+  }
+  return groupSlot * innerProduct;
+}
+
+/**
+ * @brief Simulated pin shape, falling back to the live first-copy shape.
+ * @param graph Graph owning pins.
+ * @param pinId Endpoint to resolve.
+ * @param pinShapes Shapes computed for the current copy slot.
+ */
+openyourbox::graph::ShapeSignature simulatedPinShape(
+    const openyourbox::graph::NodeGraph &graph, std::int32_t pinId,
+    const std::unordered_map<std::int32_t, openyourbox::graph::ShapeSignature>
+        &pinShapes) {
+  using openyourbox::graph::flexibleTensorShape;
+  const auto found = pinShapes.find(pinId);
+  if (found != pinShapes.end())
+    return found->second;
+  if (const auto *pin = graph.findPin(pinId))
+    return pin->shape;
+  return flexibleTensorShape();
+}
+
+/**
+ * @brief Integer used by copy @p slot, honoring `in` and invalid lists.
+ * @param node Owner of the property.
+ * @param key Property key.
+ * @param incomingChannels Paired input width for `in`.
+ * @param slot Copy index.
+ * @param fallback Value when the property is absent.
+ */
+int boundIntForCopySlot(const openyourbox::graph::GraphNode &node,
+                        const char *key, int incomingChannels, int slot,
+                        int fallback) {
+  using openyourbox::graph::integerValueForCopy;
+  for (const auto &property : node.properties) {
+    if (property.key != key)
+      continue;
+    if (property.copyListInvalid)
+      return 0;
+    if (property.preserveInBound)
+      return incomingChannels > 0 ? incomingChannels : 0;
+    const auto value = integerValueForCopy(property, slot);
+    return value > 0 ? value : fallback;
+  }
+  return fallback;
+}
+
+/**
+ * @brief Stride used by copy @p slot.
+ * @param node Convolution or transposed-convolution node.
+ * @param slot Copy index.
+ */
+int strideForCopySlot(const openyourbox::graph::GraphNode &node, int slot) {
+  using openyourbox::graph::integerValueForCopy;
+  for (const auto &property : node.properties) {
+    if (property.key != "stride")
+      continue;
+    return std::max(1, integerValueForCopy(property, slot));
+  }
+  return 1;
+}
+
+/**
+ * @brief Records shape-driving properties upstream of @p startNodeId.
+ * @param graph Graph to walk.
+ * @param startNodeId Node whose producers are searched.
+ * @param groupId Walk stops at this group's input hub.
+ * @param message Hint text copied onto each candidate.
+ * @param hints Destination list.
+ */
+void appendCopyShapePropertyHints(
+    const openyourbox::graph::NodeGraph &graph, std::int32_t startNodeId,
+    std::int32_t groupId, const std::string &message,
+    std::vector<openyourbox::graph::GroupCopyPropertyHint> &hints) {
+  using openyourbox::graph::GroupCopyPropertyHint;
+  using openyourbox::graph::NodeType;
+  using openyourbox::graph::propertySupportsPreserveIn;
+  std::queue<std::int32_t> pending;
+  std::unordered_set<std::int32_t> visited;
+  pending.push(startNodeId);
+  while (!pending.empty()) {
+    const auto current = pending.front();
+    pending.pop();
+    if (!visited.insert(current).second)
+      continue;
+    const auto *node = graph.findNode(current);
+    if (node == nullptr || node->type == NodeType::groupInput)
+      continue;
+    for (const auto &property : node->properties) {
+      const bool channels = property.key == "channels" ||
+                            property.key == "features" ||
+                            property.key == "latent_size";
+      if (!channels)
+        continue;
+      GroupCopyPropertyHint hint;
+      hint.nodeId = node->id;
+      hint.propertyKey = property.key;
+      hint.message = message;
+      if (propertySupportsPreserveIn(property))
+        hint.message += "; use 'in' to preserve the incoming width";
+      hints.push_back(std::move(hint));
+    }
+    for (const auto &link : graph.getLinks()) {
+      const auto destination = graph.findNodeForPin(link.destinationPinId);
+      if (!destination.has_value() || *destination != current)
+        continue;
+      if (const auto source = graph.findNodeForPin(link.sourcePinId);
+          source.has_value() && nodeIsInsideGroup(graph, *source, groupId))
+        pending.push(*source);
+    }
+  }
+}
+
+/**
+ * @brief Topological node ids owned by @p groupId, including nested leaves.
+ * @param graph Graph owning membership and cables.
+ * @param groupId Group whose interior is ordered.
+ */
+std::vector<std::int32_t>
+topologicalNodesInsideGroup(const openyourbox::graph::NodeGraph &graph,
+                            std::int32_t groupId) {
+  std::unordered_set<std::int32_t> inside;
+  for (const auto &node : graph.getNodes()) {
+    if (nodeIsInsideGroup(graph, node.id, groupId))
+      inside.insert(node.id);
+  }
+  std::unordered_map<std::int32_t, int> indegree;
+  std::unordered_map<std::int32_t, std::vector<std::int32_t>> outgoing;
+  for (const auto id : inside)
+    indegree[id] = 0;
+  for (const auto &link : graph.getLinks()) {
+    const auto source = graph.findNodeForPin(link.sourcePinId);
+    const auto destination = graph.findNodeForPin(link.destinationPinId);
+    if (!source.has_value() || !destination.has_value() ||
+        *source == *destination)
+      continue;
+    if (inside.count(*source) == 0 || inside.count(*destination) == 0)
+      continue;
+    outgoing[*source].push_back(*destination);
+    ++indegree[*destination];
+  }
+  std::queue<std::int32_t> ready;
+  for (const auto &entry : indegree) {
+    if (entry.second == 0)
+      ready.push(entry.first);
+  }
+  std::vector<std::int32_t> order;
+  order.reserve(inside.size());
+  while (!ready.empty()) {
+    const auto id = ready.front();
+    ready.pop();
+    order.push_back(id);
+    for (const auto next : outgoing[id]) {
+      if (--indegree[next] == 0)
+        ready.push(next);
+    }
+  }
+  for (const auto id : inside) {
+    if (std::find(order.begin(), order.end(), id) == order.end())
+      order.push_back(id);
+  }
+  return order;
+}
+
+/**
+ * @brief Writes simulated output shapes for one node at one copy slot.
+ * @param graph Graph owning cables.
+ * @param node Node to evaluate.
+ * @param leafSlot Copy index for this node's properties.
+ * @param groupId Enclosing group being chained (for merge diagnostics).
+ * @param pinShapes In/out map of simulated pin shapes.
+ * @param result Failure destination when a residual join cannot combine.
+ */
+void simulateNodeCopyShapes(
+    const openyourbox::graph::NodeGraph &graph,
+    const openyourbox::graph::GraphNode &node, int leafSlot,
+    std::int32_t groupId,
+    std::unordered_map<std::int32_t, openyourbox::graph::ShapeSignature>
+        &pinShapes,
+    SerialCopyShapeResult &result) {
+  using openyourbox::graph::MergeMode;
+  using openyourbox::graph::NodeType;
+  using openyourbox::graph::convolutionOutputTemporalRate;
+  using openyourbox::graph::defaultLatentSize;
+  using openyourbox::graph::defaultPqmfBands;
+  using openyourbox::graph::flexibleTensorShape;
+  using openyourbox::graph::integerValueForCopy;
+  using openyourbox::graph::isControlInputPin;
+  using openyourbox::graph::isConvTransposeType;
+  using openyourbox::graph::isConvolutionType;
+  using openyourbox::graph::isShapePassthroughType;
+  auto incoming = flexibleTensorShape();
+  for (const auto &pin : node.inputs) {
+    if (isControlInputPin(pin))
+      continue;
+    if (const auto *source = findConnectedSourcePin(graph, pin.id)) {
+      incoming = simulatedPinShape(graph, source->id, pinShapes);
+      break;
+    }
+  }
+  auto writeOutputs = [&](const openyourbox::graph::ShapeSignature &outgoing) {
+    for (const auto &pin : node.outputs)
+      pinShapes[pin.id] = outgoing;
+  };
+  auto inheritHub = [&]() {
+    const auto laneCount = std::min(node.inputs.size(), node.outputs.size());
+    for (std::size_t index = 0; index < laneCount; ++index) {
+      openyourbox::graph::ShapeSignature shape = flexibleTensorShape();
+      if (const auto *source =
+              findConnectedSourcePin(graph, node.inputs[index].id))
+        shape = simulatedPinShape(graph, source->id, pinShapes);
+      pinShapes[node.inputs[index].id] = shape;
+      pinShapes[node.outputs[index].id] = shape;
+    }
+  };
+
+  switch (node.type) {
+  case NodeType::groupInput:
+  case NodeType::groupOutput:
+    inheritHub();
+    return;
+  case NodeType::pqmfAnalysis: {
+    int nBand = defaultPqmfBands;
+    for (const auto &property : node.properties) {
+      if (property.key == "n_band")
+        nBand = std::max(2, integerValueForCopy(property, leafSlot));
+    }
+    const auto audioChannels = std::max(0, incoming.channels);
+    openyourbox::graph::ShapeSignature outgoing;
+    outgoing.temporalRate = nBand;
+    outgoing.nBand = nBand;
+    outgoing.channels = audioChannels > 0 ? audioChannels * nBand : 0;
+    writeOutputs(outgoing);
+    return;
+  }
+  case NodeType::pqmfSynthesis: {
+    int nBand = defaultPqmfBands;
+    for (const auto &property : node.properties) {
+      if (property.key == "n_band")
+        nBand = std::max(2, integerValueForCopy(property, leafSlot));
+    }
+    openyourbox::graph::ShapeSignature outgoing;
+    outgoing.temporalRate = 1;
+    outgoing.nBand = 0;
+    outgoing.channels =
+        incoming.channels > 0 ? std::max(1, incoming.channels / nBand) : 0;
+    writeOutputs(outgoing);
+    return;
+  }
+  case NodeType::variationalBottleneck: {
+    auto outgoing = incoming;
+    outgoing.channels =
+        boundIntForCopySlot(node, "latent_size", incoming.channels, leafSlot,
+                            defaultLatentSize);
+    writeOutputs(outgoing);
+    return;
+  }
+  default:
+    break;
+  }
+
+  if (!isShapePassthroughType(node.type) && !isConvolutionType(node.type) &&
+      !isConvTransposeType(node.type)) {
+    writeOutputs(incoming);
+    return;
+  }
+
+  auto outgoing = incoming;
+  if (node.type == NodeType::merge) {
+    const auto concatenate =
+        mergeModeFor(node) == static_cast<int>(MergeMode::concatenate);
+    std::vector<openyourbox::graph::ShapeSignature> sources;
+    for (const auto &pin : node.inputs) {
+      if (const auto *source = findConnectedSourcePin(graph, pin.id))
+        sources.push_back(simulatedPinShape(graph, source->id, pinShapes));
+    }
+    if (!concatenate) {
+      for (std::size_t index = 1; index < sources.size(); ++index) {
+        const auto left = sources[0];
+        const auto right = sources[index];
+        auto rateLeft = left;
+        auto rateRight = right;
+        rateLeft.channels = 0;
+        rateRight.channels = 0;
+        if (!channelsAreBroadcastCompatible(left.channels, right.channels) ||
+            !rateLeft.isCompatibleWith(rateRight)) {
+          result.ok = false;
+          const auto leftLabel =
+              left.displayLabel().empty() ? "unspecified" : left.displayLabel();
+          const auto rightLabel = right.displayLabel().empty()
+                                      ? "unspecified"
+                                      : right.displayLabel();
+          result.message = "Utility inputs cannot combine (" + leftLabel +
+                           " vs " + rightLabel + ")";
+          appendCopyShapePropertyHints(graph, node.id, groupId, result.message,
+                                       result.hints);
+          return;
+        }
+      }
+    }
+    if (concatenate) {
+      outgoing.channels = 0;
+      for (const auto &source : sources)
+        outgoing.channels += source.channels;
+    } else if (!sources.empty()) {
+      outgoing = sources.front();
+      for (const auto &source : sources)
+        outgoing.channels = std::max(outgoing.channels, source.channels);
+    }
+    writeOutputs(outgoing);
+    return;
+  }
+
+  if (isConvolutionType(node.type) || isConvTransposeType(node.type)) {
+    const auto stride = strideForCopySlot(node, leafSlot);
+    const auto upsample = isConvTransposeType(node.type);
+    const auto rate =
+        convolutionOutputTemporalRate(incoming.temporalRate, stride, upsample);
+    outgoing.temporalRate = rate < 0 ? 0 : rate;
+    const auto channels =
+        boundIntForCopySlot(node, "channels", incoming.channels, leafSlot, 0);
+    if (channels > 0)
+      outgoing.channels = channels;
+    writeOutputs(outgoing);
+    return;
+  }
+  if (node.type == NodeType::linear) {
+    const auto features =
+        boundIntForCopySlot(node, "features", incoming.channels, leafSlot, 0);
+    if (features > 0)
+      outgoing.channels = features;
+    writeOutputs(outgoing);
+    return;
+  }
+  writeOutputs(outgoing);
+}
+
+/**
+ * @brief Simulates N serial copies using per-copy properties, not first-copy I/O.
+ * @param graph Graph whose first-copy pins supply the initial incoming shapes.
+ * @param groupId Group whose copies are requested.
+ * @param copies Requested copy count N.
+ * @param inputs Declared Group Input lanes.
+ * @param outputs Declared Group Output lanes.
+ * @return Failure when an internal join cannot combine at any copy.
+ */
+SerialCopyShapeResult evaluateSerialCopyShapeChain(
+    const openyourbox::graph::NodeGraph &graph, std::int32_t groupId, int copies,
+    const std::vector<openyourbox::graph::GroupBoundaryPort> &inputs,
+    const std::vector<openyourbox::graph::GroupBoundaryPort> &outputs) {
+  SerialCopyShapeResult result;
+  if (inputs.empty() || outputs.empty() || copies <= 1)
+    return result;
+  const auto *inputHub = graph.findNode(inputs.front().memberNodeId);
+  const auto *outputHub = graph.findNode(outputs.front().memberNodeId);
+  if (inputHub == nullptr || outputHub == nullptr)
+    return result;
+  std::vector<openyourbox::graph::ShapeSignature> laneIn;
+  laneIn.reserve(inputs.size());
+  for (const auto &port : inputs)
+    laneIn.push_back(port.shape);
+  const auto order = topologicalNodesInsideGroup(graph, groupId);
+  for (int slot = 0; slot < copies; ++slot) {
+    std::unordered_map<std::int32_t, openyourbox::graph::ShapeSignature>
+        pinShapes;
+    for (std::size_t index = 0; index < laneIn.size(); ++index) {
+      if (index < inputHub->outputs.size())
+        pinShapes[inputHub->outputs[index].id] = laneIn[index];
+      if (index < inputHub->inputs.size())
+        pinShapes[inputHub->inputs[index].id] = laneIn[index];
+    }
+    for (const auto nodeId : order) {
+      if (nodeId == inputHub->id)
+        continue;
+      const auto *node = graph.findNode(nodeId);
+      if (node == nullptr)
+        continue;
+      const auto leafSlot =
+          leafCopySlotForGroup(graph, nodeId, groupId, slot);
+      simulateNodeCopyShapes(graph, *node, leafSlot, groupId, pinShapes,
+                             result);
+      if (!result.ok) {
+        result.message = "Requested " + std::to_string(copies) +
+                         " copies are inactive: " + result.message;
+        return result;
+      }
+    }
+    for (std::size_t index = 0; index < laneIn.size() &&
+                                index < outputHub->outputs.size();
+         ++index)
+      laneIn[index] =
+          simulatedPinShape(graph, outputHub->outputs[index].id, pinShapes);
+  }
+  return result;
+}
 } // namespace
 
 namespace openyourbox::graph {
@@ -2738,70 +3172,12 @@ GroupCopyStatus NodeGraph::groupCopyStatus(std::int32_t groupId) const {
     return status;
   }
 
-  for (std::size_t index = 0; index < inputs.size(); ++index) {
-    if (outputs[index].shape.isCompatibleWith(inputs[index].shape))
-      continue;
+  const auto chain = evaluateSerialCopyShapeChain(
+      *this, groupId, status.requestedCopies, inputs, outputs);
+  if (!chain.ok) {
     status.active = false;
-    const auto outputShape = outputs[index].shape.displayLabel();
-    const auto inputShape = inputs[index].shape.displayLabel();
-    status.message =
-        "Requested " + std::to_string(status.requestedCopies) +
-        " copies are inactive: Output " + std::to_string(index + 1) + " (" +
-        (outputShape.empty() ? "unspecified" : outputShape) +
-        ") cannot feed Input " + std::to_string(index + 1) + " (" +
-        (inputShape.empty() ? "unspecified" : inputShape) + ")";
-
-    std::queue<std::int32_t> pending;
-    std::unordered_set<std::int32_t> visited;
-    if (outputHub != nullptr &&
-        index < outputHub->inputs.size()) {
-      for (const auto &link : links) {
-        if (link.destinationPinId != outputHub->inputs[index].id)
-          continue;
-        if (const auto source = findNodeForPin(link.sourcePinId);
-            source.has_value())
-          pending.push(*source);
-      }
-    }
-    while (!pending.empty()) {
-      const auto current = pending.front();
-      pending.pop();
-      if (!visited.insert(current).second)
-        continue;
-      const auto *node = findNode(current);
-      if (node == nullptr || node->type == NodeType::groupInput)
-        continue;
-      for (const auto &property : node->properties) {
-        const bool channels =
-            property.key == "channels" || property.key == "features" ||
-            property.key == "latent_size";
-        const bool rate =
-            property.key == "stride" || property.key == "n_band";
-        if ((!channels && !rate) ||
-            (outputs[index].shape.channels ==
-                 inputs[index].shape.channels &&
-             channels) ||
-            (outputs[index].shape.temporalRate ==
-                 inputs[index].shape.temporalRate &&
-             outputs[index].shape.nBand == inputs[index].shape.nBand && rate))
-          continue;
-        GroupCopyPropertyHint hint;
-        hint.nodeId = node->id;
-        hint.propertyKey = property.key;
-        hint.message = status.message;
-        if (propertySupportsPreserveIn(property))
-          hint.message += "; use 'in' to preserve the incoming width";
-        status.propertyHints.push_back(std::move(hint));
-      }
-      for (const auto &link : links) {
-        const auto destination = findNodeForPin(link.destinationPinId);
-        if (!destination.has_value() || *destination != current)
-          continue;
-        if (const auto source = findNodeForPin(link.sourcePinId);
-            source.has_value())
-          pending.push(*source);
-      }
-    }
+    status.message = chain.message;
+    status.propertyHints = chain.hints;
     return status;
   }
 

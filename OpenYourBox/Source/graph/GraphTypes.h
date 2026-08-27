@@ -999,7 +999,7 @@ struct GroupCopyStatus {
   int requestedCopies = defaultGroupCopies;
   /** @brief Count safe to materialize; one while the request is inactive. */
   int effectiveCopies = defaultGroupCopies;
-  /** @brief True when the requested count can be chained in series. */
+  /** @brief True when requested N can chain after per-copy properties. */
   bool active = true;
   /** @brief Persistent user-facing explanation when inactive. */
   std::string message;
