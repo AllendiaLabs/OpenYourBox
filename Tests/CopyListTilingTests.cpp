@@ -90,6 +90,10 @@ int main() {
                                        twoCh, {2, 2}) ==
                        "[[2ch, 4ch], [8ch, 16ch]]",
                    "pin shapes nest as a list of lists");
+  passed &= expect(formatShapeCopyList({}, twoCh, {}) == "2ch",
+                   "a pin outside a group still formats its shape");
+  passed &= expect(formatShapeCopyList({twoCh}, twoCh, {1}) == "2ch",
+                   "copies=1 still formats a shape without brackets");
 
   NodeProperty channels;
   channels.key = "channels";

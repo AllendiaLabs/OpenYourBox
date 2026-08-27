@@ -771,8 +771,15 @@ int main() {
                          hint.has_value() &&
                          hint->find("use 'in'") != std::string::npos,
                      "shape mismatch flags the property that can preserve input");
+    const auto warnings = mismatch.collectGraphWarnings();
+    passed &=
+        expect(!warnings.empty() &&
+                   warnings.front().find("copies are inactive") !=
+                       std::string::npos,
+               "inactive copies surface as graph warnings");
     passed &= expect(mismatch.setPropertyPreserveIn(linear, "features", 1) &&
-                         mismatch.groupCopyStatus(grouped.groupId).active,
+                         mismatch.groupCopyStatus(grouped.groupId).active &&
+                         mismatch.collectGraphWarnings().empty(),
                      "fixing the flagged property automatically activates N");
   }
 

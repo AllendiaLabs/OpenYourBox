@@ -5,6 +5,19 @@
 
 namespace openyourbox::ui {
 void ErrorModal::show(const juce::String &text) {
+  show(text, Kind::error);
+}
+
+void ErrorModal::showWarning(const juce::String &text) {
+  show(text, Kind::warning);
+}
+
+void ErrorModal::dismiss() {
+  visible = false;
+}
+
+void ErrorModal::show(const juce::String &text, Kind nextKind) {
+  kind = nextKind;
   message = text;
   visible = true;
   const auto utf8Bytes =
@@ -24,13 +37,15 @@ void ErrorModal::render() {
   if (!visible)
     return;
 
-  ImGui::OpenPopup("Error");
+  const auto *popupId = kind == Kind::warning ? "Warning" : "Error";
+  ImGui::OpenPopup(popupId);
   const auto center = ImGui::GetMainViewport()->GetCenter();
   ImGui::SetNextWindowPos(center, ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
   ImGui::SetNextWindowSize(ImVec2(640.0f, 360.0f), ImGuiCond_Appearing);
   bool open = true;
-  if (ImGui::BeginPopupModal("Error", &open, ImGuiWindowFlags_None)) {
-    ImGui::TextUnformatted("An error occurred:");
+  if (ImGui::BeginPopupModal(popupId, &open, ImGuiWindowFlags_None)) {
+    ImGui::TextUnformatted(kind == Kind::warning ? "A warning occurred:"
+                                                 : "An error occurred:");
     const auto buttonRow =
         ImGui::GetFrameHeightWithSpacing() + ImGui::GetStyle().ItemSpacing.y;
     const auto fieldHeight =

@@ -393,6 +393,21 @@ public:
                         const std::string &propertyKey) const;
 
   /**
+   * @brief Collects persistent graph warnings that are not compile errors.
+   *
+   * Currently reports every group whose requested copies are inactive, named
+   * so the editor can show one Warning control next to the Error box.
+   * @return One user-facing line per warning, in group insertion order.
+   */
+  [[nodiscard]] std::vector<std::string> collectGraphWarnings() const;
+
+  /**
+   * @brief Joins @ref collectGraphWarnings for the Warning dialog and panel.
+   * @return Empty when the graph has no outstanding warnings.
+   */
+  [[nodiscard]] std::string graphWarningMessage() const;
+
+  /**
    * @brief Ancestor copy counts from outermost group to the node's parent.
    * @param nodeId Candidate node.
    * @return Outer→inner vector C; empty when the node has no parent group.

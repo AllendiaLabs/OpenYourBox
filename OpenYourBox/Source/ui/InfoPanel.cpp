@@ -47,10 +47,12 @@ ImVec2 mapPoint(const ImVec2 &origin, const ImVec2 &size, float x, float y,
 void InfoPanel::render(std::uint64_t receptiveFieldSamples, double sampleRate,
                        std::uint64_t parameterCount,
                        const juce::String &buildError,
+                       const juce::String &graphWarning,
                        AnalysisPanelState &analysis,
                        const std::function<void(graph::AnalysisView)>
                            &viewChanged,
-                       const std::function<void()> &viewError) const {
+                       const std::function<void()> &viewError,
+                       const std::function<void()> &viewWarning) const {
   const auto milliseconds =
       sampleRate > 0.0
           ? static_cast<double>(receptiveFieldSamples) * 1000.0 / sampleRate
@@ -74,8 +76,20 @@ void InfoPanel::render(std::uint64_t receptiveFieldSamples, double sampleRate,
     ImGui::TextUnformatted("Model error");
     ImGui::PopStyleColor();
     ImGui::SameLine();
-    if (ImGui::SmallButton("View") && viewError)
+    if (ImGui::SmallButton("View##error") && viewError)
       viewError();
+  }
+
+  if (graphWarning.isNotEmpty()) {
+    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.72f, 0.25f, 1.0f));
+    ImGui::TextUnformatted("Graph warning");
+    ImGui::PopStyleColor();
+    ImGui::SameLine();
+    if (ImGui::SmallButton("View##warning") && viewWarning)
+      viewWarning();
+    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.72f, 0.25f, 1.0f));
+    ImGui::TextWrapped("%s", graphWarning.toRawUTF8());
+    ImGui::PopStyleColor();
   }
 
   ImGui::Separator();

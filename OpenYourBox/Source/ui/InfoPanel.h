@@ -36,15 +36,18 @@ public:
    * @param sampleRate Current host sample rate.
    * @param parameterCount Number of model parameters.
    * @param buildError Latest asynchronous model error.
+   * @param graphWarning Persistent graph warnings such as inactive copies.
    * @param analysis Current analysis panel state; empty `nodeId` hides plots.
    * @param viewChanged Invoked when the user selects a different analysis view.
    * @param viewError Opens the copyable error dialog for @p buildError.
+   * @param viewWarning Opens the copyable warning dialog for @p graphWarning.
    */
   void render(std::uint64_t receptiveFieldSamples, double sampleRate,
               std::uint64_t parameterCount, const juce::String &buildError,
-              AnalysisPanelState &analysis,
+              const juce::String &graphWarning, AnalysisPanelState &analysis,
               const std::function<void(graph::AnalysisView)> &viewChanged,
-              const std::function<void()> &viewError = {}) const;
+              const std::function<void()> &viewError = {},
+              const std::function<void()> &viewWarning = {}) const;
 
 private:
   /**

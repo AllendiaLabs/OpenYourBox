@@ -150,6 +150,14 @@ void OpenYourBoxAudioProcessorEditor::renderFrame() {
       showError(runtimeError, true);
     ImGui::PopStyleColor();
   }
+  const auto graphWarning = juce::String(nodeGraph.graphWarningMessage());
+  if (graphWarning.isNotEmpty()) {
+    ImGui::SameLine();
+    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.55f, 0.38f, 0.08f, 1.0f));
+    if (ImGui::SmallButton("Warning"))
+      showWarning(graphWarning);
+    ImGui::PopStyleColor();
+  }
   if (graphMessage.isNotEmpty() && ImGui::GetTime() < graphMessageDeadline) {
     ImGui::SameLine();
     ImGui::TextColored(ImVec4(1.0f, 0.72f, 0.25f, 1.0f), "%s",
@@ -318,14 +326,15 @@ void OpenYourBoxAudioProcessorEditor::renderFrame() {
   analysisState.playbackActive = audioProcessor.isTransportPlaying();
   infoPanel.render(
       receptiveField, sampleRate, audioProcessor.getModelParameterCount(),
-      runtimeError, analysisState,
+      runtimeError, graphWarning, analysisState,
       [this](openyourbox::graph::AnalysisView view) {
         if (analysisNodeId != 0)
           nodeGraph.setSelectedAnalysisView(analysisNodeId, view);
         persistGraph(false, false);
         invalidateAnalysis();
       },
-      [this, runtimeError] { showError(runtimeError, true); });
+      [this, runtimeError] { showError(runtimeError, true); },
+      [this, graphWarning] { showWarning(graphWarning); });
   } else if (sidePanelTab == 1) {
     openyourbox::ui::TrainingLibraryPanel::Callbacks libraryCallbacks;
     libraryCallbacks.importPair = [this] { handleLibraryImport(); };
@@ -459,6 +468,7 @@ void OpenYourBoxAudioProcessorEditor::renderFrame() {
                         [this] { copyrightModalVisible = false; });
   ImGui::EndChild();
   errorModal.render();
+  warningModal.render();
 
   ImGui::End();
 }
@@ -786,6 +796,14 @@ void OpenYourBoxAudioProcessorEditor::showError(const juce::String &message,
   else
     lastPresentedError = message;
   errorModal.show(lastPresentedError);
+}
+
+void OpenYourBoxAudioProcessorEditor::showWarning(const juce::String &message) {
+  if (message.isEmpty()) {
+    warningModal.dismiss();
+    return;
+  }
+  warningModal.showWarning(message);
 }
 
 void OpenYourBoxAudioProcessorEditor::pollModelError() {

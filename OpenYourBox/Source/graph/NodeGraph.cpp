@@ -2853,6 +2853,29 @@ NodeGraph::groupCopyPropertyHint(std::int32_t nodeId,
   return std::nullopt;
 }
 
+std::vector<std::string> NodeGraph::collectGraphWarnings() const {
+  std::vector<std::string> warnings;
+  for (const auto &group : groups) {
+    const auto status = groupCopyStatus(group.id);
+    if (status.active || status.message.empty() || status.requestedCopies <= 1)
+      continue;
+    warnings.push_back(group.name + ": " + status.message);
+  }
+  return warnings;
+}
+
+std::string NodeGraph::graphWarningMessage() const {
+  const auto warnings = collectGraphWarnings();
+  if (warnings.empty())
+    return {};
+  std::string joined = warnings.front();
+  for (std::size_t index = 1; index < warnings.size(); ++index) {
+    joined += "\n\n";
+    joined += warnings[index];
+  }
+  return joined;
+}
+
 std::vector<int> NodeGraph::ancestorCopyCounts(std::int32_t nodeId) const {
   const auto *node = findNode(nodeId);
   if (node == nullptr)

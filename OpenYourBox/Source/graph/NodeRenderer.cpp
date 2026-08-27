@@ -370,50 +370,45 @@ ancestorRuntimeCopyCounts(const openyourbox::graph::NodeGraph &graph,
 }
 
 /**
- * @brief Draws a pin caption, hiding multi-copy shapes behind a hover info icon.
+ * @brief Draws a pin caption, hiding the shape behind a hover info icon.
+ *
+ * The caption never inlines the shape, including for a single copy and for
+ * pins that are not inside a group. The info icon is omitted only when no
+ * concrete shape is known yet.
  * @param kind Input or output direction (affects arrows).
  * @param label Pin name.
- * @param inlineShape Shape shown in parentheses when there is no copy list.
- * @param expandedShapes Nested copy-shape preview, or empty to show @p inlineShape.
+ * @param inlineShape Shape shown in the info tooltip when there is no copy list.
+ * @param expandedShapes Nested copy-shape preview, or empty to use @p inlineShape.
  */
 void drawPinCaption(openyourbox::graph::PinKind kind, const char *label,
                     const openyourbox::graph::ShapeSignature &inlineShape,
                     const std::string &expandedShapes) {
   const bool isInput = kind == openyourbox::graph::PinKind::input;
-  if (!expandedShapes.empty()) {
-    if (isInput)
-      ImGui::Text("<- %s", label);
-    else
-      ImGui::TextUnformatted(label);
-    ImGui::SameLine(0.0f, 4.0f);
-    drawInfoHover("##shapeInfo", expandedShapes);
-    if (!isInput) {
-      ImGui::SameLine(0.0f, 4.0f);
-      ImGui::TextUnformatted("->");
-    }
-    return;
-  }
-  const auto shapeLabel = inlineShape.displayLabel();
-  if (isInput) {
-    if (!shapeLabel.empty())
-      ImGui::Text("<- %s (%s)", label, shapeLabel.c_str());
-    else
-      ImGui::Text("<- %s", label);
-  } else if (!shapeLabel.empty())
-    ImGui::Text("%s (%s) ->", label, shapeLabel.c_str());
+  auto shapeText = expandedShapes;
+  if (shapeText.empty())
+    shapeText = inlineShape.displayLabel();
+
+  if (isInput)
+    ImGui::Text("<- %s", label);
   else
-    ImGui::Text("%s ->", label);
+    ImGui::TextUnformatted(label);
+  if (!shapeText.empty()) {
+    ImGui::SameLine(0.0f, 4.0f);
+    drawInfoHover("##shapeInfo", shapeText);
+  }
+  if (!isInput) {
+    ImGui::SameLine(0.0f, 4.0f);
+    ImGui::TextUnformatted("->");
+  }
 }
 
 /**
- * @brief Nested copy-shape tooltip text when @p pin lists more than one copy.
+ * @brief Shape tooltip text for @p pin, including a single copy or no group.
  * @param pin Endpoint whose @c copyShapes may be populated.
- * @param copyCounts Outer→inner counts used to nest the list.
+ * @param copyCounts Outer→inner counts used to nest a multi-copy list.
  */
 std::string pinExpandedShapeInfo(const openyourbox::graph::Pin &pin,
                                  const std::vector<int> &copyCounts) {
-  if (pin.copyShapes.size() <= 1)
-    return {};
   return openyourbox::graph::formatShapeCopyList(pin.copyShapes, pin.shape,
                                                  copyCounts);
 }

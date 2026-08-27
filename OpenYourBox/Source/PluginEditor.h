@@ -162,6 +162,11 @@ private:
    */
   void showError(const juce::String &message, bool forceReopen = false);
   /**
+   * @brief Opens the copyable warning dialog for a persistent graph notice.
+   * @param message Human-readable warning text.
+   */
+  void showWarning(const juce::String &message);
+  /**
    * @brief Opens the error dialog when the live graph reports a new failure.
    */
   void pollModelError();
@@ -237,6 +242,8 @@ private:
   openyourbox::ui::CopyrightModal copyrightModal;
   /** @brief Copyable error dialog for plugin, train, freeze, and model failures. */
   openyourbox::ui::ErrorModal errorModal;
+  /** @brief Copyable warning dialog for inactive copies and similar notices. */
+  openyourbox::ui::ErrorModal warningModal;
   /** @brief Side-panel tab: 0 info, 1 library, 2 capture, 3 train, 4 presets. */
   int sidePanelTab = 0;
   /** @brief Session width of the right Info column in pixels. */
