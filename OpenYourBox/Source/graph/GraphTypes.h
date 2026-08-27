@@ -545,6 +545,77 @@ inline std::string formatShapeCopyList(const std::vector<ShapeSignature> &shapes
 }
 
 /**
+ * @brief Collapses an inner serial-copy axis to first-in or last-out.
+ *
+ * @p innerFold is the contiguous innermost chunk width. 1 keeps @p shapes.
+ * When @p shapes length is not a multiple of @p innerFold, the whole list
+ * reduces to a single first or last entry.
+ * @param shapes Flat copy-slot shapes, innermost axis contiguous.
+ * @param innerFold Width of the inner axis to fold.
+ * @param takeLast True to keep the last slot of each chunk (outputs).
+ * @return One shape per remaining outer slot.
+ */
+inline std::vector<ShapeSignature>
+foldInnerCopyShapes(const std::vector<ShapeSignature> &shapes, int innerFold,
+                    bool takeLast) {
+  innerFold = std::max(1, innerFold);
+  if (shapes.empty() || innerFold <= 1)
+    return shapes;
+  if (static_cast<int>(shapes.size()) % innerFold != 0)
+    return {takeLast ? shapes.back() : shapes.front()};
+  std::vector<ShapeSignature> folded;
+  folded.reserve(shapes.size() / static_cast<std::size_t>(innerFold));
+  for (std::size_t start = 0; start < shapes.size();
+       start += static_cast<std::size_t>(innerFold)) {
+    folded.push_back(takeLast ? shapes[start + static_cast<std::size_t>(
+                                                  innerFold - 1)]
+                              : shapes[start]);
+  }
+  return folded;
+}
+
+/**
+ * @brief Formats collapsed group-box pin shapes for the parent canvas.
+ *
+ * Copies of the group itself — and of any nested groups whose copy axes
+ * leaked onto this hub — chain serially, so the parent canvas only attaches
+ * to first-copy inputs and last-copy outputs. Those inner shapes are folded
+ * away. Strict ancestor copy axes remain as a nested list.
+ *
+ * @param shapes Per-copy shapes; may include the group's own axis and nested
+ *        descendant copy axes inside it.
+ * @param fallback Shape used when @p shapes is empty (typically first-copy).
+ * @param ancestorCopyCounts Outer→inner runtime copy counts for the hub,
+ *        including the collapsed group's own N as the last entry.
+ * @param takeLast True for outputs (last copy of each inner chunk); false for
+ *        inputs (first copy of each inner chunk).
+ * @return Hierarchical label, or empty when no concrete shape is known.
+ */
+inline std::string formatCollapsedGroupPinShapes(
+    const std::vector<ShapeSignature> &shapes, const ShapeSignature &fallback,
+    const std::vector<int> &ancestorCopyCounts, bool takeLast) {
+  std::vector<int> outerCounts = ancestorCopyCounts;
+  if (!outerCounts.empty())
+    outerCounts.pop_back();
+  int outerProduct = 1;
+  for (const auto copies : outerCounts)
+    outerProduct *= std::max(1, copies);
+  outerProduct = std::max(1, outerProduct);
+  const int shapeCount = static_cast<int>(shapes.size());
+  int innerFold = 1;
+  if (shapeCount > 0 && shapeCount % outerProduct == 0)
+    innerFold = std::max(1, shapeCount / outerProduct);
+  else if (shapeCount > 0)
+    innerFold = shapeCount;
+  const auto folded = foldInnerCopyShapes(shapes, innerFold, takeLast);
+  const ShapeSignature &effectiveFallback =
+      !folded.empty()
+          ? folded.front()
+          : (takeLast && !shapes.empty() ? shapes.back() : fallback);
+  return formatShapeCopyList(folded, effectiveFallback, outerCounts);
+}
+
+/**
  * @brief Declared host Audio Input/Output channel mode.
  *
  * Mono and Mirrored both fold stereo host audio with `(L+R)/2`. Mirrored then
@@ -801,8 +872,9 @@ struct Pin {
   /**
    * @brief Per-copy shapes when the owner participates in N&gt;1 group copies.
    *
-   * Empty when N==1. Index 0 matches @ref shape; the last entry is the shape
-   * after the full serial stack (used for group output display).
+   * Empty when the runtime copy product is 1. Index 0 matches @ref shape.
+   * The innermost axis is the owner's group; ancestor axes nest outside it.
+   * Collapsed group boxes fold that inner axis to first-in / last-out.
    */
   std::vector<ShapeSignature> copyShapes;
 };

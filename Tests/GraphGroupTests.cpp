@@ -1058,8 +1058,181 @@ int main() {
       }
       passed &= expect(groupOutShape.channels == 8,
                        "group output displays shape after all copies");
+      const auto *innerOutHub = shapeGraph.findNode(
+          findBoundary(shapeGraph, grouped.groupId, NodeType::groupOutput));
+      passed &= expect(
+          innerOutHub != nullptr && !innerOutHub->outputs.empty() &&
+              openyourbox::graph::formatCollapsedGroupPinShapes(
+                  innerOutHub->outputs.front().copyShapes,
+                  innerOutHub->outputs.front().shape, {3}, true) == "8ch",
+          "collapsed group output label is last copy, not [2ch, 4ch, 8ch]");
       passed &= expect(linear->outputs.front().shape.channels == 2,
                        "visible pin.shape stays first-copy for chaining");
+    }
+  }
+
+  {
+    NodeGraph nestedShapes;
+    const auto inId =
+        nestedShapes.addNode(NodeType::audioInput, {0.0f, 0.0f});
+    const auto linearId =
+        nestedShapes.addNode(NodeType::linear, {160.0f, 0.0f});
+    const auto actId =
+        nestedShapes.addNode(NodeType::activation, {320.0f, 0.0f});
+    const auto extraId =
+        nestedShapes.addNode(NodeType::activation, {400.0f, 0.0f});
+    const auto outId =
+        nestedShapes.addNode(NodeType::audioOutput, {560.0f, 0.0f});
+    const auto *inNode = nestedShapes.findNode(inId);
+    const auto *linearNode = nestedShapes.findNode(linearId);
+    const auto *actNode = nestedShapes.findNode(actId);
+    const auto *extraNode = nestedShapes.findNode(extraId);
+    const auto *outNode = nestedShapes.findNode(outId);
+    passed &= expect(inNode != nullptr && linearNode != nullptr &&
+                         actNode != nullptr && extraNode != nullptr &&
+                         outNode != nullptr,
+                     "nested shape-list graph nodes exist");
+    if (inNode != nullptr && linearNode != nullptr && actNode != nullptr &&
+        extraNode != nullptr && outNode != nullptr) {
+      passed &= expect(nestedShapes.setProperty(linearId, "features", 2),
+                       "nested linear features match stereo width");
+      passed &= expect(
+          nestedShapes
+              .connect(inNode->outputs.front().id,
+                       linearNode->inputs.front().id)
+              .accepted &&
+              nestedShapes
+                  .connect(linearNode->outputs.front().id,
+                           actNode->inputs.front().id)
+                  .accepted &&
+              nestedShapes
+                  .connect(actNode->outputs.front().id,
+                           extraNode->inputs.front().id)
+                  .accepted &&
+              nestedShapes
+                  .connect(extraNode->outputs.front().id,
+                           outNode->inputs.front().id)
+                  .accepted,
+          "nested shape-list graph cables");
+      const auto inner = nestedShapes.createGroup({linearId, actId});
+      passed &= expect(inner.accepted, "inner group for nested shape lists");
+      passed &= expect(
+          nestedShapes.setGroupCopies(inner.groupId, 3).accepted,
+          "inner N=3 accepts matching I/O");
+      passed &= expect(
+          nestedShapes.setPropertyCopyValues(linearId, "features", {2, 4, 8}),
+          "inner per-copy features 2,4,8");
+      const auto outer =
+          nestedShapes.createGroup({inner.groupId, extraId});
+      passed &= expect(outer.accepted, "outer group wraps inner group and tail");
+      passed &= expect(nestedShapes.setGroupCopies(outer.groupId, 2).accepted &&
+                           nestedShapes.groupCopyStatus(outer.groupId).active,
+                       "outer M=2 activates around inner N=3");
+      const auto *innerOutHub = nestedShapes.findNode(
+          findBoundary(nestedShapes, inner.groupId, NodeType::groupOutput));
+      const auto *innerInHub = nestedShapes.findNode(
+          findBoundary(nestedShapes, inner.groupId, NodeType::groupInput));
+      passed &= expect(innerOutHub != nullptr && innerInHub != nullptr &&
+                           !innerOutHub->outputs.empty() &&
+                           !innerInHub->inputs.empty(),
+                       "inner hubs exist after nesting");
+      if (innerOutHub != nullptr && innerInHub != nullptr &&
+          !innerOutHub->outputs.empty() && !innerInHub->inputs.empty()) {
+        const auto &outPin = innerOutHub->outputs.front();
+        const auto &inPin = innerInHub->inputs.front();
+        passed &= expect(
+            outPin.copyShapes.size() == 6,
+            "inner hub copyShapes include outer×inner runtime slots");
+        passed &= expect(
+            openyourbox::graph::formatCollapsedGroupPinShapes(
+                outPin.copyShapes, outPin.shape, {2, 3}, true) == "[8ch, 8ch]",
+            "collapsed inner output lists outer copies of last-out");
+        passed &= expect(
+            openyourbox::graph::formatCollapsedGroupPinShapes(
+                inPin.copyShapes, inPin.shape, {2, 3}, false) == "[2ch, 8ch]",
+            "collapsed inner input lists outer copies of first-in");
+      }
+      const auto *outerOutHub = nestedShapes.findNode(
+          findBoundary(nestedShapes, outer.groupId, NodeType::groupOutput));
+      passed &= expect(outerOutHub != nullptr && !outerOutHub->outputs.empty(),
+                       "outer hub exists after nesting");
+      if (outerOutHub != nullptr && !outerOutHub->outputs.empty()) {
+        const auto &outerOut = outerOutHub->outputs.front();
+        passed &= expect(
+            openyourbox::graph::formatCollapsedGroupPinShapes(
+                outerOut.copyShapes, outerOut.shape, {2}, true) == "8ch",
+            "collapsed outer output folds nested inner copies to last-out");
+      }
+    }
+  }
+
+  {
+    NodeGraph parentOfNested;
+    const auto inId =
+        parentOfNested.addNode(NodeType::audioInput, {0.0f, 0.0f});
+    const auto extraId =
+        parentOfNested.addNode(NodeType::activation, {80.0f, 0.0f});
+    const auto linearId =
+        parentOfNested.addNode(NodeType::linear, {240.0f, 0.0f});
+    const auto actId =
+        parentOfNested.addNode(NodeType::activation, {400.0f, 0.0f});
+    const auto outId =
+        parentOfNested.addNode(NodeType::audioOutput, {560.0f, 0.0f});
+    const auto *inNode = parentOfNested.findNode(inId);
+    const auto *extraNode = parentOfNested.findNode(extraId);
+    const auto *linearNode = parentOfNested.findNode(linearId);
+    const auto *actNode = parentOfNested.findNode(actId);
+    const auto *outNode = parentOfNested.findNode(outId);
+    passed &= expect(inNode != nullptr && extraNode != nullptr &&
+                         linearNode != nullptr && actNode != nullptr &&
+                         outNode != nullptr,
+                     "parent-of-nested shape graph nodes exist");
+    if (inNode != nullptr && extraNode != nullptr && linearNode != nullptr &&
+        actNode != nullptr && outNode != nullptr) {
+      passed &= expect(parentOfNested.setProperty(linearId, "features", 2),
+                       "parent-of-nested linear features match stereo width");
+      passed &= expect(
+          parentOfNested
+              .connect(inNode->outputs.front().id,
+                       extraNode->inputs.front().id)
+              .accepted &&
+              parentOfNested
+                  .connect(extraNode->outputs.front().id,
+                           linearNode->inputs.front().id)
+                  .accepted &&
+              parentOfNested
+                  .connect(linearNode->outputs.front().id,
+                           actNode->inputs.front().id)
+                  .accepted &&
+              parentOfNested
+                  .connect(actNode->outputs.front().id,
+                           outNode->inputs.front().id)
+                  .accepted,
+          "parent-of-nested graph cables");
+      const auto inner = parentOfNested.createGroup({linearId, actId});
+      passed &= expect(inner.accepted &&
+                           parentOfNested.setGroupCopies(inner.groupId, 3)
+                               .accepted,
+                       "inner N=3 under a copies=1 parent");
+      passed &= expect(
+          parentOfNested.setPropertyCopyValues(linearId, "features",
+                                               {2, 4, 8}),
+          "inner per-copy features 2,4,8 under copies=1 parent");
+      const auto parent =
+          parentOfNested.createGroup({extraId, inner.groupId});
+      passed &= expect(parent.accepted, "copies=1 parent wraps nested copies");
+      const auto *parentOutHub = parentOfNested.findNode(
+          findBoundary(parentOfNested, parent.groupId, NodeType::groupOutput));
+      passed &= expect(
+          parentOutHub != nullptr && !parentOutHub->outputs.empty(),
+          "copies=1 parent output hub exists");
+      if (parentOutHub != nullptr && !parentOutHub->outputs.empty()) {
+        const auto &outPin = parentOutHub->outputs.front();
+        passed &= expect(
+            openyourbox::graph::formatCollapsedGroupPinShapes(
+                outPin.copyShapes, outPin.shape, {1}, true) == "8ch",
+            "copies=1 parent output is nested last-out, not the inner list");
+      }
     }
   }
 

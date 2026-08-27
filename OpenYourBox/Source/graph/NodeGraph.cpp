@@ -1415,18 +1415,50 @@ void refreshOutputCopyShapes(openyourbox::graph::NodeGraph &graph) {
       }
     }
   }
+  // Hubs are flattened out of the materialized graph, so copy their
+  // per-slot shapes from the connected member pins instead.
   for (auto &node : graph.getNodes()) {
-    if (node.type != openyourbox::graph::NodeType::groupOutput)
-      continue;
-    const auto laneCount = std::min(node.inputs.size(), node.outputs.size());
-    for (std::size_t index = 0; index < laneCount; ++index) {
-      for (const auto &link : graph.getLinks()) {
-        if (link.destinationPinId != node.inputs[index].id)
-          continue;
-        const auto *source = graph.findPin(link.sourcePinId);
-        if (source != nullptr && !source->copyShapes.empty())
-          node.outputs[index].copyShapes = source->copyShapes;
-        break;
+    if (node.type == openyourbox::graph::NodeType::groupOutput) {
+      const auto laneCount = std::min(node.inputs.size(), node.outputs.size());
+      for (std::size_t index = 0; index < laneCount; ++index) {
+        for (const auto &link : graph.getLinks()) {
+          if (link.destinationPinId != node.inputs[index].id)
+            continue;
+          const auto *source = graph.findPin(link.sourcePinId);
+          if (source != nullptr && !source->copyShapes.empty()) {
+            const auto hubCopies =
+                std::max(1, graph.effectiveRuntimeCopyCount(node.id));
+            const auto n = static_cast<int>(source->copyShapes.size());
+            int innerFold = 1;
+            if (n >= hubCopies && n % hubCopies == 0)
+              innerFold = n / hubCopies;
+            node.outputs[index].copyShapes = openyourbox::graph::foldInnerCopyShapes(
+                source->copyShapes, innerFold, true);
+          }
+          break;
+        }
+      }
+    } else if (node.type == openyourbox::graph::NodeType::groupInput) {
+      const auto laneCount = std::min(node.inputs.size(), node.outputs.size());
+      for (std::size_t index = 0; index < laneCount; ++index) {
+        for (const auto &link : graph.getLinks()) {
+          if (link.sourcePinId != node.outputs[index].id)
+            continue;
+          const auto *destination = graph.findPin(link.destinationPinId);
+          if (destination != nullptr && !destination->copyShapes.empty()) {
+            const auto hubCopies =
+                std::max(1, graph.effectiveRuntimeCopyCount(node.id));
+            const auto n = static_cast<int>(destination->copyShapes.size());
+            int innerFold = 1;
+            if (n >= hubCopies && n % hubCopies == 0)
+              innerFold = n / hubCopies;
+            const auto folded = openyourbox::graph::foldInnerCopyShapes(
+                destination->copyShapes, innerFold, false);
+            node.inputs[index].copyShapes = folded;
+            node.outputs[index].copyShapes = folded;
+          }
+          break;
+        }
       }
     }
   }

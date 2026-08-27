@@ -34,6 +34,7 @@ int main() {
   using openyourbox::graph::dividingSetLengths;
   using openyourbox::graph::formatExpandedPropertyCopyList;
   using openyourbox::graph::formatHierarchicalCopyList;
+  using openyourbox::graph::formatCollapsedGroupPinShapes;
   using openyourbox::graph::formatShapeCopyList;
   using openyourbox::graph::isDividingSetLength;
   using openyourbox::graph::parsePropertyCopyList;
@@ -94,6 +95,49 @@ int main() {
                    "a pin outside a group still formats its shape");
   passed &= expect(formatShapeCopyList({twoCh}, twoCh, {1}) == "2ch",
                    "copies=1 still formats a shape without brackets");
+  passed &= expect(formatCollapsedGroupPinShapes({twoCh, fourCh, eightCh},
+                                                 twoCh, {3}, true) == "8ch",
+                   "collapsed group output shows last copy, not the inner list");
+  passed &= expect(formatCollapsedGroupPinShapes({twoCh, fourCh, eightCh},
+                                                 twoCh, {3}, false) == "2ch",
+                   "collapsed group input shows first copy, not the inner list");
+  passed &= expect(formatCollapsedGroupPinShapes(
+                       {twoCh, fourCh, eightCh, twoCh, fourCh, eightCh}, twoCh,
+                       {2, 3}, true) == "[8ch, 8ch]",
+                   "collapsed group output lists ancestor copies of last-out");
+  passed &= expect(formatCollapsedGroupPinShapes(
+                       {twoCh, fourCh, eightCh, twoCh, fourCh, eightCh}, twoCh,
+                       {2, 3}, false) == "[2ch, 2ch]",
+                   "collapsed group input lists ancestor copies of first-in");
+  passed &=
+      expect(formatCollapsedGroupPinShapes(
+                 {twoCh, fourCh, eightCh, twoCh, fourCh, sixteenCh}, twoCh,
+                 {2, 3}, true) == "[8ch, 16ch]",
+             "nested ancestor last-outs can differ per outer copy");
+  passed &= expect(
+      formatCollapsedGroupPinShapes(
+          {twoCh, fourCh, eightCh, twoCh, fourCh, sixteenCh, twoCh, fourCh,
+           eightCh, twoCh, fourCh, sixteenCh},
+          twoCh, {2, 2, 3}, true) == "[[8ch, 16ch], [8ch, 16ch]]",
+      "collapsed pins nest ancestor copy axes outside the folded group");
+  passed &= expect(formatCollapsedGroupPinShapes({twoCh, eightCh}, twoCh,
+                                                 {2, 1}, true) == "[2ch, 8ch]",
+                   "own copies=1 still lists ancestor copies on the group box");
+  passed &= expect(formatCollapsedGroupPinShapes({twoCh, fourCh, eightCh},
+                                                 twoCh, {1}, true) == "8ch",
+                   "parent copies=1 folds nested inner copies to last-out");
+  passed &= expect(formatCollapsedGroupPinShapes(
+                       {twoCh, fourCh, eightCh, twoCh, fourCh, eightCh}, twoCh,
+                       {1}, true) == "8ch",
+                   "parent copies=1 folds a deeper nested copy product to last-out");
+  passed &= expect(formatCollapsedGroupPinShapes(
+                       {twoCh, fourCh, eightCh, twoCh, fourCh, sixteenCh}, twoCh,
+                       {2}, true) == "16ch",
+                   "collapsed parent folds own copies and nested copies together");
+  passed &= expect(formatCollapsedGroupPinShapes(
+                       {twoCh, fourCh, eightCh, twoCh, fourCh, sixteenCh}, twoCh,
+                       {2, 1}, true) == "[8ch, 16ch]",
+                   "copies=1 group still lists ancestor copies of nested last-out");
 
   NodeProperty channels;
   channels.key = "channels";

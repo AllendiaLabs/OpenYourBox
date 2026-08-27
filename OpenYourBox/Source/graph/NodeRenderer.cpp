@@ -1647,15 +1647,19 @@ void NodeRenderer::renderGroup(NodeGraph &graph, GraphGroup &group,
                  port.kind == PinKind::input ? ed::PinKind::Input
                                              : ed::PinKind::Output);
     ImGui::PushID(pinId);
-    // Group outputs leave the serial stack after the last copy; inputs enter
-    // at the first copy (member pin.shape / copyShapes.front()).
+    // Collapsed boxes fold this group's own serial copies and any nested
+    // descendant copy axes to first-in / last-out; ancestor copy axes still
+    // nest as a list.
     ShapeSignature displayShape = port.shape;
     std::string expandedShapes;
     if (const auto *memberPin = graph.findPin(port.memberPinId)) {
-      if (port.kind == PinKind::output && !memberPin->copyShapes.empty())
+      const auto copyCounts =
+          ancestorRuntimeCopyCounts(graph, port.memberNodeId);
+      const bool takeLast = port.kind == PinKind::output;
+      if (takeLast && !memberPin->copyShapes.empty())
         displayShape = memberPin->copyShapes.back();
-      expandedShapes = pinExpandedShapeInfo(
-          *memberPin, ancestorRuntimeCopyCounts(graph, port.memberNodeId));
+      expandedShapes = formatCollapsedGroupPinShapes(
+          memberPin->copyShapes, displayShape, copyCounts, takeLast);
     }
     drawPinCaption(port.kind, port.label.c_str(), displayShape, expandedShapes);
     if (port.kind == PinKind::output)
