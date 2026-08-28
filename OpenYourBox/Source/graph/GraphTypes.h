@@ -181,7 +181,6 @@ inline bool isTrainableType(NodeType type) noexcept {
          type == NodeType::tcn || type == NodeType::activation ||
          type == NodeType::blackBox || type == NodeType::rateConv ||
          type == NodeType::variationalBottleneck ||
-         type == NodeType::noiseSynthesizer ||
          type == NodeType::convTranspose || type == NodeType::batchNorm;
 }
 
@@ -196,15 +195,15 @@ inline bool isRaveProcessingType(NodeType type) noexcept {
 /**
  * @brief Returns true for tensor ops that inherit hop rate and nBand.
  *
- * Linear, Conv1D, Activation, TCN, Utility, and Noise Synth process whatever
- * tensor they receive. Their pins start unspecified and copy the connected
- * upstream rate and band count.
+ * Linear, Conv1D, Activation, TCN, Utility, and Math Expression process
+ * whatever tensor they receive. Their pins start unspecified and copy the
+ * connected upstream rate and band count.
  */
 inline bool isShapePassthroughType(NodeType type) noexcept {
   return type == NodeType::linear || type == NodeType::convolution ||
          type == NodeType::activation || type == NodeType::tcn ||
-         type == NodeType::merge || type == NodeType::noiseSynthesizer ||
-         type == NodeType::batchNorm || type == NodeType::mathExpression;
+         type == NodeType::merge || type == NodeType::batchNorm ||
+         type == NodeType::mathExpression;
 }
 
 /**
@@ -275,8 +274,75 @@ inline constexpr float defaultFidelityPercent = 99.0f;
 inline constexpr float fidelityMinimum = 0.0f;
 /** @brief Inclusive upper bound for fidelity. */
 inline constexpr float fidelityMaximum = 100.0f;
-/** @brief Default filtered-noise band count (RAVE v1 noise). */
+/**
+ * @brief Default IR frequency bins per output channel (acids-rave v1).
+ *
+ * `NoiseGenerator` reshapes the amplitude net to `[..., data_size, noise_bands]`
+ * before `amp_to_impulse_response`. The conv/LReLU stack is not inside the
+ * Noise Synth element; this is only the IR bin count.
+ */
 inline constexpr int defaultNoiseBands = 5;
+/**
+ * @brief Default IR / hop length in samples (acids-rave v1 `prod([4, 4, 4])`).
+ *
+ * Users set this to the product of the strides they wire in front of Noise
+ * Synth. The element upsamples time by this factor, like a hop fold.
+ */
+inline constexpr int defaultNoiseWindowSize = 64;
+
+/**
+ * @brief Onesided IRFFT length implied by @p noiseBands real bins.
+ * @param noiseBands IR frequency bins (≥ 2).
+ * @return `2 * (noiseBands - 1)`, matching `torch.fft.irfft` without `n`.
+ */
+inline int noiseSynthIrLength(int noiseBands) noexcept {
+  return 2 * (std::max(2, noiseBands) - 1);
+}
+
+/**
+ * @brief User-facing error when Noise Synth channels are not `k * noise_bands`.
+ * @param channels Incoming amplitude width.
+ * @param noiseBands Configured IR bins.
+ * @return Empty when @p channels is unknown or divisible by @p noiseBands.
+ */
+inline std::string noiseSynthChannelMessage(int channels, int noiseBands) {
+  if (channels <= 0 || noiseBands <= 0 || channels % noiseBands == 0)
+    return {};
+  return "Noise bands must divide input channels (" + std::to_string(channels) +
+         " is not a multiple of " + std::to_string(noiseBands) + ")";
+}
+
+/**
+ * @brief Returns true when Noise Synth cannot split @p channels into IR bins.
+ * @param channels Incoming amplitude width.
+ * @param noiseBands Configured IR bins.
+ */
+inline bool noiseSynthChannelIsError(int channels, int noiseBands) noexcept {
+  return channels > 0 && noiseBands > 0 && channels % noiseBands != 0;
+}
+
+/**
+ * @brief User-facing error when the IR window is shorter than the irfft length.
+ * @param windowSize Configured hop / IR length.
+ * @param noiseBands Configured IR bins.
+ * @return Empty when @p windowSize is unknown or at least the IR length.
+ */
+inline std::string noiseSynthWindowMessage(int windowSize, int noiseBands) {
+  const auto irLength = noiseSynthIrLength(noiseBands);
+  if (windowSize <= 0 || windowSize >= irLength)
+    return {};
+  return "Window size must be at least the IR length " +
+         std::to_string(irLength);
+}
+
+/**
+ * @brief Returns true when @p windowSize cannot pad the irfft IR.
+ * @param windowSize Configured hop / IR length.
+ * @param noiseBands Configured IR bins.
+ */
+inline bool noiseSynthWindowIsError(int windowSize, int noiseBands) noexcept {
+  return windowSize > 0 && windowSize < noiseSynthIrLength(noiseBands);
+}
 
 /**
  * @brief Computes integer G^n without overflowing `int`.

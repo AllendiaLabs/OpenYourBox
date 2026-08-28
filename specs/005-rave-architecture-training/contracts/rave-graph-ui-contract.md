@@ -12,16 +12,16 @@ Live palette, shape rules, layouts, and fidelity control for RAVE-shaped graphs 
 | PQMF Synthesis | `pqmfSynthesis` | no (fixed bank) |
 | Rate Conv | `rateConv` | yes |
 | Variational Bottleneck | `variationalBottleneck` | yes (encoder head) |
-| Noise Synth | `noiseSynthesizer` | yes |
+| Noise Synth | `noiseSynthesizer` | no (IR × noise; amplitude net is user-wired) |
 
-PQMF nodes are not armable as learned weights in v1 (fixed analysis/synthesis). Rate conv, bottleneck parameters, noise synth, TCN, Linear, Conv1D, PReLU remain armable per Phase 3.
+PQMF nodes are not armable as learned weights in v1 (fixed analysis/synthesis). Rate conv, bottleneck parameters, TCN, Linear, Conv1D, PReLU remain armable per Phase 3. Noise Synth has no learned weights: users wire the acids-rave amplitude stack (strided Conv1D + LeakyReLU, then `mod_sigmoid(x − 5)`) themselves.
 
 ## Properties
 
 - PQMF: `nBand` default 16 (legal set: powers of two used by layouts, min 2)
 - Rate conv: `stride`, `direction` downsample|upsample, kernel, dilation, channels
 - Bottleneck: `latentSize` default 128; **Fidelity** 0–100 always visible (live and after train)
-- Noise: `noiseBands`, internal ratios defaults matching acids-rave v1 noise (5 bands)
+- Noise: `noiseBands` default 5 (IR bins per output channel), `windowSize` default 64 (`prod([4,4,4])` in acids-rave v1). Input channels must be `k * noiseBands`; output channels are `k`. Temporal rate upsamples by `windowSize` (hop fold). No internal conv stack.
 
 ## Shape
 

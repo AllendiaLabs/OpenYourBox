@@ -130,6 +130,10 @@ struct CompiledElement {
   std::vector<std::int64_t> mathPinSources;
   /** @brief Per-pin extract channel for Math Expression inputs, or -1. */
   std::vector<int> mathPinExtract;
+  /** @brief IR frequency bins per output channel (Noise Synth). */
+  int noiseBands = openyourbox::graph::defaultNoiseBands;
+  /** @brief IR / hop length in samples (Noise Synth). */
+  int windowSize = openyourbox::graph::defaultNoiseWindowSize;
 };
 
 /**
@@ -374,10 +378,6 @@ void randomizeElementWeights(CompiledElement &element, std::int32_t seed) {
         makeWeight(2 * latent, groupedIn, kernel, state));
     break;
   }
-  case openyourbox::graph::NodeType::noiseSynthesizer:
-    element.weights.push_back(makeWeight(
-        std::max(1, element.kernelSize), element.inputChannels, 1, state));
-    break;
   default:
     throw std::invalid_argument("Element does not own randomizable weights");
   }
@@ -1425,7 +1425,8 @@ void LiveGraphRuntime::executeElement(std::size_t index,
     break;
   }
   case openyourbox::graph::NodeType::noiseSynthesizer:
-    output = NoiseSynthesizer::process(upstream, element.weights.front());
+    output = NoiseSynthesizer::process(upstream, element.noiseBands,
+                                       element.windowSize);
     break;
   case openyourbox::graph::NodeType::audioInput:
   case openyourbox::graph::NodeType::knobInput:
@@ -2429,14 +2430,22 @@ LiveGraphEngine::compile(const graph::NodeGraph &graphDocument,
       }
       case NodeType::noiseSynthesizer: {
         int noiseBands = graph::defaultNoiseBands;
+        int windowSize = graph::defaultNoiseWindowSize;
         readProperty(node, "noise_bands", noiseBands);
-        element.kernelSize = std::max(1, noiseBands);
-        element.outputChannels = std::max(1, element.inputChannels);
-        element.randomizable = true;
-        element.parameterCount = saturatedMultiply(
-            static_cast<std::uint64_t>(element.kernelSize),
-            static_cast<std::uint64_t>(element.inputChannels));
-        randomizeElementWeights(element, node.seed);
+        readProperty(node, "window_size", windowSize);
+        noiseBands = std::max(2, noiseBands);
+        windowSize = std::max(1, windowSize);
+        if (graph::noiseSynthChannelIsError(element.inputChannels, noiseBands))
+          return failure(LiveGraphErrorCode::invalidGraph, node.id,
+                         graph::noiseSynthChannelMessage(element.inputChannels,
+                                                         noiseBands));
+        if (graph::noiseSynthWindowIsError(windowSize, noiseBands))
+          return failure(LiveGraphErrorCode::invalidGraph, node.id,
+                         graph::noiseSynthWindowMessage(windowSize, noiseBands));
+        element.noiseBands = noiseBands;
+        element.windowSize = windowSize;
+        element.outputChannels =
+            std::max(1, element.inputChannels / noiseBands);
         break;
       }
       case NodeType::groupInput:

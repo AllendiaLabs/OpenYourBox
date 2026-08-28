@@ -957,18 +957,57 @@ class VariationalBottleneckLayer(nn.Module):
 
 
 class NoiseSynthLayer(nn.Module):
-    """Filtered-noise addend."""
+    """Acids-rave v1 IR × white noise (no amplitude conv stack)."""
 
-    def __init__(self, in_channels: int, noise_bands: int) -> None:
-        """Create a 1x1 amplitude projector."""
+    def __init__(self, noise_bands: int, window_size: int) -> None:
+        """Store IR bin count and hop length."""
         super().__init__()
-        self.projector = nn.Conv1d(in_channels, max(1, noise_bands), 1, bias=False)
+        self.noise_bands = max(2, int(noise_bands))
+        self.window_size = max(1, int(window_size))
 
-    def forward(self, samples: torch.Tensor) -> torch.Tensor:
-        """Return noise mixed back to the input width."""
-        bands = torch.sigmoid(self.projector(samples))
-        mixed = (bands * torch.randn_like(bands)).mean(1, keepdim=True)
-        return mixed.expand_as(samples)
+    def forward(self, amplitudes: torch.Tensor) -> torch.Tensor:
+        """Filter uniform noise by IRs built from amplitude frames."""
+        return filtered_noise(amplitudes, self.noise_bands, self.window_size)
+
+
+def amp_to_impulse_response(amp: torch.Tensor, target_size: int) -> torch.Tensor:
+    """Port of acids-rave `rave.core.amp_to_impulse_response`."""
+    amp = torch.stack([amp, torch.zeros_like(amp)], -1)
+    amp = torch.view_as_complex(amp)
+    amp = torch.fft.irfft(amp)
+    filter_size = amp.shape[-1]
+    amp = torch.roll(amp, filter_size // 2, -1)
+    win = torch.hann_window(filter_size, dtype=amp.dtype, device=amp.device)
+    amp = amp * win
+    amp = functional.pad(amp, (0, int(target_size) - int(filter_size)))
+    return torch.roll(amp, -filter_size // 2, -1)
+
+
+def fft_convolve(signal: torch.Tensor, kernel: torch.Tensor) -> torch.Tensor:
+    """Port of acids-rave `rave.core.fft_convolve`."""
+    signal = functional.pad(signal, (0, signal.shape[-1]))
+    kernel = functional.pad(kernel, (kernel.shape[-1], 0))
+    output = torch.fft.irfft(torch.fft.rfft(signal) * torch.fft.rfft(kernel))
+    return output[..., output.shape[-1] // 2 :]
+
+
+def filtered_noise(
+    amplitudes: torch.Tensor,
+    noise_bands: int,
+    window_size: int,
+    noise: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """IR-filter uniform noise; amplitudes are `[B, data_size * bands, frames]`."""
+    bands = max(2, int(noise_bands))
+    hop = max(1, int(window_size))
+    batch, channels, frames = amplitudes.shape
+    data_size = channels // bands
+    amp = amplitudes.permute(0, 2, 1).reshape(batch, frames, data_size, bands)
+    ir = amp_to_impulse_response(amp, hop)
+    if noise is None:
+        noise = torch.rand_like(ir) * 2 - 1
+    out = fft_convolve(noise, ir).permute(0, 2, 1, 3)
+    return out.reshape(batch, data_size, -1)
 
 
 class RaveGraphModule(nn.Module):
@@ -1124,8 +1163,10 @@ def build_rave_graph_module(
             channels_by_id[node_id] = latent
             bottleneck_id = node_id
         elif element_type == "noise_synthesizer":
-            layers[node_id] = NoiseSynthLayer(in_ch, int(properties.get("noise_bands", 5)))
-            channels_by_id[node_id] = in_ch
+            noise_bands = int(properties.get("noise_bands", 5))
+            window_size = int(properties.get("window_size", 64))
+            layers[node_id] = NoiseSynthLayer(noise_bands, window_size)
+            channels_by_id[node_id] = max(1, in_ch // max(1, noise_bands))
         elif element_type == "tcn":
             hidden = int(properties.get("channels", in_ch))
             layers[node_id] = SteerableTCN(

@@ -23,7 +23,7 @@ This feature extends Phase 3 graph, library, capture, and train documents. Mappi
 - `pqmfAnalysis`, `pqmfSynthesis`
 - `rateConv` — `stride` ≥ 1, `direction`: `downsample` | `upsample`, `kernelSize`, `dilation`, `channels`
 - `variationalBottleneck` — `latentSize` (default 128), `fidelityPercent` 0–100 (default 99)
-- `noiseSynthesizer` — `noiseBands`, `ratios[]`
+- `noiseSynthesizer` — `noiseBands` (default 5), `windowSize` (default 64). No learned weights. Input `[B, dataSize * noiseBands, frames]` → output `[B, dataSize, frames * windowSize]`.
 
 **Extended fields on bottleneck / RAVE Gold**
 - `fidelityPercent`: float 0–100

@@ -97,7 +97,7 @@ implementation (IRCAM ACIDS):
 
 The acids-rave reference is licensed under Creative Commons
 Attribution-NonCommercial 4.0 International. OpenYourBox reimplements the
-published causal PQMF, rate-change, variational, and two-stage training
+published causal PQMF, rate-change, variational, filtered-noise IR, and two-stage training
 behaviour; it does not vendor the acids-rave Python package.
 See https://creativecommons.org/licenses/by-nc/4.0/
 

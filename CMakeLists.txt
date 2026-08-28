@@ -270,6 +270,22 @@ if(BUILD_TESTING)
         juce::juce_recommended_warning_flags)
     add_test(NAME VariationalBottleneck COMMAND OpenYourBoxVariationalBottleneckTests)
 
+    juce_add_console_app(OpenYourBoxNoiseSynthesizerTests PRODUCT_NAME "OpenYourBox Noise Synthesizer Tests")
+    target_sources(OpenYourBoxNoiseSynthesizerTests PRIVATE Tests/NoiseSynthesizerTests.cpp)
+    target_include_directories(OpenYourBoxNoiseSynthesizerTests BEFORE PRIVATE
+        "${CMAKE_CURRENT_BINARY_DIR}/OpenYourBox_artefacts/JuceLibraryCode"
+        OpenYourBox/Source
+        "${TORCH_INCLUDE_DIRS}")
+    target_link_libraries(OpenYourBoxNoiseSynthesizerTests PRIVATE
+        OpenYourBox
+        OpenYourBoxResources
+        juce::juce_audio_utils
+        juce::juce_dsp
+        juce::juce_opengl
+        juce::juce_recommended_config_flags
+        juce::juce_recommended_warning_flags)
+    add_test(NAME NoiseSynthesizer COMMAND OpenYourBoxNoiseSynthesizerTests)
+
     juce_add_console_app(OpenYourBoxLiveGraphTests PRODUCT_NAME "OpenYourBox Live Graph Tests")
     target_sources(OpenYourBoxLiveGraphTests PRIVATE Tests/LiveGraphEngineTests.cpp)
     target_include_directories(OpenYourBoxLiveGraphTests BEFORE PRIVATE

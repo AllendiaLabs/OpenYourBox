@@ -31,7 +31,7 @@
 | `pqmfSynthesis` | Matching inverse; same `nBand` |
 | `rateConv` | Causal Conv1d with integer `stride` and `direction` downsample \| upsample (transpose) |
 | `variationalBottleneck` | Encoder features → latent sample; KL during reconstruction train; fidelity at inference |
-| `noiseSynthesizer` | Learned filtered-noise addend (DDSP-style amp→IR) |
+| `noiseSynthesizer` | IR-filtered white noise (acids-rave `amp_to_impulse_response` × `fft_convolve`; amplitude conv stack is user-wired) |
 
 Original layout: strided `rateConv` encoder, bottleneck, decoder with waveform × loudness (Merge multiply + sigmoid) + optional noise. Latest continuous layout: residual dilated units expressed as existing **TCN** (or residual `rateConv` stacks with dilation) between down/up `rateConv` stages, amplitude modulation via channel-split × sigmoid.
 

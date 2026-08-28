@@ -719,7 +719,7 @@ int resolvePinChannels(const openyourbox::graph::NodeGraph &graph,
   using openyourbox::graph::defaultLatentSize;
   using openyourbox::graph::defaultPqmfBands;
   using openyourbox::graph::defaultLatentSize;
-  using openyourbox::graph::defaultPqmfBands;
+  using openyourbox::graph::defaultNoiseBands;
   if (!visiting.insert(pinId).second)
     return 0;
 
@@ -814,10 +814,19 @@ int resolvePinChannels(const openyourbox::graph::NodeGraph &graph,
   }
   case NodeType::variationalBottleneck:
     return readNodeProperty(*node, "latent_size", defaultLatentSize);
-  case NodeType::noiseSynthesizer:
+  case NodeType::noiseSynthesizer: {
     if (node->inputs.empty())
       return 0;
-    return resolvePinChannels(graph, node->inputs.front().id, visiting);
+    const auto incoming =
+        resolvePinChannels(graph, node->inputs.front().id, visiting);
+    const auto noiseBands =
+        std::max(1, readNodeProperty(*node, "noise_bands", defaultNoiseBands));
+    if (incoming <= 0)
+      return 0;
+    if (incoming % noiseBands != 0)
+      return 0;
+    return incoming / noiseBands;
+  }
   default:
     return 0;
   }
@@ -1367,6 +1376,59 @@ void normalizeBottleneckProperties(openyourbox::graph::GraphNode &node) {
 }
 
 /**
+ * @brief Ensures Noise Synth has no weights and exposes bands plus window size.
+ * @param node Loaded or newly created Noise Synth node.
+ */
+void normalizeNoiseSynthesizerProperties(openyourbox::graph::GraphNode &node) {
+  using openyourbox::graph::NodeProperty;
+  using openyourbox::graph::NodeType;
+  using openyourbox::graph::defaultNoiseBands;
+  using openyourbox::graph::defaultNoiseWindowSize;
+  using openyourbox::graph::minimumPositiveProperty;
+  using openyourbox::graph::unlimitedPropertyMaximum;
+  if (node.type != NodeType::noiseSynthesizer)
+    return;
+  node.hasWeights = false;
+  node.armedForTraining = false;
+  node.detail = "IR × white noise";
+  bool hasBands = false;
+  bool hasWindow = false;
+  for (auto &property : node.properties) {
+    if (property.key == "noise_bands") {
+      hasBands = true;
+      property.minimum = 2;
+      property.maximum = unlimitedPropertyMaximum;
+      if (property.value < 2)
+        property.value = 2;
+    } else if (property.key == "window_size") {
+      hasWindow = true;
+      property.minimum = minimumPositiveProperty;
+      property.maximum = unlimitedPropertyMaximum;
+      if (property.value < 1)
+        property.value = defaultNoiseWindowSize;
+    }
+  }
+  if (!hasBands) {
+    NodeProperty bands;
+    bands.key = "noise_bands";
+    bands.label = "Noise bands";
+    bands.value = defaultNoiseBands;
+    bands.minimum = 2;
+    bands.maximum = unlimitedPropertyMaximum;
+    node.properties.push_back(std::move(bands));
+  }
+  if (!hasWindow) {
+    NodeProperty window;
+    window.key = "window_size";
+    window.label = "Window Size";
+    window.value = defaultNoiseWindowSize;
+    window.minimum = minimumPositiveProperty;
+    window.maximum = unlimitedPropertyMaximum;
+    node.properties.push_back(std::move(window));
+  }
+}
+
+/**
  * @brief Removes persisted upper bounds on numeric node properties.
  * @param node Loaded or newly created graph node.
  */
@@ -1696,6 +1758,36 @@ void refreshPropagatedPinShapes(openyourbox::graph::NodeGraph &graph) {
 }
 
 /**
+ * @brief Splits amplitude channels into IR bins and upsamples by window size.
+ * @param node Noise Synth element.
+ * @param incoming Connected conditioner shape.
+ * @return Output shape, or channels/rate 0 when the split or hop is illegal.
+ */
+openyourbox::graph::ShapeSignature
+noiseSynthOutgoingShape(const openyourbox::graph::GraphNode &node,
+                        openyourbox::graph::ShapeSignature incoming) {
+  using openyourbox::graph::convolutionOutputTemporalRate;
+  using openyourbox::graph::defaultNoiseBands;
+  using openyourbox::graph::defaultNoiseWindowSize;
+  const auto noiseBands =
+      std::max(1, readNodeProperty(node, "noise_bands", defaultNoiseBands));
+  const auto windowSize =
+      std::max(1, readNodeProperty(node, "window_size", defaultNoiseWindowSize));
+  auto outgoing = incoming;
+  if (incoming.channels > 0) {
+    outgoing.channels = incoming.channels % noiseBands == 0
+                            ? incoming.channels / noiseBands
+                            : 0;
+  }
+  if (incoming.temporalRate > 0) {
+    const auto rate =
+        convolutionOutputTemporalRate(incoming.temporalRate, windowSize, true);
+    outgoing.temporalRate = rate < 0 ? 0 : rate;
+  }
+  return outgoing;
+}
+
+/**
  * @brief Applies hop-rate and nBand rules for one node after its producers.
  * @param graph Graph document used to resolve upstream cables.
  * @param node Node whose pins are rewritten.
@@ -1792,6 +1884,14 @@ void applyNodePinShapes(openyourbox::graph::NodeGraph &graph,
       const auto latent = readNodeProperty(node, "latent_size", defaultLatentSize);
       if (latent > 0)
         pin.shape.channels = latent;
+    }
+    break;
+  case NodeType::noiseSynthesizer:
+    inheritInputs();
+    {
+      const auto outgoing = noiseSynthOutgoingShape(node, incoming);
+      for (auto &pin : node.outputs)
+        inheritTensorFields(pin, outgoing, true);
     }
     break;
   default: {
@@ -1906,6 +2006,25 @@ std::string firstIncompatibleLinkMessage(const openyourbox::graph::NodeGraph &gr
     if (node->type == NodeType::variationalBottleneck &&
         variationalBottleneckChannelIsError(sourceShape.channels))
       return variationalBottleneckChannelMessage(sourceShape.channels);
+    if (node->type == NodeType::noiseSynthesizer) {
+      const auto noiseBands = std::max(
+          1, readNodeProperty(*node, "noise_bands",
+                              openyourbox::graph::defaultNoiseBands));
+      const auto windowSize = std::max(
+          1, readNodeProperty(*node, "window_size",
+                              openyourbox::graph::defaultNoiseWindowSize));
+      if (openyourbox::graph::noiseSynthChannelIsError(sourceShape.channels,
+                                                       noiseBands))
+        return openyourbox::graph::noiseSynthChannelMessage(
+            sourceShape.channels, noiseBands);
+      if (openyourbox::graph::noiseSynthWindowIsError(windowSize, noiseBands))
+        return openyourbox::graph::noiseSynthWindowMessage(windowSize,
+                                                           noiseBands);
+      if (convolutionRateIsError(windowSize, true, sourceShape.temporalRate))
+        return convolutionRateMessage(windowSize, true,
+                                      sourceShape.temporalRate);
+      continue;
+    }
     if (!isConvolutionType(node->type) && !isConvTransposeType(node->type))
       continue;
     const auto stride = std::max(1, readNodeProperty(*node, "stride", 1));
@@ -2384,6 +2503,7 @@ openyourbox::graph::GraphNode nodeFromTree(const juce::ValueTree &tree) {
   normalizePhase3Node(node);
   normalizeConvolutionProperties(node);
   normalizeBottleneckProperties(node);
+  normalizeNoiseSynthesizerProperties(node);
   normalizePropertyBounds(node);
   normalizeHostIoProperties(node);
   return node;
@@ -2909,6 +3029,9 @@ void simulateNodeRepeatShapes(
     writeOutputs(outgoing);
     return;
   }
+  case NodeType::noiseSynthesizer:
+    writeOutputs(noiseSynthOutgoingShape(node, incoming));
+    return;
   default:
     break;
   }
@@ -4691,6 +4814,23 @@ ConnectionResult NodeGraph::connect(std::int32_t firstPinId,
     return {false,
             variationalBottleneckChannelMessage(sourceShape.channels)};
 
+  if (destinationNodePtr != nullptr &&
+      destinationNodePtr->type == NodeType::noiseSynthesizer) {
+    const auto noiseBands =
+        std::max(1, readNodeProperty(*destinationNodePtr, "noise_bands",
+                                     defaultNoiseBands));
+    const auto windowSize =
+        std::max(1, readNodeProperty(*destinationNodePtr, "window_size",
+                                     defaultNoiseWindowSize));
+    if (noiseSynthChannelIsError(sourceShape.channels, noiseBands))
+      return {false, noiseSynthChannelMessage(sourceShape.channels, noiseBands)};
+    if (noiseSynthWindowIsError(windowSize, noiseBands))
+      return {false, noiseSynthWindowMessage(windowSize, noiseBands)};
+    if (convolutionRateIsError(windowSize, true, sourceShape.temporalRate))
+      return {false, convolutionRateMessage(windowSize, true,
+                                            sourceShape.temporalRate)};
+  }
+
   const auto duplicate = std::any_of(
       links.begin(), links.end(), [source, destination](const GraphLink &link) {
         return link.sourcePinId == source->id &&
@@ -6249,15 +6389,17 @@ GraphNode NodeGraph::makeNode(NodeType type, juce::Point<float> position) {
     break;
   case NodeType::noiseSynthesizer:
     node.label = "Noise Synth";
-    node.detail = "Filtered noise addend";
-    node.hasWeights = true;
-    node.armedForTraining = true;
+    node.detail = "IR × white noise";
+    node.armedForTraining = false;
     addInput();
     addOutput();
     node.inputs.front().shape = flexibleTensorShape();
     node.outputs.front().shape = flexibleTensorShape();
     node.properties.push_back(
-        property("noise_bands", "Noise bands", defaultNoiseBands,
+        property("noise_bands", "Noise bands", defaultNoiseBands, 2,
+                 unlimitedPropertyMaximum));
+    node.properties.push_back(
+        property("window_size", "Window Size", defaultNoiseWindowSize,
                  minimumPositiveProperty, unlimitedPropertyMaximum));
     break;
   case NodeType::mathExpression:
