@@ -330,11 +330,259 @@ def _properties(element: dict[str, Any]) -> dict[str, Any]:
     values: dict[str, Any] = {}
     for item in element.get("properties", []):
         key = str(item["key"])
-        if "float_value" in item:
+        if "string_value" in item:
+            values[key] = str(item["string_value"])
+        elif "float_value" in item:
             values[key] = float(item["float_value"])
         else:
             values[key] = int(item["value"])
     return values
+
+
+class MathExpression(nn.Module):
+    """Elementwise arithmetic over ``x1``…``xN`` matching the VST grammar."""
+
+    def __init__(self, expression: str, n_inputs: int = 1) -> None:
+        """Compile @p expression for up to @p n_inputs named ``xK`` pins."""
+        super().__init__()
+        self.expression = str(expression)
+        self.n_inputs = max(1, int(n_inputs))
+        self._program = _compile_math_expression(self.expression, self.n_inputs)
+
+    def forward(self, *inputs: torch.Tensor | None) -> torch.Tensor:
+        """Evaluate the prepared program; a single tensor binds ``x1``."""
+        tensors: list[torch.Tensor | None] = list(inputs)
+        if len(tensors) == 1 and isinstance(tensors[0], (list, tuple)):
+            tensors = list(tensors[0])
+        while len(tensors) < self.n_inputs:
+            tensors.append(None)
+        return _eval_math_expression(self._program, tensors)
+
+
+def _compile_math_expression(text: str, n_inputs: int) -> list[tuple[str, float | int | None]]:
+    """Parse the shared ``()+-*/^`` / ``exp()`` grammar into postfix ops."""
+    source = str(text)
+    index = 0
+
+    def skip() -> None:
+        nonlocal index
+        while index < len(source) and source[index].isspace():
+            index += 1
+
+    def fail(message: str) -> None:
+        raise ValueError(message)
+
+    def parse_number() -> float:
+        nonlocal index
+        start = index
+        if index < len(source) and source[index] == ".":
+            index += 1
+        while index < len(source) and source[index].isdigit():
+            index += 1
+        if index < len(source) and source[index] == "." and "." not in source[start:index]:
+            index += 1
+            while index < len(source) and source[index].isdigit():
+                index += 1
+        if index < len(source) and source[index] in "eE":
+            exp = index
+            index += 1
+            if index < len(source) and source[index] in "+-":
+                index += 1
+            if index >= len(source) or not source[index].isdigit():
+                index = exp
+            else:
+                while index < len(source) and source[index].isdigit():
+                    index += 1
+        if start == index:
+            fail("Expected a number")
+        return float(source[start:index])
+
+    def parse_ident() -> str:
+        nonlocal index
+        start = index
+        index += 1
+        while index < len(source) and (source[index].isalnum() or source[index] == "_"):
+            index += 1
+        return source[start:index]
+
+    def parse_primary() -> list[tuple[str, float | int | None]]:
+        nonlocal index
+        skip()
+        if index >= len(source):
+            fail("Expression is incomplete")
+        ch = source[index]
+        if ch.isdigit() or ch == ".":
+            return [("lit", parse_number())]
+        if ch.isalpha() or ch == "_":
+            name = parse_ident()
+            if name == "exp":
+                skip()
+                if index >= len(source) or source[index] != "(":
+                    fail("exp requires parentheses: exp(...)")
+                index += 1
+                inner = parse_add()
+                skip()
+                if index >= len(source) or source[index] != ")":
+                    fail("Missing closing parenthesis")
+                index += 1
+                return inner + [("exp", None)]
+            if not name.startswith("x") or len(name) < 2 or not name[1:].isdigit():
+                fail(f"Unknown symbol '{name}'; use x1, x2, … for inputs")
+            pin = int(name[1:])
+            if pin < 1 or pin > n_inputs:
+                fail(f"'{name}' is not a configured input (Inputs = {n_inputs})")
+            return [("ident", pin)]
+        if ch == "(":
+            index += 1
+            inner = parse_add()
+            skip()
+            if index >= len(source) or source[index] != ")":
+                fail("Missing closing parenthesis")
+            index += 1
+            return inner
+        fail("Expected a number, identifier, exp(...), or '('")
+        return []
+
+    def parse_unary() -> list[tuple[str, float | int | None]]:
+        nonlocal index
+        skip()
+        if index < len(source) and source[index] == "-":
+            index += 1
+            return parse_unary() + [("neg", None)]
+        return parse_primary()
+
+    def parse_pow() -> list[tuple[str, float | int | None]]:
+        nonlocal index
+        left = parse_unary()
+        skip()
+        if index < len(source) and source[index] == "^":
+            index += 1
+            return left + parse_pow() + [("pow", None)]
+        # `**` is an ASCII-friendly synonym for power (AZERTY `^` is a dead key).
+        if (
+            index + 1 < len(source)
+            and source[index] == "*"
+            and source[index + 1] == "*"
+        ):
+            index += 2
+            return left + parse_pow() + [("pow", None)]
+        return left
+
+    def parse_mul() -> list[tuple[str, float | int | None]]:
+        nonlocal index
+        left = parse_pow()
+        while True:
+            skip()
+            if (
+                index < len(source)
+                and source[index] == "*"
+                and not (
+                    index + 1 < len(source) and source[index + 1] == "*"
+                )
+            ):
+                index += 1
+                left = left + parse_pow() + [("mul", None)]
+            elif index < len(source) and source[index] == "/":
+                index += 1
+                left = left + parse_pow() + [("div", None)]
+            else:
+                return left
+
+    def parse_add() -> list[tuple[str, float | int | None]]:
+        nonlocal index
+        left = parse_mul()
+        while True:
+            skip()
+            if index >= len(source):
+                return left
+            if source[index] == "+":
+                index += 1
+                left = left + parse_mul() + [("add", None)]
+            elif source[index] == "-":
+                index += 1
+                left = left + parse_mul() + [("sub", None)]
+            else:
+                return left
+
+    skip()
+    if index >= len(source):
+        fail("Expression is empty")
+    program = parse_add()
+    skip()
+    if index < len(source):
+        fail(f"Unexpected '{source[index]}' in expression")
+    return program
+
+
+def _eval_math_expression(
+    program: list[tuple[str, float | int | None]],
+    inputs: list[torch.Tensor | None],
+) -> torch.Tensor:
+    """Run a compiled Math Expression program over pin-ordered tensors."""
+    stack: list[torch.Tensor] = []
+    reference: torch.Tensor | None = None
+    for item in inputs:
+        if item is not None:
+            reference = item
+            break
+    if reference is None:
+        raise ValueError("Math Expression has no connected input tensors")
+    width = 1
+    for item in inputs:
+        if item is not None and item.ndim >= 2:
+            width = max(width, int(item.shape[-2]))
+
+    def literal(value: float) -> torch.Tensor:
+        filled = torch.full(
+            (reference.shape[0], 1, reference.shape[-1]),
+            float(value),
+            dtype=reference.dtype,
+            device=reference.device,
+        )
+        return filled.expand(reference.shape[0], width, reference.shape[-1]).contiguous()
+
+    def align(left: torch.Tensor, right: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        length = min(int(left.shape[-1]), int(right.shape[-1]))
+        left = left[..., -length:]
+        right = right[..., -length:]
+        channels = max(int(left.shape[-2]), int(right.shape[-2]))
+        if int(left.shape[-2]) == 1 and channels > 1:
+            left = left.expand(left.shape[0], channels, left.shape[-1])
+        if int(right.shape[-2]) == 1 and channels > 1:
+            right = right.expand(right.shape[0], channels, right.shape[-1])
+        return left, right
+
+    for op, payload in program:
+        if op == "lit":
+            stack.append(literal(float(payload)))
+        elif op == "ident":
+            pin = int(payload) - 1
+            if pin < 0 or pin >= len(inputs) or inputs[pin] is None:
+                raise ValueError(f"Missing tensor for x{pin + 1}")
+            stack.append(inputs[pin])
+        elif op == "neg":
+            stack[-1] = -stack[-1]
+        elif op == "exp":
+            stack[-1] = torch.exp(stack[-1])
+        else:
+            right = stack.pop()
+            left = stack.pop()
+            left, right = align(left, right)
+            if op == "add":
+                stack.append(left + right)
+            elif op == "sub":
+                stack.append(left - right)
+            elif op == "mul":
+                stack.append(left * right)
+            elif op == "div":
+                stack.append(left / right)
+            elif op == "pow":
+                stack.append(torch.pow(left, right))
+            else:
+                raise ValueError(f"unknown math op {op}")
+    if not stack:
+        raise ValueError("Invalid math expression")
+    return stack[-1]
 
 
 def _topological_elements(fragment: dict[str, Any]) -> list[dict[str, Any]]:
@@ -385,7 +633,7 @@ def build_module(
         for element in fragment.get("elements", [])
         if isinstance(element, dict)
     }
-    if types & rave_types:
+    if types & rave_types or "math_expression" in types:
         return build_rave_graph_module(fragment, input_channels, cond_dim)
 
     modules: list[nn.Module] = []
@@ -432,6 +680,13 @@ def build_module(
                     residual,
                     cond_dim,
                     float(properties.get("negative_slope", 0.01)),
+                )
+            )
+        elif element_type == "math_expression":
+            modules.append(
+                MathExpression(
+                    str(properties.get("expression", "x1")),
+                    int(properties.get("inputs", 1)),
                 )
             )
         elif element_type in {"utility", "merge", "sum", "multiply"}:
@@ -727,12 +982,14 @@ class RaveGraphModule(nn.Module):
         bottleneck_id: int | None,
         types: dict[int, str],
         input_channels: int,
+        incoming_pins: dict[int, list[tuple[int, int]]] | None = None,
     ) -> None:
         """Store graph topology and per-node layers."""
         super().__init__()
         self.layers = nn.ModuleDict({str(key): value for key, value in layers.items()})
         self.order = order
         self.incoming = incoming
+        self.incoming_pins = incoming_pins or {}
         self.bottleneck_id = bottleneck_id
         self.types = types
         self.input_channels = input_channels
@@ -767,7 +1024,24 @@ class RaveGraphModule(nn.Module):
                     current = current[..., :length] + extra[..., :length]
             key = str(node_id)
             if key in self.layers:
-                current = self.layers[key](current)
+                layer = self.layers[key]
+                if self.types.get(node_id) == "math_expression":
+                    n_in = int(getattr(layer, "n_inputs", 1))
+                    slots: list[torch.Tensor | None] = [None] * n_in
+                    pin_sources = self.incoming_pins.get(node_id, [])
+                    if pin_sources:
+                        for pin_index, source in pin_sources:
+                            if 0 <= pin_index < n_in and source in values:
+                                slots[pin_index] = values[source]
+                    else:
+                        for offset, source in enumerate(sources):
+                            if offset < n_in and source in values:
+                                slots[offset] = values[source]
+                    if all(item is None for item in slots):
+                        slots[0] = current
+                    current = layer(*slots)
+                else:
+                    current = layer(current)
             values[node_id] = current
             output = current
             if stop_at is not None and node_id == stop_at:
@@ -800,11 +1074,18 @@ def build_rave_graph_module(
     elements = _topological_elements(fragment)
     by_id = {int(element["id"]): element for element in elements}
     incoming: dict[int, list[int]] = {int(element["id"]): [] for element in elements}
+    incoming_pins: dict[int, list[tuple[int, int]]] = {
+        int(element["id"]): [] for element in elements
+    }
     for connection in fragment.get("connections", []):
         source = int(connection["source_element_id"])
         destination = int(connection["destination_element_id"])
         if source in incoming and destination in incoming:
+            pin_index = connection.get("destination_pin_index")
+            if pin_index is None:
+                pin_index = len(incoming[destination])
             incoming[destination].append(source)
+            incoming_pins[destination].append((int(pin_index), source))
     layers: dict[int, nn.Module] = {}
     channels_by_id: dict[int, int] = {}
     bottleneck_id = None
@@ -868,6 +1149,17 @@ def build_rave_graph_module(
             out_ch = int(properties.get("features", in_ch))
             layers[node_id] = nn.Conv1d(in_ch, out_ch, 1, bias=False)
             channels_by_id[node_id] = out_ch
+        elif element_type == "math_expression":
+            widths = [
+                channels_by_id.get(source, input_channels)
+                for source in incoming[node_id]
+            ]
+            out_ch = max(widths) if widths else in_ch
+            layers[node_id] = MathExpression(
+                str(properties.get("expression", "x1")),
+                int(properties.get("inputs", 1)),
+            )
+            channels_by_id[node_id] = max(1, out_ch)
         else:
             channels_by_id[node_id] = in_ch
     return RaveGraphModule(
@@ -877,6 +1169,7 @@ def build_rave_graph_module(
         bottleneck_id,
         types,
         input_channels,
+        incoming_pins,
     )
 
 

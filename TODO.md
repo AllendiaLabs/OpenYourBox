@@ -42,8 +42,8 @@
 - [x] add keyword to preserve whatever input dim/channels/features as output dim/channels/features, even when dims change because of group copies if eg list of the keyword is provided
 - [x] when a group with N copies is in a group with M copies, which itself is in a group with O copies, its elements display a list of M*N*O parameter values. It should also accept N values, or M*N, or 1 value. The values should be copied under the hood. 
 
-- [ ] parameters should accept simple expressions of i, i being the index in the copies list, or if 1 copy or not in group: i is always 0. accept ()+-*^
+- [x] parameters should accept simple expressions of i, i being the index in the copies list, or if 1 copy or not in group: i is always 0. accept ()+-*^ (`specs/012-math-expr-param-i/`)
 
 - [ ] add depthwise to TCN. and to conv1d? what is it exactly? like groups?
 
-- [ ] add mod sigmoid?
+- [x] add mod sigmoid? Composable as Sigmoid → Math Expression `2 * x1^2.3 + 1e-7` (`specs/012-math-expr-param-i/`); no dedicated palette entry.

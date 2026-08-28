@@ -26,7 +26,7 @@ struct PaletteItem {
 };
 
 /** @brief Factory palette rows, listed alphabetically by display label. */
-constexpr std::array<PaletteItem, 13> paletteItems{{
+constexpr std::array<PaletteItem, 14> paletteItems{{
     {"Activation", openyourbox::graph::NodeType::activation},
     {"BatchNorm1d", openyourbox::graph::NodeType::batchNorm},
     {"Bottleneck", openyourbox::graph::NodeType::variationalBottleneck},
@@ -34,6 +34,7 @@ constexpr std::array<PaletteItem, 13> paletteItems{{
     {"ConvTranspose1d", openyourbox::graph::NodeType::convTranspose},
     {"Knob Input", openyourbox::graph::NodeType::knobInput},
     {"Linear", openyourbox::graph::NodeType::linear},
+    {"Math Expression", openyourbox::graph::NodeType::mathExpression},
     {"Noise Synth", openyourbox::graph::NodeType::noiseSynthesizer},
     {"PQMF Analysis", openyourbox::graph::NodeType::pqmfAnalysis},
     {"PQMF Synthesis", openyourbox::graph::NodeType::pqmfSynthesis},
@@ -1058,12 +1059,52 @@ void NodeRenderer::renderNode(NodeGraph &graph, GraphNode &node,
       ImGui::PopID();
       continue;
     }
+    if (property.kind == PropertyKind::string) {
+      beginRepeatListPropertyRow(property.label.c_str(), {});
+      const auto bufferKey = std::to_string(node.id) + ":" + property.key;
+      auto &buffer = propertyListBuffers[bufferKey];
+      const auto widgetId = ImGui::GetID("##string");
+      if (ImGui::GetActiveID() != widgetId) {
+        std::snprintf(buffer.data(), buffer.size(), "%s",
+                      property.stringValue.c_str());
+      }
+      ImGui::SetNextItemWidth(nodeBodyWidth);
+      ImGui::InputTextWithHint("##string", mathExpressionPlaceholder,
+                               buffer.data(), buffer.size());
+      if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
+        ImGui::BeginTooltip();
+        ImGui::PushTextWrapPos(ImGui::GetFontSize() * 32.0f);
+        ImGui::TextUnformatted(expressionGrammarTooltip);
+        ImGui::PopTextWrapPos();
+        ImGui::EndTooltip();
+      }
+      if (ImGui::IsItemDeactivatedAfterEdit()) {
+        if (!graph.setStringProperty(node.id, property.key, buffer.data())) {
+          transientMessage = graph.lastPropertyMessage().empty()
+                                 ? (property.label + " expression is invalid")
+                                 : graph.lastPropertyMessage();
+          transientMessageDeadline = ImGui::GetTime() + 2.5;
+          if (callbacks.showMessage)
+            callbacks.showMessage(transientMessage);
+          std::snprintf(buffer.data(), buffer.size(), "%s",
+                        property.stringValue.c_str());
+        } else {
+          mutatedThisFrame = true;
+          recompileThisFrame = true;
+        }
+      }
+      ImGui::PopID();
+      if (fidelityLocked)
+        ImGui::TextDisabled("Compactness not ready");
+      if (!frozen && fidelityLocked)
+        ImGui::EndDisabled();
+      if (liveOnGold)
+        ImGui::BeginDisabled();
+      continue;
+    }
     const auto repeatCount = graph.effectiveRepeatCount(node.id);
     const auto ancestorCounts = graph.ancestorRepeatCounts(node.id);
-    const auto listEdit =
-        propertySupportsRepeatValueList(property) &&
-        (repeatCount > 1 || propertySupportsPreserveIn(property) ||
-         property.preserveInBound || property.repeatListInvalid);
+    const auto listEdit = propertySupportsRepeatValueList(property);
     if (!listEdit)
       beginPropertyRow(property.label.c_str());
     if (listEdit) {
@@ -1127,9 +1168,17 @@ void NodeRenderer::renderNode(NodeGraph &graph, GraphNode &node,
         const auto formatted = formatAuthoredPropertyRepeatList(property);
         std::snprintf(buffer.data(), buffer.size(), "%s", formatted.c_str());
       }
-      ImGui::InputText("##repeatList", buffer.data(), buffer.size());
+      ImGui::InputTextWithHint("##repeatList", parameterExpressionPlaceholder,
+                               buffer.data(), buffer.size());
       ImGui::PopStyleVar();
       ImGui::PopStyleColor();
+      if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayNormal)) {
+        ImGui::BeginTooltip();
+        ImGui::PushTextWrapPos(ImGui::GetFontSize() * 32.0f);
+        ImGui::TextUnformatted(expressionGrammarTooltip);
+        ImGui::PopTextWrapPos();
+        ImGui::EndTooltip();
+      }
       if (ImGui::IsItemDeactivatedAfterEdit()) {
         const auto parsed = parsePropertyRepeatList(
             property, ancestorCounts, buffer.data(),
@@ -1157,7 +1206,8 @@ void NodeRenderer::renderNode(NodeGraph &graph, GraphNode &node,
           }
         } else if (property.kind == PropertyKind::real) {
           if (graph.setFloatPropertyRepeatValues(node.id, property.key,
-                                               parsed.floatValues)) {
+                                               parsed.floatValues,
+                                               parsed.authoredTokens)) {
             mutatedThisFrame = true;
             recompileThisFrame = true;
             if (callbacks.floatPropertyChanged)
@@ -1165,7 +1215,8 @@ void NodeRenderer::renderNode(NodeGraph &graph, GraphNode &node,
                                              property.floatValue);
           }
         } else if (graph.setPropertyRepeatValues(node.id, property.key,
-                                               parsed.intValues)) {
+                                               parsed.intValues,
+                                               parsed.authoredTokens)) {
           mutatedThisFrame = true;
           recompileThisFrame = true;
           if (callbacks.propertyChanged)
@@ -1310,8 +1361,9 @@ void NodeRenderer::renderNode(NodeGraph &graph, GraphNode &node,
       if (property.value != previous) {
         if (!graph.setProperty(node.id, property.key, property.value)) {
           property.setValue(previous);
-          transientMessage =
-              "That mode would break downstream channel compatibility";
+          transientMessage = graph.lastPropertyMessage().empty()
+                                 ? "That mode would break downstream channel compatibility"
+                                 : graph.lastPropertyMessage();
           transientMessageDeadline = ImGui::GetTime() + 2.5;
           if (callbacks.showMessage)
             callbacks.showMessage(transientMessage);

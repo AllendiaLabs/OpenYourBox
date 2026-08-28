@@ -467,14 +467,34 @@ public:
                         float value);
 
   /**
+   * @brief Updates one validated string property such as a Math Expression formula.
+   * @param nodeId Target node identifier.
+   * @param key Canonical property key.
+   * @param value Proposed authored string.
+   * @return True when the property exists, is a string, and @p value was accepted.
+   */
+  bool setStringProperty(std::int32_t nodeId, const std::string &key,
+                         const std::string &value);
+
+  /**
+   * @brief User-facing reason for the most recent refused property commit.
+   * @return Empty when the last commit succeeded or no commit has been attempted.
+   */
+  [[nodiscard]] const std::string &lastPropertyMessage() const noexcept {
+    return lastPropertyError;
+  }
+
+  /**
    * @brief Writes an authored integer list (length in the nest dividing set).
    * @param nodeId Target node identifier.
    * @param key Canonical property key.
    * @param values Authored integers of legal length L.
+   * @param authoredTokens Original token strings (literals or `i`-expressions).
    * @return True when the property exists, is list-capable, and was updated.
    */
   bool setPropertyRepeatValues(std::int32_t nodeId, const std::string &key,
-                             const std::vector<int> &values);
+                             const std::vector<int> &values,
+                             const std::vector<std::string> &authoredTokens = {});
 
   /**
    * @brief Binds an integer dim/channels/features field to the `in` keyword.
@@ -491,10 +511,12 @@ public:
    * @param nodeId Target node identifier.
    * @param key Canonical property key.
    * @param values Authored reals of legal length L.
+   * @param authoredTokens Original token strings (literals or `i`-expressions).
    * @return True when the property exists, is list-capable, and was updated.
    */
   bool setFloatPropertyRepeatValues(std::int32_t nodeId, const std::string &key,
-                                  const std::vector<float> &values);
+                                  const std::vector<float> &values,
+                                  const std::vector<std::string> &authoredTokens = {});
 
   /**
    * @brief Stores a Knob Input conditioning scalar.
@@ -730,11 +752,13 @@ private:
   /** @brief Creates a fully initialized node without inserting it. */
   GraphNode makeNode(NodeType type, juce::Point<float> position);
   /**
-   * @brief Rebuilds Utility input ports to match the Inputs property.
-   * @param node Utility node to update.
+   * @brief Rebuilds Utility or Math Expression input ports to match Inputs.
+   * @param node Node to update.
    * @param inputCount Requested input port count (minimum 1).
+   * @param mathLabels True to label pins `x1`…`xN` instead of `in 1`….
    */
-  void setMixerInputCount(GraphNode &node, int inputCount);
+  void setMixerInputCount(GraphNode &node, int inputCount,
+                          bool mathLabels = false);
   /**
    * @brief Resizes paired lanes on a Group Input/Output hub.
    * @param node Boundary hub to update.
@@ -778,5 +802,7 @@ private:
   std::int32_t nextPinId = 1001;
   /** @brief Next unused link identifier. */
   std::int32_t nextLinkId = 2001;
+  /** @brief Reason for the most recent refused property commit. */
+  std::string lastPropertyError;
 };
 } // namespace openyourbox::graph

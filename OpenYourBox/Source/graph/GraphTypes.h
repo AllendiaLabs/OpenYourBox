@@ -2,6 +2,8 @@
 
 #include <JuceHeader.h>
 
+#include "ExpressionParser.h"
+
 #include <algorithm>
 #include <charconv>
 #include <cmath>
@@ -34,6 +36,13 @@ enum class NodeType {
   noiseSynthesizer,
   convTranspose,
   batchNorm,
+  /**
+   * @brief Elementwise arithmetic over Utility-style inputs `x1`…`xN`.
+   *
+   * Persisted as `math_expression`. Pins and the Inputs count follow Utility
+   * rebuild rules; the authored `expression` string is the source of truth.
+   */
+  mathExpression,
   /** Editor-only source hub declaring a group's external input lanes. */
   groupInput,
   /** Editor-only sink hub declaring a group's external output lanes. */
@@ -195,7 +204,7 @@ inline bool isShapePassthroughType(NodeType type) noexcept {
   return type == NodeType::linear || type == NodeType::convolution ||
          type == NodeType::activation || type == NodeType::tcn ||
          type == NodeType::merge || type == NodeType::noiseSynthesizer ||
-         type == NodeType::batchNorm;
+         type == NodeType::batchNorm || type == NodeType::mathExpression;
 }
 
 /**
@@ -348,6 +357,14 @@ inline float clampConditioning(float value) noexcept {
 /** @brief Returns true for Utility nodes (one or more combine/passthrough inputs). */
 inline bool isMixerType(NodeType type) noexcept {
   return type == NodeType::merge;
+}
+
+/**
+ * @brief Returns true for the Mathematical Expression processing element.
+ * @param type Graph node type.
+ */
+inline bool isMathExpressionType(NodeType type) noexcept {
+  return type == NodeType::mathExpression;
 }
 
 /** @brief Runtime mode represented by a graph node. */
@@ -950,7 +967,7 @@ inline bool isLatentPin(const Pin &pin) noexcept {
 }
 
 /** @brief Value type accepted by an inline graph property. */
-enum class PropertyKind { integer, choice, readOnly, real };
+enum class PropertyKind { integer, choice, readOnly, real, string };
 
 /** @brief Ordered, validated inline property belonging to a graph node. */
 struct NodeProperty {
@@ -1004,6 +1021,21 @@ struct NodeProperty {
    * source of truth.
    */
   bool preserveInBound = false;
+  /**
+   * @brief Authored string used by `PropertyKind::string` (e.g. Math Expression).
+   *
+   * This is the source of truth for formula text. Invalid strings are never
+   * stored; callers refuse the commit and keep the previous value.
+   */
+  std::string stringValue;
+  /**
+   * @brief Authored list tokens for copy-expanded numeric fields.
+   *
+   * Each entry is a literal or an `i`-expression. Empty means the numeric
+   * `repeatIntValues` / `repeatFloatValues` vectors are the authored form
+   * (legacy documents). Length matches the authored list L.
+   */
+  std::vector<std::string> authoredTokens;
 
   /** @brief Clamps and stores a proposed integer value. */
   void setValue(int proposed) noexcept {
@@ -1049,6 +1081,13 @@ struct PropertyRepeatListParse {
   std::vector<float> floatValues;
   /** @brief True when every token is the reserved `in` keyword. */
   bool preserveIn = false;
+  /**
+   * @brief Authored token strings (literals or `i`-expressions), length L.
+   *
+   * Empty when the parse used only legacy numeric tokens with no expression
+   * text to persist. Callers copy this onto `NodeProperty::authoredTokens`.
+   */
+  std::vector<std::string> authoredTokens;
 };
 
 /** @brief Live performance values displayed by a frozen BlackBox node. */
@@ -1493,7 +1532,8 @@ inline bool propertySupportsRepeatValueList(const NodeProperty &property) noexce
       property.kind != PropertyKind::real)
     return false;
   return property.key != "residual" && property.key != "weight_norm" &&
-         property.key != "inputs" && property.key != "ports";
+         property.key != "inputs" && property.key != "ports" &&
+         property.key != "expression";
 }
 
 /**
@@ -1578,6 +1618,8 @@ formatAllowedRepeatListLengths(const std::string &label,
  * @param property Source property.
  */
 inline int authoredRepeatListLength(const NodeProperty &property) noexcept {
+  if (!property.authoredTokens.empty())
+    return std::max(1, static_cast<int>(property.authoredTokens.size()));
   if (property.kind == PropertyKind::real)
     return std::max(1, static_cast<int>(property.repeatFloatValues.size()));
   return std::max(1, static_cast<int>(property.repeatIntValues.size()));
@@ -1689,7 +1731,16 @@ inline void pruneStickySpineId(std::vector<std::int32_t> &stickySpine,
  * @param property Source property.
  * @param slot Repeat index (0 is the visible element).
  */
-inline int integerValueForRepeat(const NodeProperty &property, int slot) noexcept {
+inline int integerValueForRepeat(const NodeProperty &property, int slot) {
+  if (!property.authoredTokens.empty() && !property.preserveInBound) {
+    const auto length = static_cast<int>(property.authoredTokens.size());
+    const auto tokenIndex = ((slot % length) + length) % length;
+    const auto evaluated = evaluateParameterToken(
+        property.authoredTokens[static_cast<std::size_t>(tokenIndex)],
+        static_cast<double>(slot));
+    if (evaluated.ok)
+      return static_cast<int>(std::nearbyint(evaluated.value));
+  }
   if (property.repeatIntValues.empty())
     return property.value;
   const auto length = static_cast<int>(property.repeatIntValues.size());
@@ -1702,7 +1753,16 @@ inline int integerValueForRepeat(const NodeProperty &property, int slot) noexcep
  * @param property Source property.
  * @param slot Repeat index (0 is the visible element).
  */
-inline float floatValueForRepeat(const NodeProperty &property, int slot) noexcept {
+inline float floatValueForRepeat(const NodeProperty &property, int slot) {
+  if (!property.authoredTokens.empty()) {
+    const auto length = static_cast<int>(property.authoredTokens.size());
+    const auto tokenIndex = ((slot % length) + length) % length;
+    const auto evaluated = evaluateParameterToken(
+        property.authoredTokens[static_cast<std::size_t>(tokenIndex)],
+        static_cast<double>(slot));
+    if (evaluated.ok)
+      return static_cast<float>(evaluated.value);
+  }
   if (property.repeatFloatValues.empty())
     return property.floatValue;
   const auto length = static_cast<int>(property.repeatFloatValues.size());
@@ -1764,6 +1824,15 @@ inline void applyRepeatPropertyValues(GraphNode &node, int slot) {
  * @param property Source property.
  */
 inline std::string formatAuthoredPropertyRepeatList(const NodeProperty &property) {
+  if (!property.authoredTokens.empty() && !property.preserveInBound) {
+    std::string text;
+    for (std::size_t index = 0; index < property.authoredTokens.size(); ++index) {
+      if (index > 0)
+        text += ", ";
+      text += property.authoredTokens[index];
+    }
+    return text;
+  }
   const auto count = authoredRepeatListLength(property);
   std::string text;
   for (int index = 0; index < count; ++index) {
@@ -1901,53 +1970,53 @@ parsePropertyRepeatList(const NodeProperty &property,
   }
 
   const auto parseToken = [&](const std::string &token, float &real,
-                              int &integer) {
+                              int &integer, int slotIndex,
+                              std::string &tokenMessage) {
+    const auto evaluated =
+        evaluateParameterToken(token, static_cast<double>(slotIndex));
+    if (!evaluated.ok) {
+      tokenMessage = evaluated.message;
+      return false;
+    }
     if (property.kind == PropertyKind::real) {
-      if (token.empty())
-        return false;
-      std::size_t index = 0;
-      const auto negative = token[index] == '-';
-      if (negative || token[index] == '+')
-        ++index;
-      if (index >= token.size())
-        return false;
-      double value = 0.0;
-      auto anyDigit = false;
-      while (index < token.size() && token[index] >= '0' &&
-             token[index] <= '9') {
-        anyDigit = true;
-        value = value * 10.0 + static_cast<double>(token[index] - '0');
-        ++index;
-      }
-      if (index < token.size() && token[index] == '.') {
-        ++index;
-        double place = 0.1;
-        while (index < token.size() && token[index] >= '0' &&
-               token[index] <= '9') {
-          anyDigit = true;
-          value += static_cast<double>(token[index] - '0') * place;
-          place *= 0.1;
-          ++index;
-        }
-      }
-      if (!anyDigit || index != token.size())
-        return false;
-      real = static_cast<float>(negative ? -value : value);
+      real = static_cast<float>(evaluated.value);
       return std::isfinite(real);
     }
-    const auto *begin = token.data();
-    const auto *end = begin + token.size();
-    const auto parsed = std::from_chars(begin, end, integer);
-    return parsed.ec == std::errc{} && parsed.ptr == end;
+    if (!expressionValueIsInteger(evaluated.value)) {
+      tokenMessage = property.label +
+                     " requires an integer result for every copy "
+                     "(expressions are not rounded)";
+      return false;
+    }
+    const auto rounded =
+        static_cast<long long>(std::nearbyint(evaluated.value));
+    if (rounded < static_cast<long long>(std::numeric_limits<int>::min()) ||
+        rounded > static_cast<long long>(std::numeric_limits<int>::max())) {
+      tokenMessage = property.label + " result is out of integer range";
+      return false;
+    }
+    integer = static_cast<int>(rounded);
+    return true;
   };
 
+  const auto expandedCount =
+      std::max(1, repeatCountProduct(ancestorRepeatCounts));
   std::vector<float> reals;
   std::vector<int> integers;
-  for (const auto &token : tokens) {
+  reals.reserve(tokens.size());
+  integers.reserve(tokens.size());
+  for (int slot = 0; slot < expandedCount; ++slot) {
+    const auto &token =
+        tokens[static_cast<std::size_t>(slot) % tokens.size()];
     float real = 0.0f;
     int integer = 0;
-    if (!parseToken(token, real, integer)) {
-      result.message = property.label + " values must be numbers";
+    std::string tokenMessage;
+    if (!parseToken(token, real, integer, slot, tokenMessage)) {
+      result.message =
+          tokenMessage.empty()
+              ? property.label +
+                    " values must be numbers or expressions of i"
+              : tokenMessage;
       return result;
     }
     if (property.kind == PropertyKind::real) {
@@ -1957,20 +2026,28 @@ parsePropertyRepeatList(const NodeProperty &property,
                          std::to_string(property.floatMaximum);
         return result;
       }
-      reals.push_back(real);
-    } else {
-      if (integer < property.minimum || integer > property.maximum) {
-        result.message = property.label + " must be between " +
-                         std::to_string(property.minimum) + " and " +
-                         std::to_string(property.maximum);
-        return result;
-      }
-      integers.push_back(integer);
+    } else if (integer < property.minimum || integer > property.maximum) {
+      result.message = property.label + " must be between " +
+                       std::to_string(property.minimum) + " and " +
+                       std::to_string(property.maximum);
+      return result;
     }
+  }
+  for (std::size_t index = 0; index < tokens.size(); ++index) {
+    float real = 0.0f;
+    int integer = 0;
+    std::string tokenMessage;
+    parseToken(tokens[index], real, integer, static_cast<int>(index),
+               tokenMessage);
+    if (property.kind == PropertyKind::real)
+      reals.push_back(real);
+    else
+      integers.push_back(integer);
   }
   result.accepted = true;
   result.floatValues = std::move(reals);
   result.intValues = std::move(integers);
+  result.authoredTokens = tokens;
   return result;
 }
 

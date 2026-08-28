@@ -35,6 +35,21 @@ std::string utilityInputsIncompatibilityMessage(
     const openyourbox::graph::GraphNode &merge);
 
 /**
+ * @brief Returns the 0-based input pin index of @p pinId on @p node.
+ * @param node Element owning the pin.
+ * @param pinId Destination pin identifier.
+ * @return Matching index, or 0 when @p pinId is not an input of @p node.
+ */
+int inputPinIndexForId(const openyourbox::graph::GraphNode &node,
+                       std::int32_t pinId) {
+  for (int index = 0; index < static_cast<int>(node.inputs.size()); ++index) {
+    if (node.inputs[static_cast<std::size_t>(index)].id == pinId)
+      return index;
+  }
+  return 0;
+}
+
+/**
  * @brief Collects every node and nested group owned by @p groupId.
  * @param graph Graph owning membership.
  * @param groupId Ancestor group.
@@ -602,6 +617,33 @@ int mergeModeFor(const openyourbox::graph::GraphNode &node) {
 }
 
 /**
+ * @brief Returns the authored Math Expression formula, or `x1` when missing.
+ * @param node Math Expression node.
+ */
+std::string mathExpressionText(const openyourbox::graph::GraphNode &node) {
+  for (const auto &property : node.properties) {
+    if (property.key == "expression")
+      return property.stringValue.empty() ? "x1" : property.stringValue;
+  }
+  return "x1";
+}
+
+/**
+ * @brief Parses the current Math Expression formula for @p node.
+ * @param node Math Expression node whose Inputs count bounds `xK`.
+ */
+openyourbox::graph::ExpressionAst
+parsedMathExpression(const openyourbox::graph::GraphNode &node) {
+  using openyourbox::graph::ExpressionIdentContext;
+  using openyourbox::graph::parseExpression;
+  const auto n = std::max(1, static_cast<int>(node.inputs.size()));
+  const auto parsed =
+      parseExpression(mathExpressionText(node), ExpressionIdentContext::mathInputs,
+                      n);
+  return parsed.accepted ? parsed.ast : openyourbox::graph::ExpressionAst{};
+}
+
+/**
  * @brief Returns whether two Utility input widths can share add/multiply.
  * @param left First width, or zero when unknown.
  * @param right Second width, or zero when unknown.
@@ -630,6 +672,17 @@ int computeMergeOutputChannels(const openyourbox::graph::NodeGraph &graph,
   std::vector<int> connectedChannels;
   connectedChannels.reserve(node.inputs.size());
   for (const auto &inputPin : node.inputs) {
+    if (openyourbox::graph::isMathExpressionType(node.type)) {
+      int pinIndex = 0;
+      for (const auto &candidate : node.inputs) {
+        if (candidate.id == inputPin.id)
+          break;
+        ++pinIndex;
+      }
+      if (!openyourbox::graph::mathExpressionReferencesInput(
+              parsedMathExpression(node), pinIndex + 1))
+        continue;
+    }
     for (const auto &link : graph.getLinks()) {
       if (link.destinationPinId != inputPin.id)
         continue;
@@ -726,6 +779,7 @@ int resolvePinChannels(const openyourbox::graph::NodeGraph &graph,
     return readBoundShapeProperty(*node, "channels", incoming, 0);
   }
   case NodeType::merge:
+  case NodeType::mathExpression:
     visiting.erase(pinId);
     return computeMergeOutputChannels(graph, *node, visiting);
   case NodeType::activation:
@@ -888,10 +942,22 @@ openyourbox::graph::ShapeSignature resolvedUtilitySourceShape(
  */
 std::vector<openyourbox::graph::ShapeSignature> connectedUtilitySourceShapes(
     const openyourbox::graph::NodeGraph &graph,
-    const openyourbox::graph::GraphNode &merge) {
+    const openyourbox::graph::GraphNode &merge,
+    bool referencedOnly) {
   std::vector<openyourbox::graph::ShapeSignature> sources;
   sources.reserve(merge.inputs.size());
+  const auto ast = referencedOnly &&
+                           openyourbox::graph::isMathExpressionType(merge.type)
+                       ? parsedMathExpression(merge)
+                       : openyourbox::graph::ExpressionAst{};
+  int pinIndex = 0;
   for (const auto &inputPin : merge.inputs) {
+    const auto include =
+        !referencedOnly || ast.instructions.empty() ||
+        openyourbox::graph::mathExpressionReferencesInput(ast, pinIndex + 1);
+    ++pinIndex;
+    if (!include)
+      continue;
     if (const auto *source = findConnectedSourcePin(graph, inputPin.id))
       sources.push_back(resolvedUtilitySourceShape(graph, source->id));
   }
@@ -924,7 +990,8 @@ std::string utilitySourcePairIncompatibilityMessage(
         left.displayLabel().empty() ? "unspecified" : left.displayLabel();
     const auto rightLabel =
         right.displayLabel().empty() ? "unspecified" : right.displayLabel();
-    return "Utility inputs cannot combine (" + leftLabel + " vs " + rightLabel +
+    return "Utility inputs cannot combine (" + leftLabel + " vs " +
+           rightLabel +
            "); channels must match or either side may be 1";
   }
   return {};
@@ -966,12 +1033,16 @@ std::string utilityInputsIncompatibilityMessage(
     const openyourbox::graph::GraphNode &merge) {
   using openyourbox::graph::MergeMode;
   using openyourbox::graph::NodeType;
-  if (merge.type != NodeType::merge)
+  if (merge.type != NodeType::merge &&
+      !openyourbox::graph::isMathExpressionType(merge.type))
     return {};
   const auto concatenate =
+      merge.type == NodeType::merge &&
       mergeModeFor(merge) == static_cast<int>(MergeMode::concatenate);
+  const auto referencedOnly =
+      openyourbox::graph::isMathExpressionType(merge.type);
   return utilityFoldedSourcesIncompatibilityMessage(
-      connectedUtilitySourceShapes(graph, merge), concatenate);
+      connectedUtilitySourceShapes(graph, merge, referencedOnly), concatenate);
 }
 
 /**
@@ -986,8 +1057,11 @@ std::string utilityNewInputIncompatibilityMessage(
     const openyourbox::graph::GraphNode &merge, std::int32_t newSourcePinId) {
   using openyourbox::graph::MergeMode;
   const auto concatenate =
+      merge.type == openyourbox::graph::NodeType::merge &&
       mergeModeFor(merge) == static_cast<int>(MergeMode::concatenate);
-  auto sources = connectedUtilitySourceShapes(graph, merge);
+  const auto referencedOnly =
+      openyourbox::graph::isMathExpressionType(merge.type);
+  auto sources = connectedUtilitySourceShapes(graph, merge, referencedOnly);
   sources.push_back(resolvedUtilitySourceShape(graph, newSourcePinId));
   return utilityFoldedSourcesIncompatibilityMessage(sources, concatenate);
 }
@@ -1764,7 +1838,8 @@ void applyNodePinShapes(openyourbox::graph::NodeGraph &graph,
         outgoing.channels = features;
       else if (propertyRepeatListIsInvalid(node, "features"))
         outgoing.channels = 0;
-    } else if (node.type == NodeType::merge) {
+    } else if (node.type == NodeType::merge ||
+               openyourbox::graph::isMathExpressionType(node.type)) {
       updateMergeOutputShape(graph, node);
       outgoing.channels =
           node.outputs.empty() ? 0 : node.outputs.front().shape.channels;
@@ -1796,7 +1871,7 @@ std::string firstIncompatibleLinkMessage(const openyourbox::graph::NodeGraph &gr
       if (property.repeatListInvalid && !property.repeatListInvalidMessage.empty())
         return property.repeatListInvalidMessage;
     }
-    if (node.type == NodeType::merge) {
+    if (openyourbox::graph::isMathExpressionType(node.type)) {
       if (const auto message = utilityInputsIncompatibilityMessage(graph, node);
           !message.empty())
         return message;
@@ -1898,6 +1973,8 @@ const char *nodeTypeName(openyourbox::graph::NodeType type) noexcept {
     return "conv_transpose1d";
   case NodeType::batchNorm:
     return "batch_norm";
+  case NodeType::mathExpression:
+    return "math_expression";
   case NodeType::groupInput:
     return "group_input";
   case NodeType::groupOutput:
@@ -1939,6 +2016,8 @@ openyourbox::graph::NodeType nodeTypeFromName(const juce::String &name) {
     return NodeType::variationalBottleneck;
   if (name == "noise_synthesizer")
     return NodeType::noiseSynthesizer;
+  if (name == "math_expression")
+    return NodeType::mathExpression;
   if (name == "group_input")
     return NodeType::groupInput;
   if (name == "group_output")
@@ -1951,7 +2030,7 @@ openyourbox::graph::NodeType nodeTypeFromName(const juce::String &name) {
  * @param name ValueTree `type` token.
  */
 bool isKnownPersistedNodeType(const juce::String &name) {
-  static const std::array<const char *, 23> known{
+  static const std::array<const char *, 24> known{
       "audio_input",
       "audio_output",
       "linear",
@@ -1972,6 +2051,7 @@ bool isKnownPersistedNodeType(const juce::String &name) {
       "batch_norm",
       "variational_bottleneck",
       "noise_synthesizer",
+      "math_expression",
       "group_input",
       "group_output",
       "tcn"};
@@ -2102,6 +2182,15 @@ juce::ValueTree nodeToTree(const openyourbox::graph::GraphNode &node) {
     child.setProperty("floatValue", property.floatValue, nullptr);
     child.setProperty("floatMinimum", property.floatMinimum, nullptr);
     child.setProperty("floatMaximum", property.floatMaximum, nullptr);
+    if (!property.stringValue.empty())
+      child.setProperty("stringValue", juce::String(property.stringValue),
+                        nullptr);
+    if (!property.authoredTokens.empty()) {
+      juce::StringArray tokens;
+      for (const auto &token : property.authoredTokens)
+        tokens.add(token);
+      child.setProperty("authoredTokens", tokens.joinIntoString("\n"), nullptr);
+    }
     child.setProperty("preserveIn", property.preserveInBound, nullptr);
     child.setProperty("repeatListInvalid", property.repeatListInvalid, nullptr);
     if (!property.repeatListInvalidMessage.empty())
@@ -2237,6 +2326,14 @@ openyourbox::graph::GraphNode nodeFromTree(const juce::ValueTree &tree) {
           static_cast<float>(child.getProperty("floatMinimum", 0.0));
       property.floatMaximum =
           static_cast<float>(child.getProperty("floatMaximum", 1.0));
+      property.stringValue =
+          child.getProperty("stringValue", "").toString().toStdString();
+      if (child.hasProperty("authoredTokens")) {
+        const auto tokens = juce::StringArray::fromTokens(
+            child["authoredTokens"].toString(), "\n", "");
+        for (const auto &token : tokens)
+          property.authoredTokens.push_back(token.toStdString());
+      }
       property.preserveInBound = static_cast<bool>(child.getProperty("preserveIn", false));
       property.repeatListInvalid =
           static_cast<bool>(propertyOrLegacy(child, "repeatListInvalid",
@@ -4528,7 +4625,8 @@ ConnectionResult NodeGraph::connect(std::int32_t firstPinId,
   const auto *sourceNodePtr = findNode(*sourceNode);
 
   if (destinationNodePtr != nullptr &&
-      destinationNodePtr->type == NodeType::merge &&
+      (destinationNodePtr->type == NodeType::merge ||
+       isMathExpressionType(destinationNodePtr->type)) &&
       destination->kind == PinKind::input) {
     if (const auto message = utilityNewInputIncompatibilityMessage(
             *this, *destinationNodePtr, source->id);
@@ -4536,7 +4634,9 @@ ConnectionResult NodeGraph::connect(std::int32_t firstPinId,
       return {false, message};
   }
 
-  if (sourceNodePtr != nullptr && sourceNodePtr->type == NodeType::merge)
+  if (sourceNodePtr != nullptr &&
+      (sourceNodePtr->type == NodeType::merge ||
+       isMathExpressionType(sourceNodePtr->type)))
     updateMergeOutputShape(*this, *const_cast<GraphNode *>(sourceNodePtr));
 
   const auto sourceShape = outgoingShapeOf(*this, *source);
@@ -4658,6 +4758,7 @@ bool NodeGraph::setProperty(std::int32_t nodeId, const std::string &key,
     property->repeatListInvalid = false;
     property->repeatListInvalidMessage.clear();
     property->repeatIntValues = {property->value};
+    property->authoredTokens.clear();
   };
   const auto restoreRepeatValues = [&]() {
     property->repeatIntValues = previousRepeatValues;
@@ -4713,6 +4814,26 @@ bool NodeGraph::setProperty(std::int32_t nodeId, const std::string &key,
       pin.shape.channels = property->value;
   } else if (key == "inputs" && isMixerType(node->type)) {
     setMixerInputCount(*node, property->value);
+  } else if (key == "inputs" && isMathExpressionType(node->type)) {
+    const auto parsed = parseExpression(mathExpressionText(*node),
+                                        ExpressionIdentContext::mathInputs,
+                                        property->value);
+    if (!parsed.accepted) {
+      property->setValue(previousValue);
+      restoreRepeatValues();
+      lastPropertyError = parsed.message;
+      return false;
+    }
+    const auto maxRef = maxReferencedMathInput(parsed.ast);
+    if (maxRef > property->value) {
+      property->setValue(previousValue);
+      restoreRepeatValues();
+      lastPropertyError =
+          "Reduce Inputs only after the expression no longer references x" +
+          std::to_string(maxRef);
+      return false;
+    }
+    setMixerInputCount(*node, property->value, true);
   } else if (key == "mode" && node->type == NodeType::merge) {
     updateMergeOutputShape(*this, *node);
     if (!mergeDownstreamIsCompatible(*this, *node)) {
@@ -4770,6 +4891,7 @@ bool NodeGraph::setProperty(std::int32_t nodeId, const std::string &key,
     return false;
   }
   syncRepeatValues();
+  lastPropertyError.clear();
   return true;
 }
 
@@ -4799,13 +4921,45 @@ bool NodeGraph::setFloatProperty(std::int32_t nodeId, const std::string &key,
     property->repeatListInvalid = false;
     property->repeatListInvalidMessage.clear();
     property->repeatFloatValues = {property->floatValue};
+    property->authoredTokens.clear();
   }
+  lastPropertyError.clear();
+  return true;
+}
+
+bool NodeGraph::setStringProperty(std::int32_t nodeId, const std::string &key,
+                                  const std::string &value) {
+  auto *node = findNode(nodeId);
+  if (node == nullptr || node->state == NodeState::frozenGold)
+    return false;
+  const auto property = std::find_if(
+      node->properties.begin(), node->properties.end(),
+      [&key](const NodeProperty &candidate) { return candidate.key == key; });
+  if (property == node->properties.end() ||
+      property->kind != PropertyKind::string)
+    return false;
+  lastPropertyError.clear();
+  if (key == "expression" && isMathExpressionType(node->type)) {
+    const auto inputCount = std::max(1, static_cast<int>(node->inputs.size()));
+    const auto parsed = parseExpression(
+        value, ExpressionIdentContext::mathInputs, inputCount);
+    if (!parsed.accepted) {
+      lastPropertyError = parsed.message;
+      return false;
+    }
+    property->stringValue = value;
+    node->detail = value;
+    refreshPropagatedPinShapes(*this);
+    return true;
+  }
+  property->stringValue = value;
   return true;
 }
 
 bool NodeGraph::setPropertyRepeatValues(std::int32_t nodeId,
                                       const std::string &key,
-                                      const std::vector<int> &values) {
+                                      const std::vector<int> &values,
+                                      const std::vector<std::string> &authoredTokens) {
   auto *node = findNode(nodeId);
   if (node == nullptr || node->state == NodeState::frozenGold)
     return false;
@@ -4833,6 +4987,8 @@ bool NodeGraph::setPropertyRepeatValues(std::int32_t nodeId,
   property->repeatListInvalidMessage.clear();
   property->repeatIntValues = std::move(clamped);
   property->value = property->repeatIntValues.front();
+  property->authoredTokens = authoredTokens;
+  lastPropertyError.clear();
   refreshPropagatedPinShapes(*this);
   return true;
 }
@@ -4875,7 +5031,8 @@ bool NodeGraph::setPropertyPreserveIn(std::int32_t nodeId, const std::string &ke
 
 bool NodeGraph::setFloatPropertyRepeatValues(std::int32_t nodeId,
                                            const std::string &key,
-                                           const std::vector<float> &values) {
+                                           const std::vector<float> &values,
+                                           const std::vector<std::string> &authoredTokens) {
   auto *node = findNode(nodeId);
   if (node == nullptr)
     return false;
@@ -4907,6 +5064,8 @@ bool NodeGraph::setFloatPropertyRepeatValues(std::int32_t nodeId,
   property->repeatListInvalidMessage.clear();
   property->repeatFloatValues = std::move(clamped);
   property->floatValue = property->repeatFloatValues.front();
+  property->authoredTokens = authoredTokens;
+  lastPropertyError.clear();
   if (key == "fidelity")
     node->fidelityPercent = clampFidelity(property->floatValue);
   refreshPropagatedPinShapes(*this);
@@ -5148,6 +5307,9 @@ std::optional<FreezeSelectionRequest> NodeGraph::createFreezeRequest(
       serialized->setProperty("value", property.value);
       if (property.kind == PropertyKind::real)
         serialized->setProperty("float_value", property.floatValue);
+      else if (property.kind == PropertyKind::string)
+        serialized->setProperty("string_value",
+                                juce::String(property.stringValue));
       properties.add(juce::var(serialized.release()));
     }
     element->setProperty("properties", properties);
@@ -5176,6 +5338,10 @@ std::optional<FreezeSelectionRequest> NodeGraph::createFreezeRequest(
     serialized->setProperty("source_pin_id", link.sourcePinId);
     serialized->setProperty("destination_element_id", *destination);
     serialized->setProperty("destination_pin_id", link.destinationPinId);
+    if (const auto *destinationNode = findNode(*destination))
+      serialized->setProperty(
+          "destination_pin_index",
+          inputPinIndexForId(*destinationNode, link.destinationPinId));
     if (sourceSelected && destinationSelected)
       connections.add(juce::var(serialized.release()));
     else if (destinationSelected)
@@ -5763,6 +5929,8 @@ std::string NodeGraph::toJson() const {
       value->setProperty("value", property.value);
       if (property.kind == PropertyKind::real)
         value->setProperty("float_value", property.floatValue);
+      else if (property.kind == PropertyKind::string)
+        value->setProperty("string_value", juce::String(property.stringValue));
       properties.add(juce::var(value.release()));
     }
     object->setProperty("properties", properties);
@@ -6092,11 +6260,30 @@ GraphNode NodeGraph::makeNode(NodeType type, juce::Point<float> position) {
         property("noise_bands", "Noise bands", defaultNoiseBands,
                  minimumPositiveProperty, unlimitedPropertyMaximum));
     break;
+  case NodeType::mathExpression:
+    node.label = "Math Expression";
+    node.detail = "x1";
+    addOutput();
+    node.outputs.front().shape = flexibleTensorShape();
+    node.properties.push_back(property("inputs", "Inputs", 1,
+                                       minimumPositiveProperty,
+                                       unlimitedPropertyMaximum));
+    {
+      NodeProperty expression;
+      expression.key = "expression";
+      expression.label = "Expression";
+      expression.kind = PropertyKind::string;
+      expression.stringValue = "x1";
+      node.properties.push_back(std::move(expression));
+    }
+    setMixerInputCount(node, 1, true);
+    break;
   }
   return node;
 }
 
-void NodeGraph::setMixerInputCount(GraphNode &node, int inputCount) {
+void NodeGraph::setMixerInputCount(GraphNode &node, int inputCount,
+                                   bool mathLabels) {
   const auto count = std::max(inputCount, 1);
   while (static_cast<int>(node.inputs.size()) > count) {
     const auto pinId = node.inputs.back().id;
@@ -6110,12 +6297,15 @@ void NodeGraph::setMixerInputCount(GraphNode &node, int inputCount) {
   }
   while (static_cast<int>(node.inputs.size()) < count) {
     const auto index = static_cast<int>(node.inputs.size()) + 1;
-    node.inputs.push_back({nextPinId++, "in " + std::to_string(index),
-                           PinKind::input, flexibleTensorShape()});
+    const auto label = mathLabels ? "x" + std::to_string(index)
+                                  : "in " + std::to_string(index);
+    node.inputs.push_back(
+        {nextPinId++, label, PinKind::input, flexibleTensorShape()});
   }
   for (int index = 0; index < static_cast<int>(node.inputs.size()); ++index)
     node.inputs[static_cast<std::size_t>(index)].label =
-        "in " + std::to_string(index + 1);
+        mathLabels ? "x" + std::to_string(index + 1)
+                   : "in " + std::to_string(index + 1);
 }
 
 bool NodeGraph::setGroupBoundaryPortCount(GraphNode &node, int portCount) {
@@ -6481,6 +6671,9 @@ std::optional<TrainJobRequest> NodeGraph::createTrainRequest() const {
       serialized->setProperty("value", property.value);
       if (property.kind == PropertyKind::real)
         serialized->setProperty("float_value", property.floatValue);
+      else if (property.kind == PropertyKind::string)
+        serialized->setProperty("string_value",
+                                juce::String(property.stringValue));
       properties.add(juce::var(serialized.release()));
     }
     element->setProperty("properties", properties);
@@ -6505,6 +6698,10 @@ std::optional<TrainJobRequest> NodeGraph::createTrainRequest() const {
       auto connection = std::make_unique<juce::DynamicObject>();
       connection->setProperty("source_element_id", *sourceNode);
       connection->setProperty("destination_element_id", *destinationNode);
+      if (const auto *dest = findNode(*destinationNode))
+        connection->setProperty(
+            "destination_pin_index",
+            inputPinIndexForId(*dest, link.destinationPinId));
       connections.add(juce::var(connection.release()));
     } else if (!sourceArmed && destinationArmed)
       audioInputs.add(*destinationNode);

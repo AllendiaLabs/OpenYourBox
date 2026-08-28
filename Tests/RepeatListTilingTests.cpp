@@ -32,6 +32,7 @@ int main() {
   using openyourbox::graph::NodeType;
   using openyourbox::graph::PropertyKind;
   using openyourbox::graph::dividingSetLengths;
+  using openyourbox::graph::formatAuthoredPropertyRepeatList;
   using openyourbox::graph::formatExpandedPropertyRepeatList;
   using openyourbox::graph::formatHierarchicalRepeatList;
   using openyourbox::graph::formatCollapsedGroupPinShapes;
@@ -192,6 +193,58 @@ int main() {
   const auto gainIn = parsePropertyRepeatList(gain, nest, "in", true);
   passed &= expect(!gainIn.accepted, "in is refused on non-bindable fields");
 
+  const auto exprEight = parsePropertyRepeatList(channels, nest, "2*i+1", false);
+  passed &= expect(exprEight.accepted && exprEight.authoredTokens.size() == 1,
+                   "single i-expression is a legal dividing-set length");
+  channels.authoredTokens = exprEight.authoredTokens;
+  channels.repeatIntValues = exprEight.intValues;
+  passed &= expect(integerValueForRepeat(channels, 0) == 1 &&
+                       integerValueForRepeat(channels, 3) == 7 &&
+                       integerValueForRepeat(channels, 7) == 15,
+                   "2*i+1 fills P=8 from expanded slot i");
+  passed &= expect(formatAuthoredPropertyRepeatList(channels) == "2*i+1",
+                   "authored field keeps the expression text");
+  passed &= expect(formatExpandedPropertyRepeatList(channels, 8, nest) ==
+                       "[[[1, 3], [5, 7]], [[9, 11], [13, 15]]]",
+                   "expanded preview shows resolved integers");
+
+  NodeProperty ungroupedProp = channels;
+  const auto ungrouped = parsePropertyRepeatList(channels, {}, "i+3", false);
+  passed &= expect(ungrouped.accepted, "ungrouped i+3 is a legal length-1 list");
+  ungroupedProp.authoredTokens = ungrouped.authoredTokens;
+  ungroupedProp.repeatIntValues = ungrouped.intValues;
+  passed &= expect(integerValueForRepeat(ungroupedProp, 0) == 3,
+                   "ungrouped i is 0 so i+3 is 3");
+
+  const auto nonInteger =
+      parsePropertyRepeatList(channels, nest, "(i+1)^0.5", false);
+  passed &= expect(!nonInteger.accepted,
+                   "integer fields refuse non-integer (i+1)^0.5");
+  passed &= expect(nonInteger.message.find("integer") != std::string::npos,
+                   "integer refuse message mentions integer");
+
+  const auto constantPow = parsePropertyRepeatList(channels, nest, "2^3", false);
+  passed &= expect(constantPow.accepted, "constant 2^3 commits");
+  channels.authoredTokens = constantPow.authoredTokens;
+  channels.repeatIntValues = constantPow.intValues;
+  passed &= expect(integerValueForRepeat(channels, 0) == 8 &&
+                       integerValueForRepeat(channels, 7) == 8,
+                   "2^3 is 8 in every slot");
+
+  const auto mixedExpr =
+      parsePropertyRepeatList(channels, nest, "2*i+1, 4", false);
+  passed &= expect(mixedExpr.accepted && mixedExpr.authoredTokens.size() == 2,
+                   "mixed literal/expression list of length 2 is legal");
+  channels.authoredTokens = mixedExpr.authoredTokens;
+  channels.repeatIntValues = mixedExpr.intValues;
+  passed &= expect(integerValueForRepeat(channels, 0) == 1 &&
+                       integerValueForRepeat(channels, 1) == 4 &&
+                       integerValueForRepeat(channels, 2) == 5 &&
+                       integerValueForRepeat(channels, 3) == 4,
+                   "tiled 2*i+1 uses expanded slot i, not the short-list index");
+  passed &= expect(formatAuthoredPropertyRepeatList(channels) == "2*i+1, 4",
+                   "authored mixed list keeps both tokens");
+
   NodeGraph graph;
   const auto linear = graph.addNode(NodeType::linear, {0.0f, 0.0f});
   const auto partner = graph.addNode(NodeType::activation, {80.0f, 0.0f});
@@ -263,6 +316,35 @@ int main() {
   passed &= expect(features != nullptr && features->repeatListInvalid &&
                        features->repeatIntValues.size() == 4,
                    "L=4 is flagged invalid when N becomes 3");
+
+  passed &= expect(
+      graph.setPropertyRepeatValues(linear, "features", {1}, {"2*i+1"}),
+      "i-expression of length 1 is always a legal dividing-set length");
+  node = graph.findNode(linear);
+  features = nullptr;
+  if (node != nullptr) {
+    for (const auto &property : node->properties) {
+      if (property.key == "features")
+        features = &property;
+    }
+  }
+  passed &= expect(features != nullptr && !features->repeatListInvalid &&
+                       integerValueForRepeat(*features, 0) == 1 &&
+                       integerValueForRepeat(*features, 4) == 9,
+                   "2*i+1 re-evaluates at expanded slots after nest change");
+  passed &= expect(graph.setGroupRepeats(outer.groupId, 2).accepted,
+                   "outer repeats can change again without retyping");
+  node = graph.findNode(linear);
+  features = nullptr;
+  if (node != nullptr) {
+    for (const auto &property : node->properties) {
+      if (property.key == "features")
+        features = &property;
+    }
+  }
+  passed &= expect(features != nullptr && features->authoredTokens.size() == 1 &&
+                       integerValueForRepeat(*features, 11) == 23,
+                   "authored 2*i+1 re-evaluates for the new P without retyping");
 
   std::vector<std::int32_t> spine;
   updateHierarchyStickySpine(spine, {10, 20, 30}, {10});

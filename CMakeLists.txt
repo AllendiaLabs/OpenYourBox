@@ -141,6 +141,7 @@ target_sources(OpenYourBox PRIVATE
     OpenYourBox/Source/dsp/WeightRandomizer.cpp
     OpenYourBox/Source/freeze/FreezeCoordinator.cpp
     OpenYourBox/Source/graph/BoxFlowOrder.cpp
+    OpenYourBox/Source/graph/ExpressionParser.cpp
     OpenYourBox/Source/graph/NodeGraph.cpp
     OpenYourBox/Source/graph/NodeRenderer.cpp
     OpenYourBox/Source/library/CopyrightAcknowledgment.cpp
@@ -316,6 +317,28 @@ if(BUILD_TESTING)
         juce::juce_recommended_config_flags
         juce::juce_recommended_warning_flags)
     add_test(NAME OpenYourBoxRepeatLists COMMAND OpenYourBoxRepeatListTests)
+
+    add_executable(OpenYourBoxExpressionGrammarTests Tests/ExpressionGrammarTests.cpp
+        OpenYourBox/Source/graph/ExpressionParser.cpp)
+    target_include_directories(OpenYourBoxExpressionGrammarTests PRIVATE
+        OpenYourBox/Source)
+    add_test(NAME ExpressionGrammar COMMAND OpenYourBoxExpressionGrammarTests)
+
+    juce_add_console_app(OpenYourBoxMathExpressionTests PRODUCT_NAME "OpenYourBox Math Expression Tests")
+    target_sources(OpenYourBoxMathExpressionTests PRIVATE Tests/MathExpressionNodeTests.cpp)
+    target_include_directories(OpenYourBoxMathExpressionTests BEFORE PRIVATE
+        "${CMAKE_CURRENT_BINARY_DIR}/OpenYourBox_artefacts/JuceLibraryCode"
+        OpenYourBox/Source
+        "${TORCH_INCLUDE_DIRS}")
+    target_link_libraries(OpenYourBoxMathExpressionTests PRIVATE
+        OpenYourBox
+        OpenYourBoxResources
+        juce::juce_audio_utils
+        juce::juce_dsp
+        juce::juce_opengl
+        juce::juce_recommended_config_flags
+        juce::juce_recommended_warning_flags)
+    add_test(NAME MathExpressionNode COMMAND OpenYourBoxMathExpressionTests)
 
     juce_add_console_app(OpenYourBoxLibraryTests PRODUCT_NAME "OpenYourBox Library Tests")
     target_sources(OpenYourBoxLibraryTests PRIVATE Tests/UserBoxLibraryTests.cpp)

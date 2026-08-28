@@ -33,10 +33,10 @@ description: "Task list for Math Expression Node & Parameter Index Expressions"
 
 **Purpose**: Confirm design artifacts and inventory touch-points before code changes.
 
-- [ ] T001 Verify design artifact cross-links (spec clarifications → contracts → plan) in `specs/012-math-expr-param-i/plan.md`
-- [ ] T002 [P] Inventory Utility Inputs pin rebuild, broadcast connect, and `setMixerInputCount` call sites in `OpenYourBox/Source/graph/NodeGraph.cpp` and `OpenYourBox/Source/graph/NodeGraph.h`
-- [ ] T003 [P] Inventory `parsePropertyRepeatList` / NodeRenderer deactivate-after-edit refuse path and property JSON kinds in `OpenYourBox/Source/graph/GraphTypes.h`, `OpenYourBox/Source/graph/NodeGraph.cpp`, and `OpenYourBox/Source/graph/NodeRenderer.cpp`
-- [ ] T004 [P] Inventory freeze/train unknown-type handling for new elements in `Backend/freeze_worker.py` and `Backend/train_worker.py`
+- [x] T001 Verify design artifact cross-links (spec clarifications → contracts → plan) in `specs/012-math-expr-param-i/plan.md`
+- [x] T002 [P] Inventory Utility Inputs pin rebuild, broadcast connect, and `setMixerInputCount` call sites in `OpenYourBox/Source/graph/NodeGraph.cpp` and `OpenYourBox/Source/graph/NodeGraph.h`
+- [x] T003 [P] Inventory `parsePropertyRepeatList` / NodeRenderer deactivate-after-edit refuse path and property JSON kinds in `OpenYourBox/Source/graph/GraphTypes.h`, `OpenYourBox/Source/graph/NodeGraph.cpp`, and `OpenYourBox/Source/graph/NodeRenderer.cpp`
+- [x] T004 [P] Inventory freeze/train unknown-type handling for new elements in `Backend/freeze_worker.py` and `Backend/train_worker.py`
 
 ---
 
@@ -46,12 +46,12 @@ description: "Task list for Math Expression Node & Parameter Index Expressions"
 
 **⚠️ CRITICAL**: No user story work can begin until this phase is complete.
 
-- [ ] T005 Add expression AST types + Doxygen API surface per `specs/012-math-expr-param-i/contracts/expression-grammar-contract.md` in `OpenYourBox/Source/graph/ExpressionParser.h`
-- [ ] T006 Implement lexer/parser/evaluator (`() + - * ^`, unary `-`, scientific literals, right-assoc `^`) in `OpenYourBox/Source/graph/ExpressionParser.cpp`
-- [ ] T007 Wire context allow-lists (`x1`…`xN` vs `i`) and refuse unknown idents / `/` / empty in `OpenYourBox/Source/graph/ExpressionParser.cpp`
-- [ ] T008 Extend `NodeProperty` / `PropertyKind` (or equivalent) for authored string values with ValueTree + `toJson`/`fromJson` round-trip in `OpenYourBox/Source/graph/GraphTypes.h` and `OpenYourBox/Source/graph/NodeGraph.cpp`
-- [ ] T009 Register new graph sources (`ExpressionParser.cpp`) in `CMakeLists.txt` / OpenYourBox target sources
-- [ ] T010 [P] Add grammar unit coverage (literals, precedence, refuse cases) in `Tests/ExpressionGrammarTests.cpp` and register target in `CMakeLists.txt`
+- [x] T005 Add expression AST types + Doxygen API surface per `specs/012-math-expr-param-i/contracts/expression-grammar-contract.md` in `OpenYourBox/Source/graph/ExpressionParser.h`
+- [x] T006 Implement lexer/parser/evaluator (`() + - * ^`, unary `-`, scientific literals, right-assoc `^`) in `OpenYourBox/Source/graph/ExpressionParser.cpp`
+- [x] T007 Wire context allow-lists (`x1`…`xN` vs `i`) and refuse unknown idents / `/` / empty in `OpenYourBox/Source/graph/ExpressionParser.cpp`
+- [x] T008 Extend `NodeProperty` / `PropertyKind` (or equivalent) for authored string values with ValueTree + `toJson`/`fromJson` round-trip in `OpenYourBox/Source/graph/GraphTypes.h` and `OpenYourBox/Source/graph/NodeGraph.cpp`
+- [x] T009 Register new graph sources (`ExpressionParser.cpp`) in `CMakeLists.txt` / OpenYourBox target sources
+- [x] T010 [P] Add grammar unit coverage (literals, precedence, refuse cases) in `Tests/ExpressionGrammarTests.cpp` and register target in `CMakeLists.txt`
 
 **Checkpoint**: Foundation ready — expressions parse/eval on GUI path; string properties persist; no audio-thread parsing.
 
@@ -65,18 +65,18 @@ description: "Task list for Math Expression Node & Parameter Index Expressions"
 
 ### Implementation for User Story 1
 
-- [ ] T011 [US1] Add `NodeType::mathExpression` / persisted `"math_expression"` / `nodeTypeName`/`nodeTypeFromName` in `OpenYourBox/Source/graph/GraphTypes.h` and `OpenYourBox/Source/graph/NodeGraph.cpp`
-- [ ] T012 [US1] Implement `makeNode` factory: `inputs` (default 1) + `expression` string; rebuild pins labelled `x1`…`xN` in `OpenYourBox/Source/graph/NodeGraph.cpp` per `specs/012-math-expr-param-i/contracts/math-expression-element-contract.md`
-- [ ] T013 [US1] On `inputs` property commit, rebuild pins Utility-style; refuse reduction when expression still references removed `xK` (FR-016) in `OpenYourBox/Source/graph/NodeGraph.cpp`
-- [ ] T014 [US1] Validate `expression` commit via ExpressionParser (idents ⊆ configured pins); refuse invalid; do not store bad string in `OpenYourBox/Source/graph/NodeGraph.cpp`
-- [ ] T015 [US1] Connect/shape: Utility add/multiply broadcast for referenced inputs; output channels = max; rate/bands must match; only referenced pins required (FR-004/017) in `OpenYourBox/Source/graph/NodeGraph.cpp`
-- [ ] T016 [US1] Add palette entry “Math Expression” (no mod-sigmoid entry) and expression/Inputs UI with placeholder/tooltip (FR-014) in `OpenYourBox/Source/graph/NodeRenderer.cpp`
-- [ ] T017 [US1] Refuse-on-edit UX: restore prior expression buffer after invalid commit in `OpenYourBox/Source/graph/NodeRenderer.cpp`
-- [ ] T018 [US1] Live compile: parse once on GUI/compile thread; prepare elementwise LibTorch ops in `OpenYourBox/Source/dsp/LiveGraphEngine.cpp`
-- [ ] T019 [US1] Live execute Math Expression with channel broadcast helpers (no parse/alloc on audio thread) in `OpenYourBox/Source/dsp/LiveGraphEngine.cpp`
-- [ ] T020 [P] [US1] Explicit `math_expression` builder in `Backend/freeze_worker.py` (must not silent-skip)
-- [ ] T021 [P] [US1] Explicit `math_expression` builder in `Backend/train_worker.py` (RAVE/graph path; must not silent-skip)
-- [ ] T022 [P] [US1] Add Math Expression node/broadcast/mod_sigmoid cascade coverage in `Tests/MathExpressionNodeTests.cpp` and register in `CMakeLists.txt`
+- [x] T011 [US1] Add `NodeType::mathExpression` / persisted `"math_expression"` / `nodeTypeName`/`nodeTypeFromName` in `OpenYourBox/Source/graph/GraphTypes.h` and `OpenYourBox/Source/graph/NodeGraph.cpp`
+- [x] T012 [US1] Implement `makeNode` factory: `inputs` (default 1) + `expression` string; rebuild pins labelled `x1`…`xN` in `OpenYourBox/Source/graph/NodeGraph.cpp` per `specs/012-math-expr-param-i/contracts/math-expression-element-contract.md`
+- [x] T013 [US1] On `inputs` property commit, rebuild pins Utility-style; refuse reduction when expression still references removed `xK` (FR-016) in `OpenYourBox/Source/graph/NodeGraph.cpp`
+- [x] T014 [US1] Validate `expression` commit via ExpressionParser (idents ⊆ configured pins); refuse invalid; do not store bad string in `OpenYourBox/Source/graph/NodeGraph.cpp`
+- [x] T015 [US1] Connect/shape: Utility add/multiply broadcast for referenced inputs; output channels = max; rate/bands must match; only referenced pins required (FR-004/017) in `OpenYourBox/Source/graph/NodeGraph.cpp`
+- [x] T016 [US1] Add palette entry “Math Expression” (no mod-sigmoid entry) and expression/Inputs UI with placeholder/tooltip (FR-014) in `OpenYourBox/Source/graph/NodeRenderer.cpp`
+- [x] T017 [US1] Refuse-on-edit UX: restore prior expression buffer after invalid commit in `OpenYourBox/Source/graph/NodeRenderer.cpp`
+- [x] T018 [US1] Live compile: parse once on GUI/compile thread; prepare elementwise LibTorch ops in `OpenYourBox/Source/dsp/LiveGraphEngine.cpp`
+- [x] T019 [US1] Live execute Math Expression with channel broadcast helpers (no parse/alloc on audio thread) in `OpenYourBox/Source/dsp/LiveGraphEngine.cpp`
+- [x] T020 [P] [US1] Explicit `math_expression` builder in `Backend/freeze_worker.py` (must not silent-skip)
+- [x] T021 [P] [US1] Explicit `math_expression` builder in `Backend/train_worker.py` (RAVE/graph path; must not silent-skip)
+- [x] T022 [P] [US1] Add Math Expression node/broadcast/mod_sigmoid cascade coverage in `Tests/MathExpressionNodeTests.cpp` and register in `CMakeLists.txt`
 
 **Checkpoint**: US1 complete — mod_sigmoid composable; multi-input broadcast works; Gold path builds the expression.
 
@@ -90,13 +90,13 @@ description: "Task list for Math Expression Node & Parameter Index Expressions"
 
 ### Implementation for User Story 2
 
-- [ ] T023 [US2] Extend `parsePropertyRepeatList` (or sibling API) to accept expression tokens over `i` per `specs/012-math-expr-param-i/contracts/param-index-expression-contract.md` in `OpenYourBox/Source/graph/GraphTypes.h` / `OpenYourBox/Source/graph/ExpressionParser.cpp`
-- [ ] T024 [US2] Persist authored expression tokens (not only expanded numbers) on `NodeProperty` serialize/deserialize in `OpenYourBox/Source/graph/NodeGraph.cpp`
-- [ ] T025 [US2] On commit, evaluate each expanded slot with `i = k` (ungrouped/P=1 → `i=0`); refuse non-finite in `OpenYourBox/Source/graph/NodeGraph.cpp`
-- [ ] T026 [US2] Integer-typed fields: refuse non-integer results for any required slot (no round/floor); clear message in `OpenYourBox/Source/graph/NodeGraph.cpp`
-- [ ] T027 [US2] On `setGroupCopies` / nest change, re-evaluate authored `i`-expressions for new P (FR-012) alongside dividing-set rules in `OpenYourBox/Source/graph/NodeGraph.cpp`
-- [ ] T028 [US2] Property UI: accept `i`-expressions; refuse restores authored buffer; expanded preview shows resolved numbers; tooltip for grammar (FR-014) in `OpenYourBox/Source/graph/NodeRenderer.cpp`
-- [ ] T029 [P] [US2] Extend `i`-expression / refuse / re-eval coverage in `Tests/RepeatListTilingTests.cpp` and/or `Tests/GraphGroupTests.cpp`
+- [x] T023 [US2] Extend `parsePropertyRepeatList` (or sibling API) to accept expression tokens over `i` per `specs/012-math-expr-param-i/contracts/param-index-expression-contract.md` in `OpenYourBox/Source/graph/GraphTypes.h` / `OpenYourBox/Source/graph/ExpressionParser.cpp`
+- [x] T024 [US2] Persist authored expression tokens (not only expanded numbers) on `NodeProperty` serialize/deserialize in `OpenYourBox/Source/graph/NodeGraph.cpp`
+- [x] T025 [US2] On commit, evaluate each expanded slot with `i = k` (ungrouped/P=1 → `i=0`); refuse non-finite in `OpenYourBox/Source/graph/NodeGraph.cpp`
+- [x] T026 [US2] Integer-typed fields: refuse non-integer results for any required slot (no round/floor); clear message in `OpenYourBox/Source/graph/NodeGraph.cpp`
+- [x] T027 [US2] On `setGroupCopies` / nest change, re-evaluate authored `i`-expressions for new P (FR-012) alongside dividing-set rules in `OpenYourBox/Source/graph/NodeGraph.cpp`
+- [x] T028 [US2] Property UI: accept `i`-expressions; refuse restores authored buffer; expanded preview shows resolved numbers; tooltip for grammar (FR-014) in `OpenYourBox/Source/graph/NodeRenderer.cpp`
+- [x] T029 [P] [US2] Extend `i`-expression / refuse / re-eval coverage in `Tests/RepeatListTilingTests.cpp` and/or `Tests/GraphGroupTests.cpp`
 
 **Checkpoint**: US2 complete — one `i`-expression fills P slots; invalid/non-integer refused without storing bad text.
 
@@ -110,10 +110,10 @@ description: "Task list for Math Expression Node & Parameter Index Expressions"
 
 ### Implementation for User Story 3
 
-- [ ] T030 [US3] Ensure constant expressions without `i` resolve identically across applicable slots and preserve dividing-set length rules in `OpenYourBox/Source/graph/GraphTypes.h` / `OpenYourBox/Source/graph/NodeGraph.cpp`
-- [ ] T031 [US3] When a short authored list with `i`-tokens tiles, bind `i` to expanded slot index (not short-list index only) in `OpenYourBox/Source/graph/NodeGraph.cpp`
-- [ ] T032 [US3] Verify NodeRenderer authored field + read-only P preview remain correct for mixed literal/expression lists in `OpenYourBox/Source/graph/NodeRenderer.cpp`
-- [ ] T033 [P] [US3] Add mixed-list / constant-expression cases in `Tests/RepeatListTilingTests.cpp`
+- [x] T030 [US3] Ensure constant expressions without `i` resolve identically across applicable slots and preserve dividing-set length rules in `OpenYourBox/Source/graph/GraphTypes.h` / `OpenYourBox/Source/graph/NodeGraph.cpp`
+- [x] T031 [US3] When a short authored list with `i`-tokens tiles, bind `i` to expanded slot index (not short-list index only) in `OpenYourBox/Source/graph/NodeGraph.cpp`
+- [x] T032 [US3] Verify NodeRenderer authored field + read-only P preview remain correct for mixed literal/expression lists in `OpenYourBox/Source/graph/NodeRenderer.cpp`
+- [x] T033 [P] [US3] Add mixed-list / constant-expression cases in `Tests/RepeatListTilingTests.cpp`
 
 **Checkpoint**: US3 complete — grammar reuse does not regress 011 tiling; mixed lists behave per US3.4.
 
@@ -123,10 +123,10 @@ description: "Task list for Math Expression Node & Parameter Index Expressions"
 
 **Purpose**: End-to-end validation and doc hygiene across stories.
 
-- [ ] T034 [P] Mark TODO items for Math Expression / param `i` done or link to this feature in `TODO.md`
-- [ ] T035 Run manual scenarios in `specs/012-math-expr-param-i/quickstart.md` (mod_sigmoid, broadcast, `i`, freeze smoke)
-- [ ] T036 [P] Confirm Doxygen on new public APIs in `OpenYourBox/Source/graph/ExpressionParser.h` and Math Expression helpers in `OpenYourBox/Source/graph/NodeGraph.h`
-- [ ] T037 Run registered C++ test targets (`ExpressionGrammarTests`, `MathExpressionNodeTests`, RepeatList/Group) via CTest entries declared in `CMakeLists.txt`
+- [x] T034 [P] Mark TODO items for Math Expression / param `i` done or link to this feature in `TODO.md`
+- [x] T035 Run manual scenarios in `specs/012-math-expr-param-i/quickstart.md` (mod_sigmoid, broadcast, `i`, freeze smoke)
+- [x] T036 [P] Confirm Doxygen on new public APIs in `OpenYourBox/Source/graph/ExpressionParser.h` and Math Expression helpers in `OpenYourBox/Source/graph/NodeGraph.h`
+- [x] T037 Run registered C++ test targets (`ExpressionGrammarTests`, `MathExpressionNodeTests`, RepeatList/Group) via CTest entries declared in `CMakeLists.txt`
 
 ---
 

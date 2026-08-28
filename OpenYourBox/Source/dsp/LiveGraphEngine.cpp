@@ -120,6 +120,16 @@ struct CompiledElement {
   /** @brief Host Audio Input/Output channel mode when type is fixed I/O. */
   openyourbox::graph::HostIoMode hostIoMode =
       openyourbox::graph::HostIoMode::stereo;
+  /** @brief Prepared Math Expression program (GUI-thread parse). */
+  openyourbox::graph::ExpressionAst mathAst;
+  /**
+   * @brief Compiled source index for each Math Expression pin, or -1.
+   *
+   * Index 0 is `x1`. Unconnected unused pins stay -1.
+   */
+  std::vector<std::int64_t> mathPinSources;
+  /** @brief Per-pin extract channel for Math Expression inputs, or -1. */
+  std::vector<int> mathPinExtract;
 };
 
 /**
@@ -482,7 +492,8 @@ bool hasValidPortLayout(const openyourbox::graph::GraphNode &node) noexcept {
     return node.inputs.empty() && node.outputs.size() == 1;
   if (node.type == NodeType::xyTrackpad)
     return node.inputs.empty() && node.outputs.size() == 2;
-  if (openyourbox::graph::isMixerType(node.type))
+  if (openyourbox::graph::isMixerType(node.type) ||
+      openyourbox::graph::isMathExpressionType(node.type))
     return node.inputs.size() >= 1 && node.outputs.size() == 1;
   if (node.type == NodeType::tcn)
     return node.inputs.size() >= 1 && node.inputs.size() <= 2 &&
@@ -1057,6 +1068,93 @@ torch::Tensor executeMerge(const CompiledElement &element,
   return output;
 }
 
+/**
+ * @brief Evaluates a prepared Math Expression over aligned input tensors.
+ * @param element Compiled Math Expression with a postfix program.
+ * @param pinTensors One tensor per configured pin (`x1` at index 0), undefined if unused.
+ * @param samples Output time length.
+ * @param options Tensor options matching the audio block.
+ */
+torch::Tensor executeMathExpression(const CompiledElement &element,
+                                    const std::vector<torch::Tensor> &pinTensors,
+                                    std::int64_t samples,
+                                    torch::TensorOptions options) {
+  using openyourbox::graph::ExpressionInstruction;
+  int width = 1;
+  for (std::size_t index = 0; index < pinTensors.size(); ++index) {
+    if (!openyourbox::graph::mathExpressionReferencesInput(
+            element.mathAst, static_cast<int>(index) + 1))
+      continue;
+    if (pinTensors[index].defined())
+      width = std::max(width, static_cast<int>(pinTensors[index].size(1)));
+  }
+  std::vector<torch::Tensor> stack;
+  stack.reserve(element.mathAst.instructions.size());
+  const auto asTensor = [&](double literal) {
+    return torch::full({1, width, samples}, static_cast<float>(literal), options);
+  };
+  const auto binary = [&](auto op) {
+    auto b = stack.back();
+    stack.pop_back();
+    auto a = stack.back();
+    stack.pop_back();
+    a = matchTimeLength(a, samples);
+    b = matchTimeLength(b, samples);
+    const auto opWidth =
+        std::max(static_cast<int>(a.size(1)), static_cast<int>(b.size(1)));
+    a = broadcastChannels(a, opWidth);
+    b = broadcastChannels(b, opWidth);
+    stack.push_back(op(a, b));
+  };
+  for (const auto &instruction : element.mathAst.instructions) {
+    switch (instruction.op) {
+    case ExpressionInstruction::Op::pushLiteral:
+      stack.push_back(asTensor(instruction.literal));
+      break;
+    case ExpressionInstruction::Op::pushIdent: {
+      const auto pin = instruction.identIndex - 1;
+      if (pin < 0 || static_cast<std::size_t>(pin) >= pinTensors.size() ||
+          !pinTensors[static_cast<std::size_t>(pin)].defined()) {
+        stack.push_back(asTensor(0.0));
+        break;
+      }
+      auto value = matchTimeLength(pinTensors[static_cast<std::size_t>(pin)],
+                                   samples);
+      stack.push_back(broadcastChannels(value, width));
+      break;
+    }
+    case ExpressionInstruction::Op::negate:
+      if (!stack.empty())
+        stack.back() = -stack.back();
+      break;
+    case ExpressionInstruction::Op::add:
+      binary([](const torch::Tensor &a, const torch::Tensor &b) { return a + b; });
+      break;
+    case ExpressionInstruction::Op::subtract:
+      binary([](const torch::Tensor &a, const torch::Tensor &b) { return a - b; });
+      break;
+    case ExpressionInstruction::Op::multiply:
+      binary([](const torch::Tensor &a, const torch::Tensor &b) { return a * b; });
+      break;
+    case ExpressionInstruction::Op::divide:
+      binary([](const torch::Tensor &a, const torch::Tensor &b) { return a / b; });
+      break;
+    case ExpressionInstruction::Op::power:
+      binary([](const torch::Tensor &a, const torch::Tensor &b) {
+        return torch::pow(a, b);
+      });
+      break;
+    case ExpressionInstruction::Op::exp:
+      if (!stack.empty())
+        stack.back() = torch::exp(stack.back());
+      break;
+    }
+  }
+  if (stack.empty())
+    return torch::zeros({1, width, samples}, options);
+  return matchTimeLength(stack.back(), samples);
+}
+
 } // namespace
 
 void LiveGraphRuntime::executeElement(std::size_t index,
@@ -1090,6 +1188,26 @@ void LiveGraphRuntime::executeElement(std::size_t index,
     auto *data = output.data_ptr<float>();
     writeSmoothedChannel(data, samples, xSmoother);
     writeSmoothedChannel(data + samples, samples, ySmoother);
+    return;
+  }
+  if (element.type == openyourbox::graph::NodeType::mathExpression) {
+    std::vector<torch::Tensor> pinTensors(element.mathPinSources.size());
+    for (std::size_t pin = 0; pin < element.mathPinSources.size(); ++pin) {
+      const auto source = element.mathPinSources[pin];
+      if (source < 0)
+        continue;
+      auto value =
+          runtime.outputs[static_cast<std::size_t>(source)];
+      const auto extract =
+          pin < element.mathPinExtract.size() ? element.mathPinExtract[pin]
+                                              : -1;
+      pinTensors[pin] = extractCompiledInput(value, extract);
+    }
+    output = executeMathExpression(element, pinTensors, samples,
+                                   blockInput.options());
+    if (runtime.outputPeaks)
+      runtime.outputPeaks[index].store(tensorPeak(output),
+                                       std::memory_order_relaxed);
     return;
   }
   if (element.inputIndices.empty()) {
@@ -1312,6 +1430,7 @@ void LiveGraphRuntime::executeElement(std::size_t index,
   case openyourbox::graph::NodeType::audioInput:
   case openyourbox::graph::NodeType::knobInput:
   case openyourbox::graph::NodeType::xyTrackpad:
+  case openyourbox::graph::NodeType::mathExpression:
   case openyourbox::graph::NodeType::groupInput:
   case openyourbox::graph::NodeType::groupOutput:
     break;
@@ -1743,7 +1862,8 @@ LiveGraphEngine::compile(const graph::NodeGraph &graphDocument,
               "Frozen subgraph is missing a live input connection");
         if (element.inputIndices.empty()) {
           if (node.type != NodeType::audioOutput &&
-              !graph::isConditioningSourceType(node.type))
+              !graph::isConditioningSourceType(node.type) &&
+              !graph::isMathExpressionType(node.type))
             continue;
           if (node.type == NodeType::audioOutput)
             element.inputChannels = options.hostOutputChannels;
@@ -2100,6 +2220,73 @@ LiveGraphEngine::compile(const graph::NodeGraph &graphDocument,
         if (width < 1)
           return failure(LiveGraphErrorCode::invalidShape, node.id,
                          "Utility output channels must be positive");
+        element.outputChannels = width;
+        break;
+      }
+      case NodeType::mathExpression: {
+        std::string expressionText = "x1";
+        for (const auto &property : node.properties) {
+          if (property.key == "expression" && !property.stringValue.empty())
+            expressionText = property.stringValue;
+        }
+        const auto inputCount = std::max(1, static_cast<int>(node.inputs.size()));
+        const auto parsed = graph::parseExpression(
+            expressionText, graph::ExpressionIdentContext::mathInputs,
+            inputCount);
+        if (!parsed.accepted)
+          return failure(LiveGraphErrorCode::invalidProperty, node.id,
+                         parsed.message);
+        element.mathAst = parsed.ast;
+        element.mathPinSources.assign(node.inputs.size(), -1);
+        element.mathPinExtract.assign(node.inputs.size(), -1);
+        int width = 0;
+        std::size_t compiledInput = 0;
+        for (std::size_t pinIndex = 0; pinIndex < node.inputs.size();
+             ++pinIndex) {
+          const auto &pin = node.inputs[pinIndex];
+          const auto source = sourceNodeByDestinationPin.find(pin.id);
+          if (source == sourceNodeByDestinationPin.end()) {
+            if (graph::mathExpressionReferencesInput(
+                    parsed.ast, static_cast<int>(pinIndex) + 1))
+              return failure(LiveGraphErrorCode::invalidGraph, node.id,
+                             "Math Expression input x" +
+                                 std::to_string(pinIndex + 1) +
+                                 " must be connected");
+            continue;
+          }
+          const auto compiledSource = compiledIndex.find(source->second);
+          if (compiledSource == compiledIndex.end())
+            return failure(LiveGraphErrorCode::invalidGraph, node.id,
+                           "Math Expression is missing a live input connection");
+          element.mathPinSources[pinIndex] =
+              static_cast<std::int64_t>(compiledSource->second);
+          if (compiledInput < element.inputExtractChannels.size())
+            element.mathPinExtract[pinIndex] =
+                element.inputExtractChannels[compiledInput];
+          const auto &sourceElement =
+              compiled->elements[compiledSource->second];
+          const auto channels = compiledSlotChannels(
+              sourceElement, element.mathPinExtract[pinIndex]);
+          if (graph::mathExpressionReferencesInput(
+                  parsed.ast, static_cast<int>(pinIndex) + 1)) {
+            if (channels < 1)
+              return failure(LiveGraphErrorCode::invalidShape, node.id,
+                             "Math Expression inputs must have positive "
+                             "channel counts");
+            if (width == 0)
+              width = channels;
+            else if (!channelsAreBroadcastCompatible(channels, width))
+              return failure(
+                  LiveGraphErrorCode::invalidShape, node.id,
+                  "Math Expression requires referenced inputs to share a "
+                  "channel count, or broadcast from 1");
+            else
+              width = std::max(width, channels);
+          }
+          ++compiledInput;
+        }
+        if (width < 1)
+          width = 1;
         element.outputChannels = width;
         break;
       }

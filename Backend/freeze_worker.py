@@ -374,7 +374,9 @@ def _properties(element: dict[str, Any]) -> dict[str, Any]:
     values: dict[str, Any] = {}
     for item in element.get("properties", []):
         key = str(item["key"])
-        if "float_value" in item:
+        if "string_value" in item:
+            values[key] = str(item["string_value"])
+        elif "float_value" in item:
             values[key] = float(item["float_value"])
         else:
             values[key] = int(item["value"])
@@ -430,7 +432,7 @@ def build_module(
         for element in fragment.get("elements", [])
         if isinstance(element, dict)
     }
-    if types & _RAVE_TYPES:
+    if types & _RAVE_TYPES or "math_expression" in types:
         return _load_train_worker().build_rave_graph_module(
             fragment, input_channels, cond_dim
         )
@@ -500,6 +502,13 @@ def build_module(
             modules.append(module)
             if cond_dim > 0:
                 has_conditioned_tcn = True
+        elif element_type == "math_expression":
+            modules.append(
+                _load_train_worker().MathExpression(
+                    str(properties.get("expression", "x1")),
+                    int(properties.get("inputs", 1)),
+                )
+            )
         elif element_type in {"utility", "merge", "sum", "multiply"}:
             raise ValueError(
                 "mixer elements cannot be frozen by the linear freeze worker"

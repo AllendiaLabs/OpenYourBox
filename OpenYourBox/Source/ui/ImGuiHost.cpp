@@ -61,7 +61,13 @@ bool ImGuiHost::keyPressed(const juce::KeyPress &key) {
     pendingInput.modifiers = {modifiers.isCtrlDown(), modifiers.isShiftDown(),
                               modifiers.isAltDown(), modifiers.isCommandDown()};
     pendingInput.modifiersChanged = true;
-    const auto character = key.getTextCharacter();
+    auto character = key.getTextCharacter();
+    // AZERTY and similar layouts treat `^` as a dead key, so getTextCharacter()
+    // is often 0 even though the physical key code is '^'. Inject the ASCII
+    // caret so expression fields can still accept power notation.
+    if (character == 0 && key.getKeyCode() == '^' &&
+        !modifiers.isCommandDown() && !modifiers.isCtrlDown())
+      character = '^';
     if (character > 0)
       pendingInput.characters.push_back(static_cast<unsigned int>(character));
   }
