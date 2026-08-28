@@ -36,13 +36,14 @@
 
 ## R4 — Project structure click vs navigate (changes 011)
 
-**Decision**: **Single-click** live row → select that box in the graph (if on a reachable canvas) and open Parameters (editable). **Double-click** leaf → `setCanvasFocus` to containing canvas + `centreViewOnCanvas` / center on box. **Double-click** group → focus **parent** canvas and center on the group’s outer box **without** `setCanvasFocus(groupId)`. **Canvas** double-click on group body still opens inner canvas (`setCanvasFocus(group)`), restored by removing widget steal.
+**Decision**: **Single-click** live row → select that box and open Parameters (editable); do **not** change the focused canvas (groups stay closed). **Double-click** group → `setCanvasFocus(groupId)` so the inner canvas opens. **Double-click** leaf → `setCanvasFocus` to containing canvas + center on box (camera focus unchanged). **Canvas** double-click on group body still opens inner canvas (`setCanvasFocus(group)`).
 
-**Rationale**: Clarified FR-007–FR-011. Current 011 tree opens groups on single-click, which conflicts with property inspection and “go to group box without opening.”
+**Rationale**: Follow-up clarify: opening the group canvas from Project structure is more intuitive than centering the parent view on the group box, but that should be **double-click** so single-click can inspect Parameters without navigating.
 
 **Alternatives considered**:
-- Keep single-click open — rejected by clarify session.
-- Double-click group opens inner — rejected; only canvas double-click opens.
+- Group single-click opens the inner canvas — rejected; Parameters-only on first click.
+- Double-click group centers the parent canvas on the outer box — rejected; users expect the inner canvas.
+- Double-click leaf opens something other than camera-center — rejected; leave leaf double-click unchanged.
 
 ## R5 — Reparent semantics: disconnect then add-like-new
 
@@ -66,7 +67,7 @@
 
 ## R7 — Library click read-only inspect
 
-**Decision**: Introduce an editor **selection context**: `LiveBox` (editable Parameters) vs `LibraryInspect` (read-only Parameters bound to snapshot entry/subpart). Library panel click sets inspect context and forces Parameters tab; commits no-op / controls disabled. Clearing inspect when selecting a live box.
+**Decision**: Introduce an editor **selection context**: `LiveBox` (editable Parameters) vs `LibraryInspect` (read-only Parameters bound to snapshot entry/subpart). Library panel click sets inspect context and forces Parameters tab even if a canvas box is already selected (clear leftover editor selection so inspect is not overwritten the same frame). Commits no-op / controls disabled. Clearing inspect when the user next selects a live canvas box or clicks the canvas background.
 
 **Rationale**: Clarified FR-008. Avoids writing catalog JSON from the inspector.
 

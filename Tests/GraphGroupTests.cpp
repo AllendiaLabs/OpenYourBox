@@ -80,6 +80,7 @@ bool connectDeclaredThrough(openyourbox::graph::NodeGraph &graph,
 int main() {
   using openyourbox::graph::NodeGraph;
   using openyourbox::graph::NodeType;
+  using openyourbox::graph::defaultNewBoxPosition;
   juce::ScopedJuceInitialiser_GUI juceInitialiser;
   bool passed = true;
 
@@ -159,9 +160,56 @@ int main() {
   passed &= expect(group != nullptr && group->size.x >= 160.0f &&
                        group->size.y >= 120.0f,
                    "new groups fit their members");
-  passed &= expect(std::abs(graph.worldPositionOfNode(convA).x - 200.0f) < 0.5f &&
-                       std::abs(graph.worldPositionOfNode(convA).y - 0.0f) < 0.5f,
-                   "grouping keeps member canvas positions");
+  {
+    using openyourbox::graph::groupBoundaryContentGap;
+    using openyourbox::graph::groupBoxDisplayLabel;
+    const auto *inputHub = graph.findNode(groupInput);
+    const auto *outputHub = graph.findNode(groupOutput);
+    const auto *left = graph.findNode(convA);
+    const auto *right = graph.findNode(convB);
+    passed &= expect(inputHub != nullptr && outputHub != nullptr &&
+                         left != nullptr && right != nullptr,
+                     "group interior boxes exist for layout");
+    if (inputHub != nullptr && outputHub != nullptr && left != nullptr &&
+        right != nullptr) {
+      passed &= expect(
+          std::abs((right->position.x - left->position.x) - 200.0f) < 0.5f &&
+              std::abs(right->position.y - left->position.y) < 0.5f,
+          "grouping preserves relative member layout");
+      const auto contentMinX = std::min(left->position.x, right->position.x);
+      const auto contentMaxX =
+          std::max(left->position.x + std::max(8.0f, left->size.x),
+                    right->position.x + std::max(8.0f, right->size.x));
+      const auto contentMinY = std::min(left->position.y, right->position.y);
+      const auto contentMaxY =
+          std::max(left->position.y + std::max(8.0f, left->size.y),
+                    right->position.y + std::max(8.0f, right->size.y));
+      passed &= expect(inputHub->position.x +
+                               std::max(8.0f, inputHub->size.x) +
+                               groupBoundaryContentGap <=
+                           contentMinX + 0.5f,
+                       "Group Input sits left of content with a gap");
+      passed &= expect(outputHub->position.x + 0.5f >=
+                           contentMaxX + groupBoundaryContentGap,
+                       "Group Output sits right of content with a gap");
+      const auto contentCenterY = (contentMinY + contentMaxY) * 0.5f;
+      passed &= expect(std::abs(inputHub->position.y +
+                                    std::max(8.0f, inputHub->size.y) * 0.5f -
+                                    contentCenterY) < 0.5f,
+                       "Group Input is vertically centred on content");
+      passed &= expect(std::abs(outputHub->position.y +
+                                    std::max(8.0f, outputHub->size.y) * 0.5f -
+                                    contentCenterY) < 0.5f,
+                       "Group Output is vertically centred on content");
+    }
+    openyourbox::graph::GraphGroup named;
+    named.name = "Encoder";
+    passed &= expect(groupBoxDisplayLabel(named) == "Encoder (Block)",
+                     "group boxes display Name (Block)");
+    passed &= expect(group != nullptr &&
+                         groupBoxDisplayLabel(*group) == "Group (Block)",
+                     "default group boxes display Group (Block)");
+  }
 
   const auto cycle = graph.addToGroup(created.groupId, created.groupId);
   passed &= expect(!cycle.accepted, "group cannot contain itself");
@@ -179,6 +227,14 @@ int main() {
   passed &= expect(repeats.accepted, "chainable group accepts N=3");
   passed &= expect(graph.findGroup(created.groupId)->repeats == 3,
                    "repeats persist on the group");
+  {
+    const auto *repeatedGroup = graph.findGroup(created.groupId);
+    const auto repeatStatus = graph.groupRepeatStatus(created.groupId);
+    passed &= expect(repeatedGroup != nullptr && repeatStatus.active &&
+                         groupBoxDisplayLabel(*repeatedGroup, repeatStatus) ==
+                             u8"Group (Block) \xC3\x97" "3",
+                     "active repeats append ×N to the group box title");
+  }
   passed &= expect(graph.effectiveRepeatCount(convA) == 3,
                    "members report product of ancestor repeats");
   passed &= expect(graph.findNode(convA)->repeatSlots.size() == 3 &&
@@ -577,6 +633,11 @@ int main() {
                          status.requestedRepeats == 2 &&
                          status.effectiveRepeats == 1,
                      "invalid requested N persists while one repeat runs");
+    if (const auto *knobGroup = knobs.findGroup(grouped.groupId)) {
+      passed &= expect(groupBoxDisplayLabel(*knobGroup, status) ==
+                           u8"Group (Block) \xC3\x97" "2\xE2\x86\x92" "1",
+                       "inactive repeats append ×N→1 to the group box title");
+    }
     const auto unrolled = knobs.withInvisibleRepeatsMaterialized();
     int knobCount = 0;
     for (const auto &node : unrolled.getNodes()) {
@@ -1393,6 +1454,185 @@ int main() {
               convT->outputs.front().repeatShapes[2].channels == 128 &&
               convT->outputs.front().repeatShapes[3].channels == 64,
           "ConvTranspose output lists 512,256,128,64");
+    }
+  }
+
+  {
+    NodeGraph reparentGraph;
+    reparentGraph.ensureFixedHostIo();
+    const auto src = reparentGraph.addNode(NodeType::linear, {80.0f, 40.0f});
+    const auto mid = reparentGraph.addNode(NodeType::activation, {200.0f, 40.0f});
+    const auto dst = reparentGraph.addNode(NodeType::convolution, {320.0f, 40.0f});
+    const auto *srcNode = reparentGraph.findNode(src);
+    const auto *midNode = reparentGraph.findNode(mid);
+    const auto *dstNode = reparentGraph.findNode(dst);
+    passed &= expect(srcNode != nullptr && midNode != nullptr && dstNode != nullptr,
+                     "reparent fixture nodes exist");
+    if (srcNode != nullptr && midNode != nullptr && dstNode != nullptr) {
+      passed &= expect(reparentGraph
+                           .connect(srcNode->outputs.front().id,
+                                    midNode->inputs.front().id)
+                           .accepted &&
+                           reparentGraph
+                               .connect(midNode->outputs.front().id,
+                                        dstNode->inputs.front().id)
+                               .accepted,
+                       "reparent fixture is wired through the middle box");
+      const auto *midBeforeNoop = reparentGraph.findNode(mid);
+      const auto noopLinks = reparentGraph.getLinks().size();
+      const auto noopPos =
+          midBeforeNoop != nullptr ? midBeforeNoop->position
+                                   : juce::Point<float>{};
+      const auto sameParent =
+          reparentGraph.reparentBoxLikeInsert(mid, std::nullopt);
+      passed &= expect(sameParent.accepted,
+                       "dropping a box onto its current parent is accepted");
+      const auto *midAfterNoop = reparentGraph.findNode(mid);
+      passed &= expect(midAfterNoop != nullptr &&
+                           !midAfterNoop->parentGroupId.has_value() &&
+                           std::abs(midAfterNoop->position.x - noopPos.x) <
+                               0.5f &&
+                           std::abs(midAfterNoop->position.y - noopPos.y) <
+                               0.5f,
+                       "same-parent drop keeps membership and position");
+      passed &= expect(reparentGraph.getLinks().size() == noopLinks,
+                       "same-parent drop does not disconnect cables");
+      const auto beforeDisconnect = reparentGraph.toValueTree();
+      const auto disconnected = reparentGraph.disconnectAllLinksForBox(mid);
+      passed &= expect(disconnected.accepted,
+                       "disconnect-all accepts an existing element");
+      auto incident = 0;
+      for (const auto &link : reparentGraph.getLinks()) {
+        if (link.sourcePinId == midNode->outputs.front().id ||
+            link.destinationPinId == midNode->inputs.front().id)
+          ++incident;
+      }
+      passed &= expect(incident == 0,
+                       "disconnect-all removes every cable on the box");
+      passed &= expect(reparentGraph.findNode(mid) != nullptr,
+                       "disconnect-all does not delete the box");
+
+      const auto partner = reparentGraph.addNode(NodeType::linear, {80.0f, 120.0f});
+      const auto partnerB =
+          reparentGraph.addNode(NodeType::convolution, {200.0f, 120.0f});
+      const auto grouped = reparentGraph.createGroup({partner, partnerB});
+      passed &= expect(grouped.accepted, "reparent destination group is created");
+      if (grouped.accepted) {
+        const auto intoGroup =
+            reparentGraph.reparentBoxLikeInsert(mid, grouped.groupId);
+        passed &= expect(intoGroup.accepted, "reparent into a group is accepted");
+        const auto *moved = reparentGraph.findNode(mid);
+        passed &= expect(moved != nullptr && moved->parentGroupId.has_value() &&
+                             *moved->parentGroupId == grouped.groupId,
+                         "reparent attaches the box as a group member");
+        passed &=
+            expect(std::abs(moved->position.x - defaultNewBoxPosition.x) < 0.5f &&
+                       std::abs(moved->position.y - defaultNewBoxPosition.y) <
+                           0.5f,
+                   "reparent uses new-item placement in the destination");
+        incident = 0;
+        for (const auto &link : reparentGraph.getLinks()) {
+          if (link.sourcePinId == midNode->outputs.front().id ||
+              link.destinationPinId == midNode->inputs.front().id)
+            ++incident;
+        }
+        passed &= expect(incident == 0,
+                         "reparent into a group leaves the box disconnected");
+        const auto stayInGroup =
+            reparentGraph.reparentBoxLikeInsert(mid, grouped.groupId);
+        passed &= expect(stayInGroup.accepted,
+                         "dropping onto the current group is accepted");
+        const auto *stayed = reparentGraph.findNode(mid);
+        passed &= expect(
+            stayed != nullptr && stayed->parentGroupId.has_value() &&
+                *stayed->parentGroupId == grouped.groupId &&
+                std::abs(stayed->position.x - defaultNewBoxPosition.x) < 0.5f &&
+                std::abs(stayed->position.y - defaultNewBoxPosition.y) < 0.5f,
+            "same-group drop does not move or reparent the box");
+
+        const auto toRoot =
+            reparentGraph.reparentBoxLikeInsert(mid, std::nullopt);
+        passed &= expect(toRoot.accepted, "reparent to the project root is accepted");
+        const auto *atRoot = reparentGraph.findNode(mid);
+        passed &= expect(atRoot != nullptr && !atRoot->parentGroupId.has_value(),
+                         "reparent to root clears membership");
+      }
+
+      const auto innerA =
+          reparentGraph.addNode(NodeType::activation, {40.0f, 200.0f});
+      const auto innerB =
+          reparentGraph.addNode(NodeType::convolution, {160.0f, 200.0f});
+      const auto inner = reparentGraph.createGroup({innerA, innerB});
+      const auto outerLeaf =
+          reparentGraph.addNode(NodeType::linear, {280.0f, 200.0f});
+      passed &= expect(inner.accepted, "cycle-reject inner group is created");
+      const auto outer =
+          reparentGraph.createGroup({inner.groupId, outerLeaf});
+      passed &= expect(outer.accepted, "cycle-reject outer group is created");
+      if (inner.accepted && outer.accepted) {
+        const auto linkCountBefore = reparentGraph.getLinks().size();
+        const auto *innerBefore = reparentGraph.findGroup(inner.groupId);
+        const auto parentBefore =
+            innerBefore != nullptr ? innerBefore->parentGroupId : std::nullopt;
+        const auto cycle = reparentGraph.reparentBoxLikeInsert(
+            outer.groupId, inner.groupId);
+        passed &= expect(!cycle.accepted,
+                         "reparenting a group into its descendant is rejected");
+        const auto *innerAfter = reparentGraph.findGroup(inner.groupId);
+        passed &= expect(innerAfter != nullptr &&
+                             innerAfter->parentGroupId == parentBefore,
+                         "cycle reject leaves hierarchy unchanged");
+        passed &= expect(reparentGraph.getLinks().size() == linkCountBefore,
+                         "cycle reject leaves cables unchanged");
+        const auto self = reparentGraph.reparentBoxLikeInsert(outer.groupId,
+                                                              outer.groupId);
+        passed &= expect(!self.accepted, "dropping a group onto itself is rejected");
+      }
+
+      passed &= expect(reparentGraph.restoreFromValueTree(beforeDisconnect),
+                       "graph snapshot before disconnect restores");
+      const auto *restoredMid = reparentGraph.findNode(mid);
+      passed &= expect(restoredMid != nullptr && !reparentGraph.getLinks().empty(),
+                       "restoring the snapshot brings cables back");
+    }
+  }
+
+  {
+    NodeGraph offsetLayout;
+    const auto upper =
+        offsetLayout.addNode(NodeType::convolution, {120.0f, 40.0f});
+    const auto lower =
+        offsetLayout.addNode(NodeType::activation, {280.0f, 180.0f});
+    const auto grouped = offsetLayout.createGroup({upper, lower});
+    passed &= expect(grouped.accepted, "offset boxes must group");
+    const auto *left = offsetLayout.findNode(upper);
+    const auto *right = offsetLayout.findNode(lower);
+    const auto inputId =
+        findBoundary(offsetLayout, grouped.groupId, NodeType::groupInput);
+    const auto outputId =
+        findBoundary(offsetLayout, grouped.groupId, NodeType::groupOutput);
+    const auto *inputHub = offsetLayout.findNode(inputId);
+    const auto *outputHub = offsetLayout.findNode(outputId);
+    passed &= expect(left != nullptr && right != nullptr && inputHub != nullptr &&
+                         outputHub != nullptr,
+                     "offset group interior boxes exist");
+    if (left != nullptr && right != nullptr && inputHub != nullptr &&
+        outputHub != nullptr) {
+      passed &= expect(std::abs((right->position.x - left->position.x) - 160.0f) <
+                               0.5f &&
+                           std::abs((right->position.y - left->position.y) -
+                                    140.0f) < 0.5f,
+                       "offset grouping preserves original relative layout");
+      const auto contentMinX = std::min(left->position.x, right->position.x);
+      const auto contentMaxX =
+          std::max(left->position.x + std::max(8.0f, left->size.x),
+                    right->position.x + std::max(8.0f, right->size.x));
+      const auto gap = openyourbox::graph::groupBoundaryContentGap;
+      passed &= expect(inputHub->position.x +
+                               std::max(8.0f, inputHub->size.x) + gap <=
+                           contentMinX + 0.5f &&
+                           outputHub->position.x + 0.5f >= contentMaxX + gap,
+                       "offset grouping still bookends content with I/O gaps");
     }
   }
 

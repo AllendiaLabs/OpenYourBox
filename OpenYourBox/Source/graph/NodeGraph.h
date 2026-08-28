@@ -80,6 +80,9 @@ public:
 
   /**
    * @brief Creates a named group from selected nodes and/or nested groups.
+   *
+   * Members keep their relative layout on the new group canvas, centred
+   * between Group Input on the left and Group Output on the right.
    * @param memberIds Node ids and nested group ids to wrap.
    * @return Accepted group id, or a refusal reason.
    */
@@ -119,6 +122,30 @@ public:
    * @param memberId Node id or nested group id.
    */
   GroupActionResult removeFromGroup(std::int32_t memberId);
+
+  /**
+   * @brief Removes connections incident to @p boxId without deleting the box.
+   *
+   * For an element, every link on its pins is removed. For a group, only
+   * boundary-crossing (external) links are removed; interior wiring is kept.
+   * @param boxId Node or group identifier.
+   * @return Accepted when the box exists; @c groupId is @p boxId.
+   */
+  GroupActionResult disconnectAllLinksForBox(std::int32_t boxId);
+
+  /**
+   * @brief Disconnects cables then reparents @p boxId like inserting a new item.
+   *
+   * Rejects cycles and illegal parents with no mutation. On success, incident
+   * cables are cleared, membership is updated, and the box is placed at
+   * @ref defaultNewBoxPosition in the destination canvas.
+   * Dropping onto the box's current parent is a no-op: cables and position
+   * stay unchanged.
+   * @param boxId Node or group identifier to move.
+   * @param targetParent Destination group, or empty for the project root.
+   */
+  GroupActionResult reparentBoxLikeInsert(
+      std::int32_t boxId, std::optional<std::int32_t> targetParent);
 
   /**
    * @brief Sets presentation-only collapse state.
@@ -768,6 +795,9 @@ private:
   bool setGroupBoundaryPortCount(GraphNode &node, int portCount);
   /**
    * @brief Adds fixed boundary hubs and routes a new or legacy group through them.
+   *
+   * Newly created hubs are placed left and right of the group's members,
+   * preserving the members' relative layout with a gap on each side.
    * @param groupId Group requiring an explicit interface.
    * @param preserveInferredPorts True to preserve every legacy inferred port;
    *        false to declare only currently crossing cables.

@@ -84,6 +84,34 @@ public:
 
   /** @brief Returns the first selected node identifier, or zero. */
   [[nodiscard]] std::int32_t getPrimarySelectedNodeId() const noexcept;
+  /** @brief Returns the first selected node or group identifier, or zero. */
+  [[nodiscard]] std::int32_t getPrimarySelectedBoxId() const noexcept;
+  /** @brief Session Parameters-tab binding (live, library inspect, or multi). */
+  [[nodiscard]] const SelectionContext &getSelectionContext() const noexcept;
+  /**
+   * @brief Consumes a one-shot request to activate the Parameters tab.
+   * @return True when the editor should switch to Parameters this frame.
+   */
+  bool consumeForceParametersTab() noexcept;
+  /**
+   * @brief Draws the right-menu Parameters tab for the current selection.
+   * @param graph Message-thread graph document.
+   * @param callbacks Runtime actions owned by the plug-in editor.
+   * @param boxLibrary User box catalog used for library inspect, or null.
+   */
+  void renderParametersPanel(
+      NodeGraph &graph, const NodeRendererCallbacks &callbacks,
+      openyourbox::library::UserBoxLibrary *boxLibrary = nullptr);
+  /**
+   * @brief Binds Parameters to a read-only user-library snapshot.
+   *
+   * Clears the canvas selection so a previously selected live box cannot
+   * overwrite this inspect binding on the same frame.
+   * @param entryId Catalog UUID.
+   * @param nestedRootId Snapshot node/group id, or 0 for the saved root.
+   */
+  void inspectLibraryEntry(const juce::String &entryId,
+                           std::int32_t nestedRootId);
 
 private:
   /**
@@ -96,7 +124,8 @@ private:
   /**
    * @brief Draws the live graph hierarchy under Library for navigate and save.
    *
-   * Rows are ordered by longest-path rank along sibling links, then
+   * A Main row represents the root canvas; nested groups and elements sit
+   * under it. Rows are ordered by longest-path rank along sibling links, then
    * case-insensitive display name, then id. Feedback loops share a rank.
    * Unconnected boxes sit with sources. Group Input/Output hubs are omitted.
    * @param graph Message-thread graph document.
@@ -117,6 +146,109 @@ private:
   void renderNode(NodeGraph &graph, GraphNode &node,
                   const NodeRendererCallbacks &callbacks);
   /**
+   * @brief Draws live or read-only property editors for one element.
+   * @param graph Message-thread graph document.
+   * @param node Node whose properties are shown.
+   * @param callbacks Runtime actions owned by the plug-in editor.
+   * @param readOnly True to disable commits (library inspect).
+   */
+  void renderNodeParameterEditors(NodeGraph &graph, GraphNode &node,
+                                  const NodeRendererCallbacks &callbacks,
+                                  bool readOnly);
+  /**
+   * @brief Draws live or read-only group name, repeats, and randomize controls.
+   * @param graph Message-thread graph document.
+   * @param group Group whose properties are shown.
+   * @param callbacks Runtime actions owned by the plug-in editor.
+   * @param readOnly True to disable commits (library inspect).
+   */
+  void renderGroupParameterEditors(NodeGraph &graph, GraphGroup &group,
+                                   const NodeRendererCallbacks &callbacks,
+                                   bool readOnly);
+  /**
+   * @brief Draws read-only Parameters bound to a library snapshot entry.
+   * @param boxLibrary Catalog that owns the inspected snapshot.
+   * @param callbacks Runtime actions owned by the plug-in editor.
+   */
+  void renderLibraryInspectParameters(
+      openyourbox::library::UserBoxLibrary &boxLibrary,
+      const NodeRendererCallbacks &callbacks);
+  /**
+   * @brief Inserts a catalog entry onto the focused canvas at the view centre.
+   * @param graph Message-thread graph document.
+   * @param entryId Catalog UUID.
+   * @param nestedRootId Snapshot node/group id, or 0 for the saved root.
+   */
+  void placeLibraryEntryOnFocusedCanvas(NodeGraph &graph,
+                                        const juce::String &entryId,
+                                        std::int32_t nestedRootId);
+  /**
+   * @brief Selects a live box for Parameters without opening nested canvases.
+   * @param graph Message-thread graph document.
+   * @param boxId Node or group identifier.
+   * @param forceTab True to switch the right menu to Parameters.
+   */
+  void selectLiveBox(NodeGraph &graph, std::int32_t boxId, bool forceTab);
+  /**
+   * @brief Focuses the canvas that contains @p boxId and centres on it.
+   *
+   * For a group, @p openInnerGroup enters that group's inner canvas and frames
+   * all of its boxes. Otherwise the parent canvas is focused and the outer box
+   * is centred.
+   * @param graph Message-thread graph document.
+   * @param boxId Node or group identifier.
+   * @param openInnerGroup True to enter a group's inner canvas.
+   */
+  void navigateToBox(NodeGraph &graph, std::int32_t boxId, bool openInnerGroup);
+  /**
+   * @brief Applies a pending editor selection queued from the structure tree.
+   * @param graph Message-thread graph document.
+   */
+  void applyPendingEditorSelection(NodeGraph &graph);
+  /**
+   * @brief Publishes document/layout mutations and patch-gesture edges.
+   * @param callbacks Runtime actions owned by the plug-in editor.
+   */
+  void flushDocumentCallbacks(const NodeRendererCallbacks &callbacks);
+  /**
+   * @brief Accepts live-row, palette, and library drops on a structure target.
+   * @param graph Message-thread graph document.
+   * @param callbacks Runtime actions owned by the plug-in editor.
+   * @param targetParent Destination group, or empty for the project root.
+   * @param highlightMin Screen-space top-left of the highlight rectangle.
+   * @param highlightMax Screen-space bottom-right of the highlight rectangle.
+   */
+  void handleStructureDropTarget(
+      NodeGraph &graph, const NodeRendererCallbacks &callbacks,
+      std::optional<std::int32_t> targetParent, ImVec2 highlightMin,
+      ImVec2 highlightMax);
+  /**
+   * @brief Starts a Project structure drag for a live row.
+   * @param graph Message-thread graph document.
+   * @param boxId Node or group identifier.
+   */
+  void beginStructureDrag(NodeGraph &graph, std::int32_t boxId);
+  /**
+   * @brief Handles Project structure click, double-click, and group open.
+   *
+   * Single-click selects Parameters without changing the focused canvas.
+   * Double-click on a group opens that group's inner canvas. Double-click on a
+   * non-group centres the camera without opening groups. Uses a longer click
+   * window than Dear ImGui's default so tree drag-source tracking cannot swallow
+   * the second click.
+   * @param graph Message-thread graph document.
+   * @param boxId Node or group identifier.
+   */
+  void handleStructureRowClick(NodeGraph &graph, std::int32_t boxId);
+  /**
+   * @brief Selects the inserted or moved box, opens Parameters, and focuses.
+   * @param graph Message-thread graph document.
+   * @param boxId New or moved node or group identifier.
+   * @param destinationParent Destination group, or empty for the root canvas.
+   */
+  void focusAfterStructureMutation(NodeGraph &graph, std::int32_t boxId,
+                                   std::optional<std::int32_t> destinationParent);
+  /**
    * @brief Draws a compact group box with mediating I/O pins.
    * @param graph Message-thread graph document.
    * @param group Group being rendered.
@@ -125,7 +257,7 @@ private:
   void renderGroup(NodeGraph &graph, GraphGroup &group,
                    const NodeRendererCallbacks &callbacks);
   /**
-   * @brief Draws Graph > group breadcrumb navigation above the canvas.
+   * @brief Draws Main > group breadcrumb navigation above the canvas.
    *
    * The trail stays on one line. When it is wider than the canvas it
    * scrolls horizontally, and cropped edges fade out.
@@ -138,6 +270,18 @@ private:
    * @param groupId Group to open, or empty for the root canvas.
    */
   void setCanvasFocus(NodeGraph &graph, std::optional<std::int32_t> groupId);
+  /**
+   * @brief Opens a group's inner canvas and frames every box on it.
+   * @param graph Message-thread graph document.
+   * @param groupId Group whose interior becomes the focused canvas.
+   */
+  void openGroupCanvasFitted(NodeGraph &graph, std::int32_t groupId);
+  /**
+   * @brief Zooms and pans so every box on the focused canvas is visible and centred.
+   * @param graph Message-thread graph document.
+   * @param canvasSize Screen-space size of the graph editor window.
+   */
+  void fitCanvasToContents(NodeGraph &graph, ImVec2 canvasSize);
   /**
    * @brief Parents a newly created box to the focused group when legal.
    * @param graph Message-thread graph document.
@@ -234,6 +378,27 @@ private:
   std::int32_t draggingNodeId = 0;
   /** @brief Group currently being dragged, or zero. */
   std::int32_t draggingGroupId = 0;
+  /**
+   * @brief Box under an in-progress canvas press (before drag threshold).
+   *
+   * While this is set, stored graph transforms are not pushed back into the
+   * editor so the first pixels of a move are not snapped back.
+   */
+  std::int32_t canvasPressBoxId = 0;
+  /** @brief Last canvas-clicked box used for double-click detection. */
+  std::int32_t canvasLastClickBoxId = 0;
+  /** @brief Dear ImGui time of @ref canvasLastClickBoxId. */
+  double canvasLastClickTime = -1.0;
+  /** @brief Screen-space position of @ref canvasLastClickBoxId. */
+  ImVec2 canvasLastClickScreenPos{};
+  /** @brief Last Project structure row used for double-click detection. */
+  std::int32_t structureLastClickBoxId = 0;
+  /** @brief Dear ImGui time of @ref structureLastClickBoxId. */
+  double structureLastClickTime = -1.0;
+  /** @brief Last Factory palette label used for double-click insert. */
+  std::string paletteLastClickLabel;
+  /** @brief Dear ImGui time of @ref paletteLastClickLabel. */
+  double paletteLastClickTime = -1.0;
   /** @brief Editable group name buffers. */
   std::unordered_map<std::int32_t, std::array<char, 48>> groupNameBuffers;
   /** @brief Group targeted by the current context menu. */
@@ -283,6 +448,8 @@ private:
   bool saveBoxOverwrite = false;
   /** @brief Box library bound for the current render frame, or null. */
   openyourbox::library::UserBoxLibrary *activeBoxLibrary = nullptr;
+  /** @brief Editor callbacks bound for the current render frame, or null. */
+  const NodeRendererCallbacks *activeCallbacks = nullptr;
   /** @brief Active choice-property combobox rendered outside canvas coordinates. */
   struct ActivePropertyCombo {
     /** @brief Node that owns the edited property. */
@@ -318,5 +485,43 @@ private:
     /** @brief Whether an insert action is queued. */
     bool pending = false;
   } pendingLinkInsert;
+  /** @brief Session Parameters-tab binding. */
+  SelectionContext selectionContext;
+  /** @brief Signature of the last selection that forced the Parameters tab. */
+  std::int32_t lastSelectionSignature = 0;
+  /**
+   * @brief Editor selection to apply inside the canvas; 0 none, -1 clear.
+   */
+  std::int32_t pendingEditorSelectId = 0;
+  /** @brief True when the canvas should centre on @ref pendingCentrePoint. */
+  bool pendingCentreView = false;
+  /**
+   * @brief True when the next editor frame should frame all boxes on the canvas.
+   */
+  bool pendingFitCanvas = false;
+  /** @brief Canvas-space point to centre after a structure navigation. */
+  ImVec2 pendingCentrePoint{};
+  /** @brief Live box currently dragged from Project structure, or zero. */
+  std::int32_t structureDragSourceId = 0;
+  /** @brief Highlighted structure drop parent, empty for root, when valid. */
+  std::optional<std::int32_t> structureDropTargetParent;
+  /** @brief True when the current structure drop target would accept. */
+  bool structureDropValid = false;
+  /** @brief True when a structure drop highlight rectangle should be drawn. */
+  bool structureDropHighlightActive = false;
+  /** @brief Screen-space top-left of the structure drop highlight. */
+  ImVec2 structureDropHighlightMin{};
+  /** @brief Screen-space bottom-right of the structure drop highlight. */
+  ImVec2 structureDropHighlightMax{};
+  /** @brief Cached snapshot for the active library inspect binding. */
+  juce::ValueTree libraryInspectSnapshot;
+  /**
+   * @brief True when Project structure/library set the live binding this frame.
+   */
+  bool preserveLiveSelection = false;
+  /**
+   * @brief True when User Library inspect must win over leftover canvas selection.
+   */
+  bool preserveLibraryInspect = false;
 };
 } // namespace openyourbox::graph

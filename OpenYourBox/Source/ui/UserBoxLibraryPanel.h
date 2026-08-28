@@ -15,6 +15,36 @@ namespace openyourbox::ui {
 /** @brief Drag-drop payload id for user box library rows. */
 inline constexpr const char *boxLibraryPayloadId = "OPENYOURBOX_BOX_LIBRARY_ID";
 
+/** @brief Font-size factor for Factory, User Library, and Project structure headers. */
+inline constexpr float paletteRootHeaderFontScale = 0.82f;
+
+/**
+ * @brief Pushes gray small-caps style for a top-level palette tree header.
+ *
+ * Tree-node arrows use the text colour, so this mutes both the label and the
+ * expand arrow. Header fill is cleared so hover, selection, and drag-over do
+ * not highlight these section labels. Pair with @ref popPaletteRootHeaderStyle
+ * immediately after TreeNodeEx so nested rows keep the default style.
+ */
+inline void pushPaletteRootHeaderStyle() {
+  const ImVec4 transparent{0.0f, 0.0f, 0.0f, 0.0f};
+  ImGui::PushStyleColor(ImGuiCol_Text,
+                        ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
+  ImGui::PushStyleColor(ImGuiCol_Header, transparent);
+  ImGui::PushStyleColor(ImGuiCol_HeaderHovered, transparent);
+  ImGui::PushStyleColor(ImGuiCol_HeaderActive, transparent);
+  ImGui::PushFont(nullptr, ImGui::GetStyle().FontSizeBase *
+                               paletteRootHeaderFontScale);
+}
+
+/**
+ * @brief Restores style pushed by @ref pushPaletteRootHeaderStyle.
+ */
+inline void popPaletteRootHeaderStyle() {
+  ImGui::PopFont();
+  ImGui::PopStyleColor(4);
+}
+
 /**
  * @brief Drag payload identifying a catalog entry and optional nested snapshot id.
  */
@@ -35,6 +65,18 @@ public:
   struct Callbacks {
     /** @brief User-facing status or validation text. */
     std::function<void(const std::string &)> showMessage;
+    /**
+     * @brief Invoked when a catalog entry or nested subpart is single-clicked.
+     * @param entryId Catalog UUID.
+     * @param nestedRootId Snapshot node/group id, or 0 for the saved root.
+     */
+    std::function<void(const juce::String &, std::int32_t)> inspectRequested;
+    /**
+     * @brief Invoked when a catalog row is double-clicked to insert on the canvas.
+     * @param entryId Catalog UUID.
+     * @param nestedRootId Snapshot node/group id, or 0 for the saved root.
+     */
+    std::function<void(const juce::String &, std::int32_t)> placeRequested;
   };
 
   /**
@@ -111,6 +153,15 @@ private:
   void beginBoxDrag(const library::UserBoxLibraryEntry &entry,
                     std::int32_t nestedRootId) const;
   /**
+   * @brief Handles inspect, double-click insert, and delayed drag on a row.
+   * @param entry Catalog row.
+   * @param nestedRootId Snapshot node/group id, or 0 for the saved root.
+   * @param callbacks Editor-owned actions.
+   */
+  void handleLibraryRowAction(const library::UserBoxLibraryEntry &entry,
+                              std::int32_t nestedRootId,
+                              const Callbacks &callbacks);
+  /**
    * @brief Draws nested snapshot members under a group library entry.
    *
    * Members are ordered by direct links between displayed siblings; when none
@@ -122,7 +173,7 @@ private:
    */
   void renderSnapshotMembers(const library::UserBoxLibraryEntry &entry,
                              const juce::ValueTree &snapshot,
-                             std::int32_t rootId);
+                             std::int32_t rootId, const Callbacks &callbacks);
 
   /** @brief True when the protected Factory root is selected. */
   bool factorySelected = true;
@@ -149,5 +200,11 @@ private:
   /** @brief Snapshot loader bound for the current render pass. */
   std::function<juce::ValueTree(const juce::String &, juce::String &)>
       snapshotLoader;
+  /** @brief Last catalog UUID used for double-click insert. */
+  juce::String lastClickEntryId;
+  /** @brief Last nested snapshot id used with @ref lastClickEntryId. */
+  std::int32_t lastClickNestedRootId = 0;
+  /** @brief Dear ImGui time of the last library row click. */
+  double lastClickTime = -1.0;
 };
 } // namespace openyourbox::ui

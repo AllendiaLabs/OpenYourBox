@@ -132,6 +132,10 @@ private:
   void pollTrainingPreview();
   /** @brief Starts a Train job when gates pass. */
   void handleTrainRun();
+  /**
+   * @brief Requests the Parameters side tab on the next frame.
+   */
+  void focusParametersTab();
   /** @brief Requests the Library side tab on the next frame. */
   void focusLibraryTab();
   /** @brief Imports a file pair chosen via native file choosers. */
@@ -244,7 +248,7 @@ private:
   openyourbox::ui::ErrorModal errorModal;
   /** @brief Copyable warning dialog for inactive repeats and similar notices. */
   openyourbox::ui::ErrorModal warningModal;
-  /** @brief Side-panel tab: 0 info, 1 library, 2 capture, 3 train, 4 presets. */
+  /** @brief Side-panel tab: 0 info, 1 parameters, 2 library, 3 capture, 4 train, 5 presets. */
   int sidePanelTab = 0;
   /** @brief Session width of the right Info column in pixels. */
   float rightPanelWidth = 332.0f;

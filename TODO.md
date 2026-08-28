@@ -40,8 +40,8 @@
 
 - [ ] move parameters from boxes to new tab in right menu
 - [ ] double click on group box to open it (it does not work anymore)
-- [ ] from user library or project structure, clicking on an element should open its property panel
-- [ ] from project structure, double clicking on an element should go to that element (camera centered on it). if it is a group, do not open it, go to its box (in parent canva)
+- [x] from user library or project structure, clicking on an element should open its property panel
+- [x] from project structure, double clicking on a non-group element should go to that element (camera centered on it). double-clicking a group opens its inner canvas
 - [ ] from project structure, dragging an element can move it within the structure, outside a group or in a group. during drag, highlight parent folder/group or new folder it will be added to. highlight by showing bounds of the group, ie a rectangle around its name and content.
 - [ ] from user library, dragging to the canva should enable the user to add to project
 - [ ] now it is very annoying to move a box, I must click on it many times before being able to drag it. clicking on it should directly select it and make it draggable, in one hold click

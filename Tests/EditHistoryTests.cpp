@@ -1,3 +1,4 @@
+#include "graph/NodeGraph.h"
 #include "state/EditHistory.h"
 #include "state/PatchSnapshot.h"
 
@@ -191,6 +192,65 @@ int main() {
   passed &= expect(viewHistory.redo() &&
                        static_cast<int>(viewLive.graphDocument["marker"]) == 1,
                    "redo must still restore the real edit after pan/zoom");
+
+  {
+    using openyourbox::graph::NodeGraph;
+    using openyourbox::graph::NodeType;
+    NodeGraph graph;
+    graph.ensureFixedHostIo();
+    const auto mid = graph.addNode(NodeType::linear, {120.0f, 40.0f});
+    const auto dest = graph.addNode(NodeType::activation, {240.0f, 40.0f});
+    const auto *midNode = graph.findNode(mid);
+    const auto *destNode = graph.findNode(dest);
+    passed &= expect(midNode != nullptr && destNode != nullptr,
+                     "reparent history fixture nodes exist");
+    if (midNode != nullptr && destNode != nullptr) {
+      passed &= expect(graph
+                           .connect(midNode->outputs.front().id,
+                                    destNode->inputs.front().id)
+                           .accepted,
+                       "reparent history fixture is wired");
+      const auto partner = graph.addNode(NodeType::convolution, {80.0f, 120.0f});
+      const auto partnerB = graph.addNode(NodeType::tcn, {200.0f, 120.0f});
+      const auto grouped = graph.createGroup({partner, partnerB});
+      passed &= expect(grouped.accepted, "reparent history destination group exists");
+      openyourbox::state::PatchSnapshot before;
+      before.graphDocument = graph.toValueTree();
+      const auto reparented =
+          graph.reparentBoxLikeInsert(mid, grouped.groupId);
+      passed &= expect(reparented.accepted, "history reparent mutates the graph");
+      openyourbox::state::PatchSnapshot after;
+      after.graphDocument = graph.toValueTree();
+      NodeGraph liveGraph;
+      liveGraph.restoreFromValueTree(after.graphDocument);
+      openyourbox::state::EditHistory reparentHistory(50);
+      reparentHistory.setApplyFn(
+          [&](const openyourbox::state::PatchSnapshot &snapshot,
+              const openyourbox::state::CurrentPresetState &) {
+            liveGraph.restoreFromValueTree(snapshot.graphDocument);
+            return true;
+          });
+      reparentHistory.pushStep("Reparent box", before, after, {}, {});
+      passed &= expect(reparentHistory.undo(), "undo of reparent is available");
+      const auto *undone = liveGraph.findNode(mid);
+      auto undoneIncident = 0;
+      if (undone != nullptr) {
+        for (const auto &link : liveGraph.getLinks()) {
+          if (link.sourcePinId == undone->outputs.front().id ||
+              link.destinationPinId == undone->inputs.front().id)
+            ++undoneIncident;
+        }
+      }
+      passed &= expect(undone != nullptr && !undone->parentGroupId.has_value() &&
+                           undoneIncident > 0,
+                       "undo restores hierarchy and cables after reparent");
+      passed &= expect(reparentHistory.redo(), "redo of reparent is available");
+      const auto *redone = liveGraph.findNode(mid);
+      passed &= expect(redone != nullptr && redone->parentGroupId.has_value() &&
+                           *redone->parentGroupId == grouped.groupId,
+                       "redo reapplies the reparent membership");
+    }
+  }
 
   return passed ? 0 : 1;
 }

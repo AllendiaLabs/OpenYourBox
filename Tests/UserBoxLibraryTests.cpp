@@ -210,6 +210,32 @@ int main() {
                          placed.findNode(*nestedInsert) != nullptr &&
                          placed.findGroup(*nestedInsert) == nullptr,
                      "nested insert places only the selected element");
+
+    const auto host = placed.addNode(openyourbox::graph::NodeType::linear,
+                                     {40.0f, 200.0f});
+    const auto hostB = placed.addNode(openyourbox::graph::NodeType::activation,
+                                      {160.0f, 200.0f});
+    const auto groupedHost = placed.createGroup({host, hostB});
+    passed &= expect(groupedHost.accepted, "structure-insert host group exists");
+    error.clear();
+    const auto intoGroup =
+        e1 != nullptr
+            ? reloaded.insertBox(placed, e1->id,
+                                 openyourbox::graph::defaultNewBoxPosition,
+                                 error)
+            : std::optional<std::int32_t>{};
+    passed &= expect(intoGroup.has_value(),
+                     "library insert into a graph succeeds");
+    if (intoGroup.has_value() && groupedHost.accepted) {
+      const auto parented =
+          placed.addToGroup(groupedHost.groupId, *intoGroup, true);
+      passed &= expect(parented.accepted,
+                       "structure-target insert can parent like a new item");
+      const auto *child = placed.findNode(*intoGroup);
+      passed &= expect(child != nullptr && child->parentGroupId.has_value() &&
+                           *child->parentGroupId == groupedHost.groupId,
+                       "structure insert lands in the highlighted group");
+    }
   }
 
   error.clear();

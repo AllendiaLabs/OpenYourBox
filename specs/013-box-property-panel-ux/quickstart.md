@@ -37,9 +37,9 @@ Expected unit coverage (see contracts / data-model): disconnect-all links, repar
 1. Build a nested group with an inner element; expand **Project structure**.
 2. Single-click the inner element → Parameters shows that element (editable).
 3. Single-click the group → Parameters for the group; inner canvas does **not** open.
-4. Double-click the inner element → view centers on that box on its canvas.
-5. Double-click the group row → parent canvas centers on the group box; group does **not** open.
-6. On canvas, double-click the group box → inner canvas opens.
+4. Double-click the inner element → view centers on that box on its canvas (camera focus; group is not opened from a non-group row).
+5. Double-click the group row → inner canvas opens with the camera fitted to all inner boxes and centred (does **not** jump to the parent canvas).
+6. On canvas, double-click the group box → inner canvas opens with the camera fitted to all inner boxes and centred.
 
 ## Scenario D — Structure reparent (P2)
 

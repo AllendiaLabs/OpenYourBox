@@ -143,9 +143,13 @@ void ImGuiHost::openGLContextClosing() {
 }
 
 void ImGuiHost::drainPendingInput() {
+  const auto modifiers = juce::ModifierKeys::getCurrentModifiersRealtime();
   PendingInputState input;
   {
     const juce::ScopedLock lock(inputLock);
+    pendingInput.modifiers = {modifiers.isCtrlDown(), modifiers.isShiftDown(),
+                              modifiers.isAltDown(), modifiers.isCommandDown()};
+    pendingInput.modifiersChanged = true;
     input = std::move(pendingInput);
     pendingInput.mousePosition = input.mousePosition;
     pendingInput.mouseButtons = input.mouseButtons;

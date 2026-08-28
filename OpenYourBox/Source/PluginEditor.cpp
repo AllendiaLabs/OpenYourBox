@@ -185,8 +185,6 @@ void OpenYourBoxAudioProcessorEditor::renderFrame() {
   right = std::min(right, std::max(minRight, avail.x - minCanvas - splitterWidth));
   rightPanelWidth = right;
 
-  ImGui::BeginChild("GraphArea", ImVec2(-(right + splitterWidth), 0.0f), false,
-                    ImGuiWindowFlags_NoScrollbar);
   openyourbox::graph::NodeRendererCallbacks callbacks;
   callbacks.propertyChanged = [this](std::int32_t nodeId,
                                      const std::string &key, int value) {
@@ -240,6 +238,9 @@ void OpenYourBoxAudioProcessorEditor::renderFrame() {
     beginHistoryGesture(label);
   };
   callbacks.endPatchGesture = [this] { endHistoryGesture(); };
+
+  ImGui::BeginChild("GraphArea", ImVec2(-(right + splitterWidth), 0.0f), false,
+                    ImGuiWindowFlags_NoScrollbar);
   nodeRenderer.render(nodeGraph, callbacks, imguiHost.takeMagnification(),
                       &boxLibrary);
   ImGui::EndChild();
@@ -257,9 +258,11 @@ void OpenYourBoxAudioProcessorEditor::renderFrame() {
 
   ImGui::SameLine(0.0f, 0.0f);
   ImGui::BeginChild("InfoArea", ImVec2(right, 0.0f), true);
+  if (nodeRenderer.consumeForceParametersTab())
+    pendingSidePanelTab = 1;
   auto &pairing = audioProcessor.getCapturePairing();
   auto &library = audioProcessor.getTrainingLibrary();
-  if (ImGui::BeginTabBar("SideTabs")) {
+  if (ImGui::BeginTabBar("SideTabs", ImGuiTabBarFlags_FittingPolicyScroll)) {
     const auto tabFlags = [this](int index) {
       return pendingSidePanelTab == index ? ImGuiTabItemFlags_SetSelected
                                           : ImGuiTabItemFlags_None;
@@ -268,21 +271,25 @@ void OpenYourBoxAudioProcessorEditor::renderFrame() {
       sidePanelTab = 0;
       ImGui::EndTabItem();
     }
-    if (ImGui::BeginTabItem("Library", nullptr, tabFlags(1))) {
+    if (ImGui::BeginTabItem("Parameters", nullptr, tabFlags(1))) {
       sidePanelTab = 1;
       ImGui::EndTabItem();
     }
-    if (ImGui::BeginTabItem("Capture", nullptr, tabFlags(2))) {
+    if (ImGui::BeginTabItem("Library", nullptr, tabFlags(2))) {
       sidePanelTab = 2;
       ImGui::EndTabItem();
     }
-    if (pairing.getPairingRole() != openyourbox::capture::PairingRole::slave &&
-        ImGui::BeginTabItem("Train", nullptr, tabFlags(3))) {
+    if (ImGui::BeginTabItem("Capture", nullptr, tabFlags(3))) {
       sidePanelTab = 3;
       ImGui::EndTabItem();
     }
-    if (ImGui::BeginTabItem("Presets", nullptr, tabFlags(4))) {
+    if (pairing.getPairingRole() != openyourbox::capture::PairingRole::slave &&
+        ImGui::BeginTabItem("Train", nullptr, tabFlags(4))) {
       sidePanelTab = 4;
+      ImGui::EndTabItem();
+    }
+    if (ImGui::BeginTabItem("Presets", nullptr, tabFlags(5))) {
+      sidePanelTab = 5;
       ImGui::EndTabItem();
     }
     pendingSidePanelTab = -1;
@@ -336,6 +343,8 @@ void OpenYourBoxAudioProcessorEditor::renderFrame() {
       [this, runtimeError] { showError(runtimeError, true); },
       [this, graphWarning] { showWarning(graphWarning); });
   } else if (sidePanelTab == 1) {
+    nodeRenderer.renderParametersPanel(nodeGraph, callbacks, &boxLibrary);
+  } else if (sidePanelTab == 2) {
     openyourbox::ui::TrainingLibraryPanel::Callbacks libraryCallbacks;
     libraryCallbacks.importPair = [this] { handleLibraryImport(); };
     libraryCallbacks.importClip = [this] { handleLibraryImportClip(); };
@@ -356,7 +365,7 @@ void OpenYourBoxAudioProcessorEditor::renderFrame() {
     libraryPanel.objective = trainPanel.objective;
     libraryPanel.render(library, libraryCallbacks,
                         audioProcessor.isPreviewPlaying());
-  } else if (sidePanelTab == 2) {
+  } else if (sidePanelTab == 3) {
     openyourbox::ui::CaptureSamplesPanel::Callbacks captureCallbacks;
     captureCallbacks.beginDiscovery = [&pairing] { pairing.beginDiscovery(); };
     captureCallbacks.stopDiscovery = [&pairing] { pairing.stopDiscovery(); };
@@ -392,7 +401,7 @@ void OpenYourBoxAudioProcessorEditor::renderFrame() {
     };
     captureCallbacks.openLibrary = [this] { focusLibraryTab(); };
     capturePanel.render(pairing, pairing.listPeers(), captureCallbacks);
-  } else if (sidePanelTab == 3) {
+  } else if (sidePanelTab == 4) {
     juce::String mixedReason;
     openyourbox::ui::TrainPanel::Gates gates;
     gates.copyrightAcknowledged = copyrightAcknowledgment.isAcknowledged();
@@ -442,7 +451,7 @@ void OpenYourBoxAudioProcessorEditor::renderFrame() {
       showError(detail, true);
     };
     trainPanel.render(trainCoordinator, gates, trainCallbacks);
-  } else if (sidePanelTab == 4) {
+  } else if (sidePanelTab == 5) {
     openyourbox::ui::UserPresetPanel::Callbacks presetCallbacks;
     presetCallbacks.save = [this] { handlePresetSave(); };
     presetCallbacks.saveAs = [this](const juce::String &name, bool overwrite) {
@@ -1006,8 +1015,12 @@ void OpenYourBoxAudioProcessorEditor::applyCompletedTrain() {
     showGraphMessage("Training succeeded: armed chain is Gold");
 }
 
-void OpenYourBoxAudioProcessorEditor::focusLibraryTab() {
+void OpenYourBoxAudioProcessorEditor::focusParametersTab() {
   pendingSidePanelTab = 1;
+}
+
+void OpenYourBoxAudioProcessorEditor::focusLibraryTab() {
+  pendingSidePanelTab = 2;
 }
 
 void OpenYourBoxAudioProcessorEditor::handleLibraryImport() {

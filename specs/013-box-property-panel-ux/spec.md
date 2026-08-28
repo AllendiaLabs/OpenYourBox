@@ -6,7 +6,7 @@
 
 **Status**: Draft
 
-**Input**: User description: "Move parameters from boxes to a new tab in the right menu; simplify boxes to show only name and pins; selecting or clicking a box opens its property panel; fix one-click select-and-drag on boxes; fix group box movement glitches and move randomize control to the property panel; restore double-click on group boxes to open them; from user library or project structure, single-click opens the property panel; from project structure, double-click navigates the camera to the element (groups go to their box on the parent canvas without opening); from project structure, drag to reorganize hierarchy with drop-target highlighting (disconnect then add like a new item); from user library or element list, drag to the canvas or to Project structure to add to the project."
+**Input**: User description: "Move parameters from boxes to a new tab in the right menu; simplify boxes to show only name and pins; selecting or clicking a box opens its property panel; fix one-click select-and-drag on boxes; fix group box movement glitches and move randomize control to the property panel; restore double-click on group boxes to open them; from user library or project structure, single-click opens the property panel; from project structure, double-clicking a group opens that group’s inner canvas; double-clicking a non-group element centers the camera on it; from project structure, drag to reorganize hierarchy with drop-target highlighting (disconnect then add like a new item); from user library or element list, drag to the canvas or to Project structure to add to the project."
 
 ## Clarifications
 
@@ -16,6 +16,11 @@
 - Q: When the user selects or clicks a canvas box, should the right menu automatically switch to the Parameters tab, or stay on whichever tab they already had open? → A: Always switch to the Parameters tab when a box is selected or clicked
 - Q: When the user drops a dragged row onto a highlighted group in Project structure, where should the item be placed, and can library/element-list items drop on Project structure too? → A: Disconnect any existing cables, then add the item into the target group (or project root) using the same placement rules as inserting a new item into the project; users may also drag from the user library or the element list onto Project structure (not only onto the canvas) to add items the same way
 - Q: After a successful drop onto Project structure (reparent or insert from library/element list), should the editor select that item and open its Parameters panel? → A: Select the dropped item and open Parameters (and focus its canvas if the destination scope differs)
+
+### Session 2026-08-28 (follow-up)
+
+- Q: When the user clicks a group row in Project structure, should the editor center the parent canvas on that group box, or open the group’s inner canvas? → A: **Single-click** opens Parameters only and does not change the canvas. **Double-click** opens the group’s inner canvas (more intuitive than camera-focus on the parent). Double-clicking a non-group element still centers the camera on that element; canvas double-click on a group box still opens the inner canvas.
+- Q: When a live box is selected on the canvas, must a User Library click still open that entry’s read-only Parameters? → A: Yes — library inspect must win over leftover canvas selection; clicking a live canvas box afterwards restores live Parameters.
 
 ## User Scenarios & Testing *(mandatory)*
 
@@ -58,7 +63,7 @@ A designer repositions boxes frequently. A single press-and-hold on a box immedi
 
 ### User Story 3 - Project structure tree integration (Priority: P2)
 
-A designer uses the **Project structure** tree (left menu, under Library) to inspect and reorganize the graph. Single-clicking any element or group row opens that item’s property panel in the right menu. Double-clicking navigates the view: for a leaf element, the camera centers on that box on the appropriate canvas; for a group, the camera centers on the group’s box on the **parent** canvas without opening the group’s inner canvas. Dragging a live row within the tree moves it to another group or to the project root: any existing cables on that item are **disconnected**, then the item is added to the drop target using the **same placement rules as inserting a new item** into that scope (not a special sibling-order insert). During drag, the current drop target group/folder (or root) is highlighted by drawing a rectangle around its name and contained rows.
+A designer uses the **Project structure** tree (left menu, under Library) to inspect and reorganize the graph. Single-clicking any element or group row opens that item’s property panel in the right menu without changing the focused canvas. Double-clicking a **leaf** element navigates the view: the camera centers on that box on the appropriate canvas. Double-clicking a **group** row opens that group’s inner canvas (it does not jump to the parent canvas). Dragging a live row within the tree moves it to another group or to the project root: any existing cables on that item are **disconnected**, then the item is added to the drop target using the **same placement rules as inserting a new item** into that scope (not a special sibling-order insert). During drag, the current drop target group/folder (or root) is highlighted by drawing a rectangle around its name and contained rows.
 
 **Why this priority**: Project structure was added for hierarchy navigation; tying it to properties, camera focus, and drag-reparent completes its role as a primary navigation surface.
 
@@ -67,9 +72,9 @@ A designer uses the **Project structure** tree (left menu, under Library) to ins
 **Acceptance Scenarios**:
 
 1. **Given** Project structure is expanded, **When** the user single-clicks an element row, **Then** the right property panel shows that element’s properties on the Parameters tab
-2. **Given** Project structure is expanded, **When** the user single-clicks a group row, **Then** the right property panel shows that group’s properties on the Parameters tab
+2. **Given** Project structure is expanded, **When** the user single-clicks a group row, **Then** the right property panel shows that group’s properties on the Parameters tab and the inner canvas does **not** open
 3. **Given** a leaf element row in Project structure, **When** the user double-clicks it, **Then** the editor navigates to the canvas containing that element and centers the view on the element’s box
-4. **Given** a group row in Project structure, **When** the user double-clicks it, **Then** the editor navigates to the parent canvas and centers the view on the group’s outer box without entering the group’s inner canvas
+4. **Given** a group row in Project structure, **When** the user double-clicks it, **Then** the editor opens that group’s inner canvas with the camera fitted to all inner boxes and centred (it does not navigate to the parent canvas)
 5. **Given** a draggable element or group row, **When** the user starts dragging it within Project structure, **Then** valid drop targets (project root and eligible groups/folders) are visually indicated
 6. **Given** a drag over a target group/folder or root, **When** the pointer is inside that target, **Then** a rectangle highlight wraps the target’s label and its nested rows to show where the item will land
 7. **Given** a connected element dragged onto a valid group (or root) target, **When** the user releases, **Then** all of that element’s cables are disconnected, the element is added into the target scope using the same placement rules as inserting a new item there, the element becomes selected, the Parameters tab opens for it, and if the destination canvas differs the editor focuses that canvas
@@ -88,7 +93,7 @@ A designer browses saved entries in the user box library and built-in items in t
 
 **Acceptance Scenarios**:
 
-1. **Given** an entry in the user library, **When** the user single-clicks it, **Then** the right property panel opens a read-only view of that saved item’s properties
+1. **Given** an entry in the user library, **When** the user single-clicks it (including while a live canvas box is selected), **Then** the right property panel opens a read-only view of that saved item’s properties
 2. **Given** an expanded library entry with nested children, **When** the user single-clicks a nested child row, **Then** the property panel shows that subpart’s saved properties in read-only form
 3. **Given** a library entry’s properties are shown, **When** the user attempts to change a parameter in the panel, **Then** the catalog entry is not modified (controls are not editable, or edits are refused)
 4. **Given** a library entry, **When** the user drags it from the library and drops it on the canvas, **Then** a new instance is inserted at the drop position using existing whole-root insert rules
@@ -109,7 +114,7 @@ A designer works with group boxes. Double-clicking a group box on the canvas ope
 
 **Acceptance Scenarios**:
 
-1. **Given** a group box on the canvas, **When** the user double-clicks its body, **Then** the editor opens that group’s inner canvas (same as entering via hierarchy navigation)
+1. **Given** a group box on the canvas, **When** the user double-clicks its body, **Then** the editor opens that group’s inner canvas with the camera fitted to all inner boxes and centred
 2. **Given** a group box at a stable size, **When** the user drags it across the canvas, **Then** its width and height do not change during or after the drag
 3. **Given** a group box, **When** the user edits group parameters from the property panel, **Then** the on-canvas box does not spuriously resize except when a parameter explicitly defines group bounds (if applicable)
 4. **Given** a group that supports randomize, **When** the user triggers randomize from the property panel, **Then** randomize runs without altering group box dimensions on the canvas
@@ -128,6 +133,7 @@ A designer works with group boxes. Double-clicking a group box on the canvas ope
 - What happens when double-click navigate targets an element on a canvas that is not currently focused? The editor switches to the correct canvas first, then centers on the target box.
 - What happens when multiple boxes are multi-selected on canvas? Property panel behavior follows a clear rule: show shared/common properties if supported, otherwise show a concise multi-selection state without Parameters editing until a single box is selected.
 - What happens when the user tries to edit parameters shown after clicking a library entry? The panel remains read-only; the saved catalog item is unchanged. To edit values, the user must insert an instance into the project and edit that live box.
+- What happens when the user clicks a User Library entry while a live canvas box is selected? Parameters switches to that entry’s read-only inspect view; leftover canvas selection does not restore live Parameters until the user clicks a canvas box or the canvas background.
 
 ## Requirements *(mandatory)*
 
@@ -139,11 +145,11 @@ A designer works with group boxes. Double-clicking a group box on the canvas ope
 - **FR-004**: Randomize actions for applicable box types MUST be available only through the property menu, not on the canvas box.
 - **FR-005**: A single press-and-hold drag gesture on a box body MUST select (if needed) and move the box without requiring prior activation clicks.
 - **FR-006**: Pin/connection interactions MUST take precedence over box-body drag when the user initiates a wiring gesture.
-- **FR-007**: Single-clicking an element or group row in **Project structure** MUST open that item’s property panel in the right menu and MUST switch to the **Parameters** tab.
-- **FR-008**: Single-clicking a user library entry (root or expanded nested row) MUST open a **read-only** property panel for that saved item in the right menu on the **Parameters** tab; the panel MUST NOT write changes back to the library catalog.
+- **FR-007**: Single-clicking an element or group row in **Project structure** MUST open that item’s property panel in the right menu and MUST switch to the **Parameters** tab. Single-clicking a **group** row MUST NOT open that group’s inner canvas.
+- **FR-008**: Single-clicking a user library entry (root or expanded nested row) MUST open a **read-only** property panel for that saved item in the right menu on the **Parameters** tab even when a live canvas box is currently selected; the panel MUST NOT write changes back to the library catalog. Clicking a live canvas box afterwards MUST restore live Parameters for that box.
 - **FR-009**: Double-clicking a leaf element row in **Project structure** MUST navigate to the canvas containing that element and center the view on its box.
-- **FR-010**: Double-clicking a group row in **Project structure** MUST navigate to the parent canvas and center the view on the group’s outer box without opening the group’s inner canvas.
-- **FR-011**: Double-clicking a group box on the canvas MUST open that group’s inner canvas.
+- **FR-010**: Double-clicking a group row in **Project structure** MUST open that group’s inner canvas, fit the camera so every box on that canvas is visible and centred, and MUST NOT navigate to the parent canvas to center on the group’s outer box.
+- **FR-011**: Double-clicking a group box on the canvas MUST open that group’s inner canvas and fit the camera so every box on that canvas is visible and centred.
 - **FR-012**: Users MUST be able to drag live element or group rows within **Project structure** onto the project root or another group, subject to valid hierarchy rules. On a successful drop, the system MUST disconnect all cables attached to the moved item (if any), then add it into the target scope using the **same placement rules as inserting a new item** into that scope. The system MUST then select the moved item, switch to the **Parameters** tab, and focus the destination canvas when it differs from the current canvas.
 - **FR-013**: During any drag that can target **Project structure** (live reparent, library insert, or element-list insert), the system MUST highlight eligible drop targets by drawing a rectangle around the target folder/group/root label and its nested content rows.
 - **FR-014**: Invalid hierarchy drops (including cycles) MUST be rejected with no graph mutation and no cable changes.
@@ -158,7 +164,7 @@ A designer works with group boxes. Double-clicking a group box on the canvas ope
 - **Canvas box**: Visual representation of an element or group on a graph canvas; reduced chrome (name + pins only).
 - **Property panel**: Right-side menu with tabs including **Parameters** for the current selection context.
 - **Selection context**: The currently targeted box, group, library entry, or project-structure row driving property panel content.
-- **Project structure row**: Tree node representing a live graph element or group; supports click, double-click navigate, drag-reparent (disconnect-then-add-like-new), and receives drops from the library and element list.
+- **Project structure row**: Tree node representing a live graph element or group; supports click (Parameters only), double-click (leaf camera-center; group opens inner canvas), drag-reparent (disconnect-then-add-like-new), and receives drops from the library and element list.
 - **Library entry row**: Saved user-box library item (expandable for nested subparts); supports click-for-read-only-properties and drag-to-canvas or drag-to-Project-structure insert. Catalog values are not edited from this panel.
 - **Element-list item**: Built-in palette entry the user can drag onto the canvas or onto Project structure to create a new project instance.
 - **Drop target highlight**: Transient visual bounds rectangle around a group/folder/root row during a Project structure–targeted drag.

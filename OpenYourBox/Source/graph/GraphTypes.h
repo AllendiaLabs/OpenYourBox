@@ -83,16 +83,21 @@ enum class AnalysisView {
   oscilloscope = 3
 };
 
-/** @brief Live modular processing node colour. */
+/** @brief Learned-layer chrome (Linear, Conv1D, ConvTranspose1d, TCN, Bottleneck). */
 inline const juce::Colour liveBlueColour{100, 180, 255};
 /** @brief Frozen Gold node colour. */
 inline const juce::Colour frozenGoldColour{218, 165, 32};
-/** @brief Host audio-input node colour. */
-inline const juce::Colour audioInputColour{70, 200, 150};
-/** @brief Host audio-output node colour. */
-inline const juce::Colour audioOutputColour{240, 160, 80};
+/**
+ * @brief Host and group-hub audio I/O chrome (Audio/Group Input and Output).
+ */
+inline const juce::Colour audioIoColour{70, 200, 150};
 /** @brief Conditioning source node colour for Knob Input and XY Trackpad. */
 inline const juce::Colour conditioningColour{180, 140, 255};
+/**
+ * @brief Pointwise / DSP-helper chrome (Activation, BatchNorm, Utility, Math,
+ *        PQMF, Noise Synth).
+ */
+inline const juce::Colour helperLayerColour{185, 200, 55};
 
 /** @brief Inclusive lower bound for Knob/XY conditioning scalars. */
 inline constexpr float conditioningMinimum = -10.0f;
@@ -122,10 +127,41 @@ inline constexpr int maximumGroupRepeats = 32;
 inline constexpr int maximumGroupNestingDepth = 8;
 /** @brief Bit flag applied to member pin ids drawn as group I/O pins. */
 inline constexpr std::int32_t collapsedPinFlag = 0x20000000;
-/** @brief Group chrome colour for expanded imgui-node-editor frames. */
-inline const juce::Colour groupFrameColour{70, 130, 190};
+/** @brief Group box chrome, distinct from learned-layer blue. */
+inline const juce::Colour groupFrameColour{95, 125, 155};
 /** @brief Highlight colour when an element will be added to a group. */
-inline const juce::Colour groupDropHighlightColour{120, 210, 255};
+inline const juce::Colour groupDropHighlightColour{140, 200, 230};
+/** @brief Default canvas-local origin when inserting or reparenting like a new item. */
+inline const juce::Point<float> defaultNewBoxPosition{250.0f, 140.0f};
+
+/**
+ * @brief How the Parameters tab is bound for the current session.
+ *
+ * Live is an editable graph box, LibraryInspect is a read-only catalog snapshot,
+ * and Multi is a simplified state until a single box is selected.
+ */
+enum class SelectionContextKind {
+  None,
+  Live,
+  LibraryInspect,
+  Multi
+};
+
+/**
+ * @brief Session selection/inspect state that drives the Parameters tab.
+ */
+struct SelectionContext {
+  /** @brief Binding kind for the Parameters tab. */
+  SelectionContextKind kind = SelectionContextKind::None;
+  /** @brief Primary selected node or group when @c kind is Live. */
+  std::optional<std::int32_t> liveBoxId;
+  /** @brief Catalog entry UUID when @c kind is LibraryInspect. */
+  std::string libraryEntryId;
+  /** @brief Nested snapshot root id to inspect; 0 uses the saved entry root. */
+  std::int32_t libraryNestedRootId = 0;
+  /** @brief One-shot request to activate the Parameters tab this frame. */
+  bool forceParametersTab = false;
+};
 
 /**
  * @brief Returns true when @p pinId is a collapsed-group virtual pin.
@@ -435,6 +471,48 @@ inline bool isMathExpressionType(NodeType type) noexcept {
 
 /** @brief Runtime mode represented by a graph node. */
 enum class NodeState { liveBlue, frozenGold };
+
+/**
+ * @brief Canvas chrome colour for a node type and freeze state.
+ *
+ * Frozen Gold and Black Box stay gold. Live boxes use family colours: audio
+ * and group I/O, conditioning sources, learned layers, and helpers.
+ * @param type Semantic node role.
+ * @param state Live Blue or Frozen Gold.
+ */
+inline juce::Colour chromeColourForType(NodeType type,
+                                        NodeState state) noexcept {
+  if (state == NodeState::frozenGold)
+    return frozenGoldColour;
+  switch (type) {
+  case NodeType::audioInput:
+  case NodeType::audioOutput:
+  case NodeType::groupInput:
+  case NodeType::groupOutput:
+    return audioIoColour;
+  case NodeType::knobInput:
+  case NodeType::xyTrackpad:
+    return conditioningColour;
+  case NodeType::activation:
+  case NodeType::batchNorm:
+  case NodeType::merge:
+  case NodeType::mathExpression:
+  case NodeType::pqmfAnalysis:
+  case NodeType::pqmfSynthesis:
+  case NodeType::noiseSynthesizer:
+    return helperLayerColour;
+  case NodeType::linear:
+  case NodeType::convolution:
+  case NodeType::rateConv:
+  case NodeType::convTranspose:
+  case NodeType::tcn:
+  case NodeType::variationalBottleneck:
+    return liveBlueColour;
+  case NodeType::blackBox:
+    return frozenGoldColour;
+  }
+  return liveBlueColour;
+}
 
 /** @brief Direction of a graph pin. */
 enum class PinKind { input, output };
@@ -1186,7 +1264,7 @@ struct RepeatWeightSlot {
 struct GraphGroup {
   /** @brief Stable identifier unique among nodes and groups. */
   std::int32_t id = 0;
-  /** @brief User-visible group title. */
+  /** @brief User-visible group title (canvas boxes append ` (Block)`). */
   std::string name = "Group";
   /** @brief Parent group, or empty at the canvas root. */
   std::optional<std::int32_t> parentGroupId;
@@ -1233,6 +1311,40 @@ struct GroupRepeatStatus {
   /** @brief Candidate parameters that can make the chain shape-compatible. */
   std::vector<GroupRepeatPropertyHint> propertyHints;
 };
+
+/**
+ * @brief Returns the canvas title drawn on a group box.
+ * @param group Group whose stored name is shown.
+ * @param repeatStatus Derived repeat validity; when omitted, @p group.repeats is
+ *        treated as active.
+ * @return The stored name with a ` (Block)` suffix, plus `×N` when requested
+ *         repeats exceed one and `×N→1` when the request is inactive.
+ */
+inline std::string groupBoxDisplayLabel(const GraphGroup &group,
+                                        const GroupRepeatStatus &repeatStatus) {
+  std::string label = group.name + " (Block)";
+  const int requested = std::max(1, repeatStatus.requestedRepeats);
+  if (requested <= 1)
+    return label;
+  label += " \xC3\x97";
+  label += std::to_string(requested);
+  if (!repeatStatus.active)
+    label += "\xE2\x86\x92" + std::to_string(std::max(1, repeatStatus.effectiveRepeats));
+  return label;
+}
+
+/**
+ * @brief Returns the canvas title for a group with no repeat diagnostics.
+ * @param group Group whose stored name is shown.
+ * @return Label from @ref groupBoxDisplayLabel assuming requested repeats are active.
+ */
+inline std::string groupBoxDisplayLabel(const GraphGroup &group) {
+  GroupRepeatStatus status;
+  status.requestedRepeats = group.repeats;
+  status.effectiveRepeats = group.repeats;
+  status.active = true;
+  return groupBoxDisplayLabel(group, status);
+}
 
 /** @brief Outcome of a group create/membership/repeats mutation. */
 struct GroupActionResult {
@@ -1529,6 +1641,10 @@ inline constexpr float groupFitPadding = 28.0f;
 inline constexpr float groupHeaderHeight = 52.0f;
 /** @brief Inset from a group box origin used when mapping member coordinates. */
 inline constexpr float groupContentPad = 8.0f;
+/** @brief Space between Group Input/Output hubs and grouped content. */
+inline constexpr float groupBoundaryContentGap = 48.0f;
+/** @brief Group-canvas origin used when placing a new group's Input hub. */
+inline const juce::Point<float> groupInteriorOrigin{24.0f, 140.0f};
 
 /**
  * @brief Offset from a group box origin used when mapping member coordinates.

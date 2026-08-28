@@ -20,7 +20,7 @@ Canvas boxes show **name + pins only**; stable size; one-click drag; group doubl
 
 - Primary press-drag on box body (not pin): select if needed and move in one gesture (FR-005).
 - Hovered pin / create-link takes precedence (FR-006).
-- Double-click group box on canvas: `setCanvasFocus(group)` to open inner canvas (FR-011). Removing InputText/button steal is required for reliability.
+- Double-click group box on canvas: `openGroupCanvasFitted(group)` to open the inner canvas and frame all inner boxes (FR-011). Removing InputText/button steal is required for reliability.
 
 ## Size stability
 

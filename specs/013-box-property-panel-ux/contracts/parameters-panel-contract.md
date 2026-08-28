@@ -21,6 +21,7 @@ Right-menu **Parameters** tab for live editing and read-only library inspect (FR
 
 - Source: `SelectionContext::LibraryInspect` (entry id + optional nested subpart).
 - Display the same property fields as live where snapshot data allows.
+- A library click MUST bind inspect even when a live canvas box is already selected; leftover editor selection MUST NOT restore live Parameters until the user picks a canvas box or clicks the canvas background.
 - Controls **MUST** be disabled or non-committing; catalog files unchanged.
 - No path from this mode into `UserBoxLibrary` property write/save APIs.
 

@@ -14,6 +14,8 @@
 
 namespace openyourbox::ui {
 namespace {
+/** @brief Time window for User Library double-click insert. */
+constexpr double libraryDoubleClickSeconds = 0.50;
 /**
  * @brief Returns immediate child folder names under @p parent.
  * @param folders All persisted folder paths.
@@ -57,16 +59,33 @@ void fillBuffer(std::array<char, Size> &buffer, const juce::String &text) {
 }
 
 /**
+ * @brief Returns true when the active drag is a user-library catalog row.
+ */
+bool isBoxLibraryDrag() {
+  const auto *payload = ImGui::GetDragDropPayload();
+  return payload != nullptr && payload->IsDataType(boxLibraryPayloadId);
+}
+
+/**
  * @brief Accepts a box-library drag onto the last item and moves it to @p folder.
+ *
+ * Non-library payloads (for example Project structure rows) are ignored so
+ * those items do not draw drop-target chrome.
  * @param library Mutable catalog.
  * @param folder Destination folder path.
  * @param callbacks Editor-owned actions.
+ * @param drawDefaultRect False to skip ImGui's drop-target overlay.
  */
 void acceptBoxDrop(library::UserBoxLibrary &library, const juce::String &folder,
-                   const UserBoxLibraryPanel::Callbacks &callbacks) {
-  if (!ImGui::BeginDragDropTarget())
+                   const UserBoxLibraryPanel::Callbacks &callbacks,
+                   bool drawDefaultRect = true) {
+  if (!isBoxLibraryDrag() || !ImGui::BeginDragDropTarget())
     return;
-  if (const auto *payload = ImGui::AcceptDragDropPayload(boxLibraryPayloadId)) {
+  ImGuiDragDropFlags flags = 0;
+  if (!drawDefaultRect)
+    flags |= ImGuiDragDropFlags_AcceptNoDrawDefaultRect;
+  if (const auto *payload =
+          ImGui::AcceptDragDropPayload(boxLibraryPayloadId, flags)) {
     const auto *drop =
         static_cast<const BoxLibraryDropPayload *>(payload->Data);
     const auto id = juce::String::fromUTF8(drop->entryId);
@@ -307,15 +326,25 @@ void UserBoxLibraryPanel::render(
     const std::function<juce::ValueTree(const juce::String &, juce::String &)>
         &loadSnapshot) {
   snapshotLoader = loadSnapshot;
+  const auto hideForeignDragHover = ImGui::GetDragDropPayload() != nullptr &&
+                                    !isBoxLibraryDrag();
+  if (hideForeignDragHover) {
+    const ImVec4 transparent{0.0f, 0.0f, 0.0f, 0.0f};
+    ImGui::PushStyleColor(ImGuiCol_HeaderHovered, transparent);
+    ImGui::PushStyleColor(ImGuiCol_HeaderActive, transparent);
+  }
   const auto selected = !factorySelected && selectedFolder.isEmpty();
   const auto flags =
       ImGuiTreeNodeFlags_DefaultOpen | ImGuiTreeNodeFlags_OpenOnArrow |
       ImGuiTreeNodeFlags_SpanAvailWidth |
       (selected ? ImGuiTreeNodeFlags_Selected : 0);
-  const auto open = ImGui::TreeNodeEx("User Library", flags);
+  pushPaletteRootHeaderStyle();
+  const auto open =
+      ImGui::TreeNodeEx("USER LIBRARY###User Library", flags);
+  popPaletteRootHeaderStyle();
   if (ImGui::IsItemClicked() && !ImGui::IsItemToggledOpen())
     selectUserFolder({});
-  acceptBoxDrop(library, {}, callbacks);
+  acceptBoxDrop(library, {}, callbacks, false);
   if (ImGui::BeginPopupContextItem("UserLibraryRootMenu")) {
     selectUserFolder({});
     if (ImGui::MenuItem("New folder"))
@@ -345,6 +374,8 @@ void UserBoxLibraryPanel::render(
   }
 
   renderDialogs(library, callbacks);
+  if (hideForeignDragHover)
+    ImGui::PopStyleColor(2);
 }
 
 void UserBoxLibraryPanel::renderFolder(library::UserBoxLibrary &library,
@@ -470,7 +501,7 @@ void UserBoxLibraryPanel::renderEntry(
       (groupEntry ? 0
                   : ImGuiTreeNodeFlags_Leaf | ImGuiTreeNodeFlags_NoTreePushOnOpen);
   const auto open = ImGui::TreeNodeEx("##boxEntry", flags, "%s", label);
-  beginBoxDrag(entry, 0);
+  handleLibraryRowAction(entry, 0, callbacks);
   if (ImGui::BeginPopupContextItem("BoxEntryMenu")) {
     if (ImGui::MenuItem("Rename")) {
       renamingEntryId = entry.id;
@@ -500,7 +531,8 @@ void UserBoxLibraryPanel::renderEntry(
       snapshot = snapshotLoader(entry.id, error);
     if (snapshot.isValid())
       renderSnapshotMembers(entry, snapshot,
-                            static_cast<std::int32_t>(snapshot["rootId"]));
+                            static_cast<std::int32_t>(snapshot["rootId"]),
+                            callbacks);
     else if (error.isNotEmpty() && callbacks.showMessage)
       callbacks.showMessage(error.toStdString());
     ImGui::TreePop();
@@ -521,9 +553,37 @@ void UserBoxLibraryPanel::beginBoxDrag(const library::UserBoxLibraryEntry &entry
   ImGui::EndDragDropSource();
 }
 
+void UserBoxLibraryPanel::handleLibraryRowAction(
+    const library::UserBoxLibraryEntry &entry, std::int32_t nestedRootId,
+    const Callbacks &callbacks) {
+  if (ImGui::IsItemToggledOpen())
+    return;
+  if (ImGui::IsItemClicked(ImGuiMouseButton_Left)) {
+    const auto now = ImGui::GetTime();
+    const auto isDouble = lastClickEntryId == entry.id &&
+                          lastClickNestedRootId == nestedRootId &&
+                          (now - lastClickTime) <= libraryDoubleClickSeconds;
+    lastClickEntryId = entry.id;
+    lastClickNestedRootId = nestedRootId;
+    lastClickTime = now;
+    if (isDouble) {
+      lastClickEntryId.clear();
+      if (callbacks.placeRequested)
+        callbacks.placeRequested(entry.id, nestedRootId);
+    } else if (callbacks.inspectRequested)
+      callbacks.inspectRequested(entry.id, nestedRootId);
+  }
+  if (ImGui::IsItemActive() &&
+      ImGui::IsMouseDragging(ImGuiMouseButton_Left,
+                             ImGui::GetIO().MouseDragThreshold)) {
+    lastClickEntryId.clear();
+    beginBoxDrag(entry, nestedRootId);
+  }
+}
+
 void UserBoxLibraryPanel::renderSnapshotMembers(
     const library::UserBoxLibraryEntry &entry, const juce::ValueTree &snapshot,
-    std::int32_t rootId) {
+    std::int32_t rootId, const Callbacks &callbacks) {
   struct MemberRow {
     std::int32_t id = 0;
     juce::String label;
@@ -576,9 +636,9 @@ void UserBoxLibraryPanel::renderSnapshotMembers(
              : ImGuiTreeNodeFlags_Leaf | ImGuiTreeNodeFlags_NoTreePushOnOpen);
     const auto open =
         ImGui::TreeNodeEx("##member", flags, "%s", row.label.toRawUTF8());
-    beginBoxDrag(entry, row.id);
+    handleLibraryRowAction(entry, row.id, callbacks);
     if (row.isGroup && open) {
-      renderSnapshotMembers(entry, snapshot, row.id);
+      renderSnapshotMembers(entry, snapshot, row.id, callbacks);
       ImGui::TreePop();
     }
     ImGui::PopID();

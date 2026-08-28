@@ -33,10 +33,10 @@ description: "Task list for Box Property Panel UX"
 
 **Purpose**: Confirm design artifacts and inventory UI/graph touch-points before code changes.
 
-- [ ] T001 Verify design artifact cross-links (spec clarifications → contracts → plan) in `specs/013-box-property-panel-ux/plan.md`
-- [ ] T002 [P] Inventory `renderNode` / `renderGroup` inline property, randomize, and size-measure paths in `OpenYourBox/Source/graph/NodeRenderer.cpp` and `OpenYourBox/Source/graph/NodeRenderer.h`
-- [ ] T003 [P] Inventory `SideTabs` / selection sync / drag tracking in `OpenYourBox/Source/PluginEditor.cpp` and `OpenYourBox/Source/graph/NodeRenderer.cpp`
-- [ ] T004 [P] Inventory Project structure click/`setCanvasFocus`, palette/library DnD payloads, and `addToGroup`/`importBox` in `OpenYourBox/Source/graph/NodeRenderer.cpp`, `OpenYourBox/Source/ui/UserBoxLibraryPanel.cpp`, and `OpenYourBox/Source/graph/NodeGraph.cpp`
+- [X] T001 Verify design artifact cross-links (spec clarifications → contracts → plan) in `specs/013-box-property-panel-ux/plan.md`
+- [X] T002 [P] Inventory `renderNode` / `renderGroup` inline property, randomize, and size-measure paths in `OpenYourBox/Source/graph/NodeRenderer.cpp` and `OpenYourBox/Source/graph/NodeRenderer.h`
+- [X] T003 [P] Inventory `SideTabs` / selection sync / drag tracking in `OpenYourBox/Source/PluginEditor.cpp` and `OpenYourBox/Source/graph/NodeRenderer.cpp`
+- [X] T004 [P] Inventory Project structure click/`setCanvasFocus`, palette/library DnD payloads, and `addToGroup`/`importBox` in `OpenYourBox/Source/graph/NodeRenderer.cpp`, `OpenYourBox/Source/ui/UserBoxLibraryPanel.cpp`, and `OpenYourBox/Source/graph/NodeGraph.cpp`
 
 ---
 
@@ -46,15 +46,15 @@ description: "Task list for Box Property Panel UX"
 
 **⚠️ CRITICAL**: No user story work can begin until this phase is complete.
 
-- [ ] T005 Add session `SelectionContext` (None / Live / LibraryInspect / Multi) types and accessors per `specs/013-box-property-panel-ux/data-model.md` in `OpenYourBox/Source/graph/GraphTypes.h` (or `OpenYourBox/Source/graph/NodeRenderer.h` if kept UI-local)
-- [ ] T006 Wire canvas primary selection into `SelectionContext::Live` via `synchronizeSelection` / `getPrimarySelectedNodeId` in `OpenYourBox/Source/graph/NodeRenderer.cpp`
-- [ ] T007 Add empty **Parameters** tab to `SideTabs` and a one-shot force-tab-to-Parameters API per `specs/013-box-property-panel-ux/contracts/parameters-panel-contract.md` in `OpenYourBox/Source/PluginEditor.cpp` and `OpenYourBox/Source/PluginEditor.h`
-- [ ] T008 Extract shared property-row / randomize rendering helpers (callable from Parameters tab) from box chrome into methods on `NodeRenderer` (or a small helper) in `OpenYourBox/Source/graph/NodeRenderer.cpp` and `OpenYourBox/Source/graph/NodeRenderer.h`
-- [ ] T009 Implement `disconnectAllLinksForBox` (incident-link cleanup without deleting the box) in `OpenYourBox/Source/graph/NodeGraph.cpp` and `OpenYourBox/Source/graph/NodeGraph.h`
-- [ ] T010 Implement `reparentBoxLikeInsert` (cycle reject → disconnect → detach → attach → new-item placement) per `specs/013-box-property-panel-ux/contracts/structure-hierarchy-dnd-contract.md` in `OpenYourBox/Source/graph/NodeGraph.cpp` and `OpenYourBox/Source/graph/NodeGraph.h`
-- [ ] T011 Ensure reparent/disconnect participate in existing undo/patch gestures via `documentChanged` / history hooks in `OpenYourBox/Source/graph/NodeRenderer.cpp` and `OpenYourBox/Source/PluginEditor.cpp`
-- [ ] T012 [P] Add disconnect-all, reparent into group/root, and cycle-reject coverage in `Tests/GraphGroupTests.cpp`
-- [ ] T013 [P] Add undo/redo coverage for reparent gesture in `Tests/EditHistoryTests.cpp` (or extend `Tests/GraphGroupTests.cpp` if history fixtures live there)
+- [X] T005 Add session `SelectionContext` (None / Live / LibraryInspect / Multi) types and accessors per `specs/013-box-property-panel-ux/data-model.md` in `OpenYourBox/Source/graph/GraphTypes.h` (or `OpenYourBox/Source/graph/NodeRenderer.h` if kept UI-local)
+- [X] T006 Wire canvas primary selection into `SelectionContext::Live` via `synchronizeSelection` / `getPrimarySelectedNodeId` in `OpenYourBox/Source/graph/NodeRenderer.cpp`
+- [X] T007 Add empty **Parameters** tab to `SideTabs` and a one-shot force-tab-to-Parameters API per `specs/013-box-property-panel-ux/contracts/parameters-panel-contract.md` in `OpenYourBox/Source/PluginEditor.cpp` and `OpenYourBox/Source/PluginEditor.h`
+- [X] T008 Extract shared property-row / randomize rendering helpers (callable from Parameters tab) from box chrome into methods on `NodeRenderer` (or a small helper) in `OpenYourBox/Source/graph/NodeRenderer.cpp` and `OpenYourBox/Source/graph/NodeRenderer.h`
+- [X] T009 Implement `disconnectAllLinksForBox` (incident-link cleanup without deleting the box) in `OpenYourBox/Source/graph/NodeGraph.cpp` and `OpenYourBox/Source/graph/NodeGraph.h`
+- [X] T010 Implement `reparentBoxLikeInsert` (cycle reject → disconnect → detach → attach → new-item placement) per `specs/013-box-property-panel-ux/contracts/structure-hierarchy-dnd-contract.md` in `OpenYourBox/Source/graph/NodeGraph.cpp` and `OpenYourBox/Source/graph/NodeGraph.h`
+- [X] T011 Ensure reparent/disconnect participate in existing undo/patch gestures via `documentChanged` / history hooks in `OpenYourBox/Source/graph/NodeRenderer.cpp` and `OpenYourBox/Source/PluginEditor.cpp`
+- [X] T012 [P] Add disconnect-all, reparent into group/root, and cycle-reject coverage in `Tests/GraphGroupTests.cpp`
+- [X] T013 [P] Add undo/redo coverage for reparent gesture in `Tests/EditHistoryTests.cpp` (or extend `Tests/GraphGroupTests.cpp` if history fixtures live there)
 
 **Checkpoint**: Foundation ready — SelectionContext exists; Parameters tab shell present; graph can disconnect+reparent with tests green.
 
@@ -68,14 +68,14 @@ description: "Task list for Box Property Panel UX"
 
 ### Implementation for User Story 1
 
-- [ ] T014 [US1] Render live Parameters panel for `SelectionContext::Live` (node + group properties) using extracted helpers in `OpenYourBox/Source/graph/NodeRenderer.cpp` and invoke it from the Parameters tab in `OpenYourBox/Source/PluginEditor.cpp`
-- [ ] T015 [US1] Force Parameters tab on canvas select/click (even when another SideTab was active) in `OpenYourBox/Source/PluginEditor.cpp` and `OpenYourBox/Source/graph/NodeRenderer.cpp`
-- [ ] T016 [US1] Strip inline parameter fields from `renderNode` (name + pins only) per `specs/013-box-property-panel-ux/contracts/slim-box-chrome-contract.md` in `OpenYourBox/Source/graph/NodeRenderer.cpp`
-- [ ] T017 [US1] Strip inline parameter fields, repeats editor, and randomize from `renderGroup`; keep non-stealing name display in `OpenYourBox/Source/graph/NodeRenderer.cpp`
-- [ ] T018 [US1] Move randomize/reset actions into Parameters panel only (element + group) in `OpenYourBox/Source/graph/NodeRenderer.cpp`
-- [ ] T019 [US1] Move group name / copy-count (repeats) editors into Parameters so canvas body does not steal focus in `OpenYourBox/Source/graph/NodeRenderer.cpp`
-- [ ] T020 [US1] Multi-select: show concise Parameters state without full edit until single selection in `OpenYourBox/Source/graph/NodeRenderer.cpp` and `OpenYourBox/Source/PluginEditor.cpp`
-- [ ] T021 [US1] Confirm property edits use existing change callbacks / undo gestures and do not resize box chrome in `OpenYourBox/Source/graph/NodeRenderer.cpp`
+- [X] T014 [US1] Render live Parameters panel for `SelectionContext::Live` (node + group properties) using extracted helpers in `OpenYourBox/Source/graph/NodeRenderer.cpp` and invoke it from the Parameters tab in `OpenYourBox/Source/PluginEditor.cpp`
+- [X] T015 [US1] Force Parameters tab on canvas select/click (even when another SideTab was active) in `OpenYourBox/Source/PluginEditor.cpp` and `OpenYourBox/Source/graph/NodeRenderer.cpp`
+- [X] T016 [US1] Strip inline parameter fields from `renderNode` (name + pins only) per `specs/013-box-property-panel-ux/contracts/slim-box-chrome-contract.md` in `OpenYourBox/Source/graph/NodeRenderer.cpp`
+- [X] T017 [US1] Strip inline parameter fields, repeats editor, and randomize from `renderGroup`; keep non-stealing name display in `OpenYourBox/Source/graph/NodeRenderer.cpp`
+- [X] T018 [US1] Move randomize/reset actions into Parameters panel only (element + group) in `OpenYourBox/Source/graph/NodeRenderer.cpp`
+- [X] T019 [US1] Move group name / copy-count (repeats) editors into Parameters so canvas body does not steal focus in `OpenYourBox/Source/graph/NodeRenderer.cpp`
+- [X] T020 [US1] Multi-select: show concise Parameters state without full edit until single selection in `OpenYourBox/Source/graph/NodeRenderer.cpp` and `OpenYourBox/Source/PluginEditor.cpp`
+- [X] T021 [US1] Confirm property edits use existing change callbacks / undo gestures and do not resize box chrome in `OpenYourBox/Source/graph/NodeRenderer.cpp`
 
 **Checkpoint**: US1 complete — boxes are slim; Parameters is the only edit surface for relocated controls; select always opens Parameters.
 
@@ -89,10 +89,10 @@ description: "Task list for Box Property Panel UX"
 
 ### Implementation for User Story 2
 
-- [ ] T022 [US2] Verify / adjust node drag tracking so unselected hovered box (no pin) starts drag without a prior activation click in `OpenYourBox/Source/graph/NodeRenderer.cpp`
-- [ ] T023 [US2] Ensure pin/link hover still suppresses box drag (FR-006) in `OpenYourBox/Source/graph/NodeRenderer.cpp`
-- [ ] T024 [US2] Confirm `ed::SelectButtonIndex` / `DragButtonIndex` and `syncEditorTransforms` do not require a second click after chrome removal in `OpenYourBox/Source/graph/NodeRenderer.cpp`
-- [ ] T025 [US2] Manually validate overlapping-box topmost drag behavior and document any residual hit-region fix in `OpenYourBox/Source/graph/NodeRenderer.cpp`
+- [X] T022 [US2] Verify / adjust node drag tracking so unselected hovered box (no pin) starts drag without a prior activation click in `OpenYourBox/Source/graph/NodeRenderer.cpp`
+- [X] T023 [US2] Ensure pin/link hover still suppresses box drag (FR-006) in `OpenYourBox/Source/graph/NodeRenderer.cpp`
+- [X] T024 [US2] Confirm `ed::SelectButtonIndex` / `DragButtonIndex` and `syncEditorTransforms` do not require a second click after chrome removal in `OpenYourBox/Source/graph/NodeRenderer.cpp`
+- [X] T025 [US2] Manually validate overlapping-box topmost drag behavior and document any residual hit-region fix in `OpenYourBox/Source/graph/NodeRenderer.cpp`
 
 **Checkpoint**: US2 complete — one continuous press-drag moves boxes; wiring unchanged.
 
@@ -100,19 +100,19 @@ description: "Task list for Box Property Panel UX"
 
 ## Phase 5: User Story 3 — Project structure tree integration (Priority: P2)
 
-**Goal**: Structure single-click opens Parameters; double-click navigates (groups stay closed); DnD reparent disconnects then adds like new with highlight; post-drop select + Parameters + destination focus.
+**Goal**: Structure single-click opens Parameters without changing canvas; group double-click opens the inner canvas; leaf double-click camera-navigates; DnD reparent disconnects then adds like new with highlight; post-drop select + Parameters + destination focus.
 
 **Independent Test**: `quickstart.md` Scenarios C–D — click/dblclick rules; wired element reparent clears cables; cycle reject; undo.
 
 ### Implementation for User Story 3
 
-- [ ] T026 [US3] Change Project structure single-click to select live box and force Parameters **without** opening group canvases per `specs/013-box-property-panel-ux/contracts/project-structure-navigation-contract.md` in `OpenYourBox/Source/graph/NodeRenderer.cpp`
-- [ ] T027 [US3] Implement Project structure double-click: leaf → focus containing canvas + center on box; group → parent canvas + center on outer box (no `setCanvasFocus(group)`) in `OpenYourBox/Source/graph/NodeRenderer.cpp`
-- [ ] T028 [US3] Add structure drag source for live rows and eligible drop targets (root + non-cyclic groups) in `OpenYourBox/Source/graph/NodeRenderer.cpp`
-- [ ] T029 [US3] Draw drop-target highlight rectangle around target label + nested rows during structure DnD in `OpenYourBox/Source/graph/NodeRenderer.cpp`
-- [ ] T030 [US3] On valid structure drop of a live row, call `reparentBoxLikeInsert`, then select result, force Parameters, and focus destination canvas if needed in `OpenYourBox/Source/graph/NodeRenderer.cpp`
-- [ ] T031 [US3] On invalid structure drop, cancel with no hierarchy/cable mutation and clear highlight in `OpenYourBox/Source/graph/NodeRenderer.cpp`
-- [ ] T032 [US3] Refresh Project structure after undo/redo so stale ids cannot open Parameters in `OpenYourBox/Source/graph/NodeRenderer.cpp`
+- [X] T026 [US3] Change Project structure single-click to select live box and force Parameters **without** opening group canvases per `specs/013-box-property-panel-ux/contracts/project-structure-navigation-contract.md` in `OpenYourBox/Source/graph/NodeRenderer.cpp`
+- [X] T027 [US3] Implement Project structure double-click: leaf → focus containing canvas + center on box; group → open inner canvas (`setCanvasFocus(group)`) in `OpenYourBox/Source/graph/NodeRenderer.cpp`
+- [X] T028 [US3] Add structure drag source for live rows and eligible drop targets (root + non-cyclic groups) in `OpenYourBox/Source/graph/NodeRenderer.cpp`
+- [X] T029 [US3] Draw drop-target highlight rectangle around target label + nested rows during structure DnD in `OpenYourBox/Source/graph/NodeRenderer.cpp`
+- [X] T030 [US3] On valid structure drop of a live row, call `reparentBoxLikeInsert`, then select result, force Parameters, and focus destination canvas if needed in `OpenYourBox/Source/graph/NodeRenderer.cpp`
+- [X] T031 [US3] On invalid structure drop, cancel with no hierarchy/cable mutation and clear highlight in `OpenYourBox/Source/graph/NodeRenderer.cpp`
+- [X] T032 [US3] Refresh Project structure after undo/redo so stale ids cannot open Parameters in `OpenYourBox/Source/graph/NodeRenderer.cpp`
 
 **Checkpoint**: US3 complete — structure navigates and reparents per contracts; cables cleared on move.
 
@@ -126,13 +126,13 @@ description: "Task list for Box Property Panel UX"
 
 ### Implementation for User Story 4
 
-- [ ] T033 [US4] On user-library entry/subpart single-click, set `SelectionContext::LibraryInspect` and force Parameters in `OpenYourBox/Source/ui/UserBoxLibraryPanel.cpp` and `OpenYourBox/Source/PluginEditor.cpp`
-- [ ] T034 [US4] Render read-only Parameters for library snapshot binding (no catalog writes) per `specs/013-box-property-panel-ux/contracts/parameters-panel-contract.md` in `OpenYourBox/Source/graph/NodeRenderer.cpp` and `OpenYourBox/Source/library/UserBoxLibrary.cpp` / `.h` as needed
-- [ ] T035 [US4] Accept `OPENYOURBOX_BOX_LIBRARY_ID` drops on Project structure targets → `insertBox`/`importBox` into highlighted scope with new-item placement in `OpenYourBox/Source/graph/NodeRenderer.cpp`
-- [ ] T036 [US4] Accept `OPENYOURBOX_NODE_TYPE` (element list) drops on Project structure targets → `addNode` into highlighted scope with new-item placement in `OpenYourBox/Source/graph/NodeRenderer.cpp`
-- [ ] T037 [US4] After structure insert success: select new instance, force Parameters, focus destination canvas when needed in `OpenYourBox/Source/graph/NodeRenderer.cpp`
-- [ ] T038 [US4] Keep canvas drops for library and palette at pointer (existing semantics); cancel when release is outside canvas and outside valid structure targets in `OpenYourBox/Source/graph/NodeRenderer.cpp`
-- [ ] T039 [P] [US4] Extend insert-into-parent / nested-subpart coverage if needed in `Tests/UserBoxLibraryTests.cpp`
+- [X] T033 [US4] On user-library entry/subpart single-click, set `SelectionContext::LibraryInspect` and force Parameters in `OpenYourBox/Source/ui/UserBoxLibraryPanel.cpp` and `OpenYourBox/Source/PluginEditor.cpp`
+- [X] T034 [US4] Render read-only Parameters for library snapshot binding (no catalog writes) per `specs/013-box-property-panel-ux/contracts/parameters-panel-contract.md` in `OpenYourBox/Source/graph/NodeRenderer.cpp` and `OpenYourBox/Source/library/UserBoxLibrary.cpp` / `.h` as needed
+- [X] T035 [US4] Accept `OPENYOURBOX_BOX_LIBRARY_ID` drops on Project structure targets → `insertBox`/`importBox` into highlighted scope with new-item placement in `OpenYourBox/Source/graph/NodeRenderer.cpp`
+- [X] T036 [US4] Accept `OPENYOURBOX_NODE_TYPE` (element list) drops on Project structure targets → `addNode` into highlighted scope with new-item placement in `OpenYourBox/Source/graph/NodeRenderer.cpp`
+- [X] T037 [US4] After structure insert success: select new instance, force Parameters, focus destination canvas when needed in `OpenYourBox/Source/graph/NodeRenderer.cpp`
+- [X] T038 [US4] Keep canvas drops for library and palette at pointer (existing semantics); cancel when release is outside canvas and outside valid structure targets in `OpenYourBox/Source/graph/NodeRenderer.cpp`
+- [X] T039 [P] [US4] Extend insert-into-parent / nested-subpart coverage if needed in `Tests/UserBoxLibraryTests.cpp`
 
 **Checkpoint**: US4 complete — inspect is read-only; structure and canvas are dual insert surfaces.
 
@@ -146,10 +146,10 @@ description: "Task list for Box Property Panel UX"
 
 ### Implementation for User Story 5
 
-- [ ] T040 [US5] Restore reliable canvas double-click → `setCanvasFocus(group)` after chrome removal; verify context-menu Open still works in `OpenYourBox/Source/graph/NodeRenderer.cpp`
-- [ ] T041 [US5] Stop content-measure feedback from removed widgets so `group.size` / `node.size` stay stable during drag per slim-box contract in `OpenYourBox/Source/graph/NodeRenderer.cpp`
-- [ ] T042 [US5] Guard against Parameters/randomize edits causing on-canvas group resize in `OpenYourBox/Source/graph/NodeRenderer.cpp`
-- [ ] T043 [US5] Manually validate nested-group open/drag stability against Scenario F in `specs/013-box-property-panel-ux/quickstart.md`
+- [X] T040 [US5] Restore reliable canvas double-click → `setCanvasFocus(group)` after chrome removal; verify context-menu Open still works in `OpenYourBox/Source/graph/NodeRenderer.cpp`
+- [X] T041 [US5] Stop content-measure feedback from removed widgets so `group.size` / `node.size` stay stable during drag per slim-box contract in `OpenYourBox/Source/graph/NodeRenderer.cpp`
+- [X] T042 [US5] Guard against Parameters/randomize edits causing on-canvas group resize in `OpenYourBox/Source/graph/NodeRenderer.cpp`
+- [X] T043 [US5] Manually validate nested-group open/drag stability against Scenario F in `specs/013-box-property-panel-ux/quickstart.md`
 
 **Checkpoint**: US5 complete — group open works; no spontaneous size glitches.
 
@@ -159,11 +159,11 @@ description: "Task list for Box Property Panel UX"
 
 **Purpose**: End-to-end validation and cleanup across stories.
 
-- [ ] T044 Run full manual matrix in `specs/013-box-property-panel-ux/quickstart.md` Scenarios A–F and note gaps
-- [ ] T045 [P] Mark completed TODO items for this feature in `TODO.md` (lines covering property panel / structure / library drag / box drag / group glitch)
-- [ ] T046 [P] Doxygen for new public APIs (`disconnectAllLinksForBox`, `reparentBoxLikeInsert`, SelectionContext, Parameters force-tab) in `OpenYourBox/Source/graph/NodeGraph.h`, `OpenYourBox/Source/graph/GraphTypes.h` / `NodeRenderer.h`, and `OpenYourBox/Source/PluginEditor.h`
-- [ ] T047 Code cleanup: remove dead on-box UI helpers left unused after relocation in `OpenYourBox/Source/graph/NodeRenderer.cpp`
-- [ ] T048 Confirm Info / Capture / Train / Presets tabs and freeze flows unchanged in `OpenYourBox/Source/PluginEditor.cpp`
+- [X] T044 Run full manual matrix in `specs/013-box-property-panel-ux/quickstart.md` Scenarios A–F and note gaps
+- [X] T045 [P] Mark completed TODO items for this feature in `TODO.md` (lines covering property panel / structure / library drag / box drag / group glitch)
+- [X] T046 [P] Doxygen for new public APIs (`disconnectAllLinksForBox`, `reparentBoxLikeInsert`, SelectionContext, Parameters force-tab) in `OpenYourBox/Source/graph/NodeGraph.h`, `OpenYourBox/Source/graph/GraphTypes.h` / `NodeRenderer.h`, and `OpenYourBox/Source/PluginEditor.h`
+- [X] T047 Code cleanup: remove dead on-box UI helpers left unused after relocation in `OpenYourBox/Source/graph/NodeRenderer.cpp`
+- [X] T048 Confirm Info / Capture / Train / Presets tabs and freeze flows unchanged in `OpenYourBox/Source/PluginEditor.cpp`
 
 ---
 

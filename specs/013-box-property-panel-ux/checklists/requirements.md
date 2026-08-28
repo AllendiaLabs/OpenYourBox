@@ -33,6 +33,7 @@
 
 - Validation passed on first iteration (2026-08-28).
 - Clarification session 2026-08-28 resolved library read-only panel, Parameters-tab focus on select, disconnect-then-add-like-new reparent, library/element-list → Project structure drops, and post-drop select + Parameters + destination canvas focus.
+- Follow-up 2026-08-28: Project structure **double-click** on a group opens the inner canvas (single-click is Parameters only); User Library inspect wins over leftover canvas selection.
 - Spec builds on 011-editor-ux-params (Project structure, library trees) and 006-element-groups-library (groups, library insert); dependencies captured in Assumptions.
 - Multi-selection property panel behavior documented as simplified state; full multi-parameter edit explicitly out of scope.
 - Ready for `/speckit-plan`.

@@ -369,6 +369,96 @@ void setItemStoredPosition(openyourbox::graph::NodeGraph &graph,
 }
 
 /**
+ * @brief Places Group Input/Output around members, preserving relative layout.
+ *
+ * Content stays in its original arrangement. The cluster is translated so
+ * Group Input sits on the left and Group Output on the right, each vertically
+ * centred on the content and separated by @ref groupBoundaryContentGap.
+ * @param graph Graph to mutate.
+ * @param groupId Group whose interior was just given boundary hubs.
+ */
+void layoutGroupInteriorAroundBoundaryHubs(
+    openyourbox::graph::NodeGraph &graph, std::int32_t groupId) {
+  using openyourbox::graph::NodeType;
+  using openyourbox::graph::groupBoundaryContentGap;
+  using openyourbox::graph::groupInteriorOrigin;
+  auto *group = graph.findGroup(groupId);
+  if (group == nullptr)
+    return;
+
+  openyourbox::graph::GraphNode *inputHub = nullptr;
+  openyourbox::graph::GraphNode *outputHub = nullptr;
+  std::vector<std::int32_t> contentIds;
+  contentIds.reserve(group->memberIds.size());
+  for (const auto memberId : group->memberIds) {
+    if (auto *node = graph.findNode(memberId)) {
+      if (node->type == NodeType::groupInput)
+        inputHub = node;
+      else if (node->type == NodeType::groupOutput)
+        outputHub = node;
+      else
+        contentIds.push_back(memberId);
+    } else if (graph.findGroup(memberId) != nullptr) {
+      contentIds.push_back(memberId);
+    }
+  }
+  if (inputHub == nullptr || outputHub == nullptr)
+    return;
+
+  const auto hubExtent = [](const openyourbox::graph::GraphNode &hub) {
+    return juce::Point<float>(std::max(8.0f, hub.size.x),
+                               std::max(8.0f, hub.size.y));
+  };
+  const auto inputSize = hubExtent(*inputHub);
+  const auto outputSize = hubExtent(*outputHub);
+
+  auto contentMin = juce::Point<float>(std::numeric_limits<float>::max(),
+                                        std::numeric_limits<float>::max());
+  auto contentMax = juce::Point<float>(std::numeric_limits<float>::lowest(),
+                                        std::numeric_limits<float>::lowest());
+  auto anyContent = false;
+  for (const auto id : contentIds) {
+    const auto bounds = memberBounds(graph, id);
+    if (!bounds.has_value())
+      continue;
+    const auto size = juce::Point<float>(std::max(8.0f, bounds->second.x),
+                                        std::max(8.0f, bounds->second.y));
+    anyContent = true;
+    contentMin.x = std::min(contentMin.x, bounds->first.x);
+    contentMin.y = std::min(contentMin.y, bounds->first.y);
+    contentMax.x = std::max(contentMax.x, bounds->first.x + size.x);
+    contentMax.y = std::max(contentMax.y, bounds->first.y + size.y);
+  }
+
+  if (!anyContent) {
+    inputHub->position = groupInteriorOrigin;
+    outputHub->position = {groupInteriorOrigin.x + inputSize.x +
+                               groupBoundaryContentGap * 2.0f,
+                           groupInteriorOrigin.y};
+    return;
+  }
+
+  const auto targetContentMinX =
+      groupInteriorOrigin.x + inputSize.x + groupBoundaryContentGap;
+  const auto contentCenterY = (contentMin.y + contentMax.y) * 0.5f;
+  const auto targetCenterY = groupInteriorOrigin.y + inputSize.y * 0.5f;
+  const auto translation = juce::Point<float>(targetContentMinX - contentMin.x,
+                                               targetCenterY - contentCenterY);
+  for (const auto id : contentIds) {
+    const auto bounds = memberBounds(graph, id);
+    if (!bounds.has_value())
+      continue;
+    setItemStoredPosition(graph, id, bounds->first + translation);
+  }
+  contentMin += translation;
+  contentMax += translation;
+  const auto centredY = (contentMin.y + contentMax.y) * 0.5f;
+  inputHub->position = {groupInteriorOrigin.x, centredY - inputSize.y * 0.5f};
+  outputHub->position = {contentMax.x + groupBoundaryContentGap,
+                          centredY - outputSize.y * 0.5f};
+}
+
+/**
  * @brief Canvas-space origin of a node or nested group.
  * @param graph Graph owning layout.
  * @param memberId Node or group identifier.
@@ -2038,21 +2128,7 @@ std::string firstIncompatibleLinkMessage(const openyourbox::graph::NodeGraph &gr
 
 juce::Colour colourForType(openyourbox::graph::NodeType type,
                            openyourbox::graph::NodeState state) {
-  using openyourbox::graph::NodeType;
-  if (state == openyourbox::graph::NodeState::frozenGold ||
-      type == NodeType::blackBox)
-    return openyourbox::graph::frozenGoldColour;
-  switch (type) {
-  case NodeType::audioInput:
-    return openyourbox::graph::audioInputColour;
-  case NodeType::audioOutput:
-    return openyourbox::graph::audioOutputColour;
-  case NodeType::knobInput:
-  case NodeType::xyTrackpad:
-    return openyourbox::graph::conditioningColour;
-  default:
-    return openyourbox::graph::liveBlueColour;
-  }
+  return openyourbox::graph::chromeColourForType(type, state);
 }
 
 const char *nodeTypeName(openyourbox::graph::NodeType type) noexcept {
@@ -4162,10 +4238,10 @@ void NodeGraph::ensureGroupBoundaryNodes(std::int32_t groupId,
     leaves.insert(leaf);
 
   const auto inputId =
-      addNode(NodeType::groupInput, {16.0f, 72.0f}, groupId);
+      addNode(NodeType::groupInput, groupInteriorOrigin, groupId);
   const auto outputId = addNode(
       NodeType::groupOutput,
-      {std::max(16.0f, group->size.x - 196.0f), 72.0f}, groupId);
+      {groupInteriorOrigin.x + 220.0f, groupInteriorOrigin.y}, groupId);
   auto *inputHub = findNode(inputId);
   auto *outputHub = findNode(outputId);
   if (inputHub == nullptr || outputHub == nullptr)
@@ -4208,6 +4284,7 @@ void NodeGraph::ensureGroupBoundaryNodes(std::int32_t groupId,
         {nextLinkId++, memberPin, outputHub->inputs[index].id});
   }
   refreshPropagatedPinShapes(*this);
+  layoutGroupInteriorAroundBoundaryHubs(*this, groupId);
 }
 
 GroupActionResult
@@ -4453,6 +4530,112 @@ GroupActionResult NodeGraph::removeFromGroup(std::int32_t memberId) {
   } else if (findGroup(memberId) != nullptr)
     refreshRepeatSlotsForGroup(*this, memberId);
   return {true, {}, *parent};
+}
+
+GroupActionResult NodeGraph::disconnectAllLinksForBox(std::int32_t boxId) {
+  std::unordered_set<std::int32_t> pins;
+  bool groupBox = false;
+  if (const auto *node = findNode(boxId)) {
+    for (const auto &pin : node->inputs)
+      pins.insert(pin.id);
+    for (const auto &pin : node->outputs)
+      pins.insert(pin.id);
+  } else if (findGroup(boxId) != nullptr) {
+    groupBox = true;
+    std::unordered_set<std::int32_t> nodeIds;
+    std::unordered_set<std::int32_t> groupIds;
+    collectGroupSubtree(*this, boxId, nodeIds, groupIds);
+    for (const auto nodeId : nodeIds) {
+      const auto *member = findNode(nodeId);
+      if (member == nullptr)
+        continue;
+      for (const auto &pin : member->inputs)
+        pins.insert(pin.id);
+      for (const auto &pin : member->outputs)
+        pins.insert(pin.id);
+    }
+  } else
+    return {false, "Box no longer exists", 0};
+
+  const auto oldSize = links.size();
+  if (groupBox) {
+    links.erase(std::remove_if(links.begin(), links.end(),
+                               [&pins](const GraphLink &link) {
+                                 const auto sourceInside =
+                                     pins.count(link.sourcePinId) != 0;
+                                 const auto destInside =
+                                     pins.count(link.destinationPinId) != 0;
+                                 return sourceInside != destInside;
+                               }),
+                links.end());
+  } else {
+    links.erase(std::remove_if(links.begin(), links.end(),
+                               [&pins](const GraphLink &link) {
+                                 return pins.count(link.sourcePinId) != 0 ||
+                                        pins.count(link.destinationPinId) != 0;
+                               }),
+                links.end());
+  }
+  if (links.size() != oldSize) {
+    refreshAllMergeOutputShapes(*this);
+    refreshPropagatedPinShapes(*this);
+  }
+  return {true, {}, boxId};
+}
+
+GroupActionResult NodeGraph::reparentBoxLikeInsert(
+    std::int32_t boxId, std::optional<std::int32_t> targetParent) {
+  const auto *node = findNode(boxId);
+  const auto *group = findGroup(boxId);
+  if (node == nullptr && group == nullptr)
+    return {false, "Box no longer exists", 0};
+  if (node != nullptr &&
+      (isFixedIoType(node->type) || isGroupBoundaryType(node->type)))
+    return {false, "Audio and group boundary boxes cannot be reparented", 0};
+  if (targetParent.has_value()) {
+    if (findGroup(*targetParent) == nullptr)
+      return {false, "Drop target group no longer exists", 0};
+    if (*targetParent == boxId)
+      return {false, "A group cannot contain itself", 0};
+    if (group != nullptr && groupOwnsId(*this, boxId, *targetParent))
+      return {false, "A group cannot be nested inside one of its descendants",
+              0};
+    const auto newDepth = groupDepth(*this, *targetParent) +
+                          (group != nullptr ? groupDepth(*this, boxId) : 1);
+    if (newDepth > maximumGroupNestingDepth)
+      return {false, "Group nesting is limited to 8 levels", 0};
+  }
+
+  const auto previousParent = parentGroupOf(*this, boxId);
+  if (previousParent == targetParent)
+    return {true, {}, previousParent.value_or(boxId)};
+
+  disconnectAllLinksForBox(boxId);
+
+  eraseMemberFromParents(groups, boxId);
+  assignParent(*this, boxId, std::nullopt);
+  if (previousParent.has_value())
+    refreshRepeatSlotsForGroup(*this, *previousParent);
+
+  if (auto *movedNode = findNode(boxId))
+    movedNode->position = defaultNewBoxPosition;
+  else if (auto *movedGroup = findGroup(boxId))
+    movedGroup->position = defaultNewBoxPosition;
+
+  if (targetParent.has_value()) {
+    const auto result = addToGroup(*targetParent, boxId, true);
+    if (!result.accepted) {
+      return result;
+    }
+    return result;
+  }
+  if (auto *movedNode = findNode(boxId)) {
+    const auto repeats = effectiveRepeatCount(boxId);
+    ensureRepeatSlotCount(*movedNode, repeats);
+    ensureNodePropertyRepeatCounts(*movedNode, repeats);
+  } else if (findGroup(boxId) != nullptr)
+    refreshRepeatSlotsForGroup(*this, boxId);
+  return {true, {}, 0};
 }
 
 std::vector<std::int32_t> NodeGraph::expandSelectionToFreezableLeaves(
