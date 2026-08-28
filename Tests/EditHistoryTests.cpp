@@ -160,5 +160,37 @@ int main() {
   passed &= expect(!suppressed.canUndo(),
                    "suppressed apply must not push history steps");
 
+  openyourbox::state::EditHistory viewHistory(50);
+  openyourbox::state::PatchSnapshot viewLive = makeSnapshot(1);
+  viewHistory.setApplyFn([&](const openyourbox::state::PatchSnapshot &snapshot,
+                             const openyourbox::state::CurrentPresetState &) {
+    viewLive = snapshot;
+    return true;
+  });
+  viewHistory.pushStep("edit", makeSnapshot(0), makeSnapshot(1), {}, {});
+  passed &= expect(viewHistory.undo() && viewHistory.canRedo(),
+                   "undo of a real edit must leave redo available");
+  auto panBefore = makeSnapshot(0);
+  panBefore.graphDocument.setProperty("panX", 0.0f, nullptr);
+  panBefore.graphDocument.setProperty("zoom", 1.0f, nullptr);
+  juce::ValueTree panGroupBefore{"Group"};
+  panGroupBefore.setProperty("id", 3, nullptr);
+  panGroupBefore.setProperty("viewZoom", 1.0f, nullptr);
+  panBefore.graphDocument.appendChild(panGroupBefore, nullptr);
+  auto panAfter = makeSnapshot(0);
+  panAfter.graphDocument.setProperty("panX", 80.0f, nullptr);
+  panAfter.graphDocument.setProperty("zoom", 2.5f, nullptr);
+  juce::ValueTree panGroupAfter{"Group"};
+  panGroupAfter.setProperty("id", 3, nullptr);
+  panGroupAfter.setProperty("viewZoom", 2.0f, nullptr);
+  panAfter.graphDocument.appendChild(panGroupAfter, nullptr);
+  viewHistory.pushStep("pan", panBefore, panAfter, makeCurrent("A", false),
+                       makeCurrent("A", true));
+  passed &= expect(viewHistory.getUndoDepth() == 0 && viewHistory.canRedo(),
+                   "pan/zoom must not push history or clear redo");
+  passed &= expect(viewHistory.redo() &&
+                       static_cast<int>(viewLive.graphDocument["marker"]) == 1,
+                   "redo must still restore the real edit after pan/zoom");
+
   return passed ? 0 : 1;
 }

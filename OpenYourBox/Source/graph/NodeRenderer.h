@@ -33,7 +33,8 @@ struct NodeRendererCallbacks {
   std::function<void(const std::string &)> showMessage;
   /** @brief Invoked after the persisted graph document changes.
    *  @param recompile True when the audio graph must be rebuilt.
-   *  @param invalidateAnalysis True when open analysis snapshots must refresh.
+   *  @param invalidateAnalysis True for patch-affecting edits (record undo and
+   *         refresh analysis). False for view-only camera/layout persistence.
    */
   std::function<void(bool recompile, bool invalidateAnalysis)> documentChanged;
   /** @brief Invoked when the user opens analysis on a Blue or Gold node. */

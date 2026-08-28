@@ -75,8 +75,7 @@ void EditHistory::pushStep(const juce::String &label, PatchSnapshot before,
     return;
   if (before.sonicFingerprint() == after.sonicFingerprint() &&
       beforeCurrent.entryId == afterCurrent.entryId &&
-      beforeCurrent.name == afterCurrent.name &&
-      beforeCurrent.dirty == afterCurrent.dirty)
+      beforeCurrent.name == afterCurrent.name)
     return;
   undoManager.beginNewTransaction(label);
   if (undoManager.perform(new SnapshotAction(*this, label, std::move(before),

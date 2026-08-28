@@ -214,7 +214,7 @@ void OpenYourBoxAudioProcessorEditor::renderFrame() {
     if (history.isGestureOpen())
       persistGraph(false, false);
     else
-      persistGraph(recompile, true);
+      persistGraph(recompile, refreshAnalysis);
     if (refreshAnalysis)
       invalidateAnalysis();
     else
@@ -1134,13 +1134,14 @@ void OpenYourBoxAudioProcessorEditor::commitHistoryFromBaseline(
     const juce::String &label) {
   auto after = captureLiveSnapshot();
   auto afterCurrent = audioProcessor.getCurrentPreset();
+  const auto fingerprint = after.sonicFingerprint();
   if (afterCurrent.isAssociated())
-    afterCurrent.dirty = true;
+    afterCurrent.dirty = fingerprint != afterCurrent.baselineFingerprint;
   audioProcessor.getEditHistory().pushStep(
       label, lastCommittedSnapshot, after, lastCommittedCurrent, afterCurrent);
   lastCommittedSnapshot = after;
   lastCommittedCurrent = afterCurrent;
-  audioProcessor.refreshPresetDirtyFromFingerprint(after.sonicFingerprint());
+  audioProcessor.refreshPresetDirtyFromFingerprint(fingerprint);
   lastCommittedCurrent = audioProcessor.getCurrentPreset();
 }
 
@@ -1154,12 +1155,13 @@ void OpenYourBoxAudioProcessorEditor::endHistoryGesture() {
   persistGraph(true, false);
   auto after = captureLiveSnapshot();
   auto afterCurrent = audioProcessor.getCurrentPreset();
+  const auto fingerprint = after.sonicFingerprint();
   if (afterCurrent.isAssociated())
-    afterCurrent.dirty = true;
+    afterCurrent.dirty = fingerprint != afterCurrent.baselineFingerprint;
   audioProcessor.getEditHistory().endGesture(after, afterCurrent);
   lastCommittedSnapshot = after;
   lastCommittedCurrent = audioProcessor.getCurrentPreset();
-  audioProcessor.refreshPresetDirtyFromFingerprint(after.sonicFingerprint());
+  audioProcessor.refreshPresetDirtyFromFingerprint(fingerprint);
   lastCommittedCurrent = audioProcessor.getCurrentPreset();
 }
 

@@ -4,6 +4,57 @@
 #include "params/ParamIDs.h"
 
 namespace openyourbox::state {
+namespace {
+/**
+ * @brief Removes view-only attributes from @p element and its descendants.
+ * @param element Graph XML node to strip; ignored when null.
+ */
+void stripViewOnlyAttributes(juce::XmlElement *element) {
+  if (element == nullptr)
+    return;
+  if (element->hasTagName("GraphDocument")) {
+    for (const auto *key : {"panX", "panY", "zoom", "mapVisible",
+                            "focusedGroupId", "stickySpine"})
+      element->removeAttribute(key);
+  }
+  if (element->hasTagName("Group")) {
+    for (const auto *key : {"viewPanX", "viewPanY", "viewZoom"})
+      element->removeAttribute(key);
+  }
+  for (auto *child = element->getFirstChildElement(); child != nullptr;
+       child = child->getNextElement())
+    stripViewOnlyAttributes(child);
+}
+
+/**
+ * @brief Copies per-group camera fields from @p source onto matching groups.
+ * @param destination Graph document whose group views should be replaced.
+ * @param source Graph document providing the live cameras.
+ */
+void copyGroupViews(juce::ValueTree destination, const juce::ValueTree &source) {
+  if (!destination.isValid() || !source.isValid())
+    return;
+  for (int index = 0; index < destination.getNumChildren(); ++index) {
+    auto destGroup = destination.getChild(index);
+    if (!destGroup.hasType("Group"))
+      continue;
+    const auto id = destGroup.getProperty("id");
+    for (int sourceIndex = 0; sourceIndex < source.getNumChildren();
+         ++sourceIndex) {
+      const auto sourceGroup = source.getChild(sourceIndex);
+      if (!sourceGroup.hasType("Group") || sourceGroup.getProperty("id") != id)
+        continue;
+      for (const auto *key : {"viewPanX", "viewPanY", "viewZoom"}) {
+        if (sourceGroup.hasProperty(key))
+          destGroup.setProperty(key, sourceGroup.getProperty(key), nullptr);
+        else
+          destGroup.removeProperty(key, nullptr);
+      }
+      break;
+    }
+  }
+}
+} // namespace
 
 bool PatchSnapshot::isValid() const {
   return parameterState.isValid() && graphDocument.isValid() &&
@@ -71,13 +122,7 @@ juce::String PatchSnapshot::sonicFingerprint() const {
   auto xml = toXml();
   if (xml == nullptr)
     return {};
-  if (auto *graphXml = xml->getChildByName("GraphDocument")) {
-    graphXml->removeAttribute("panX");
-    graphXml->removeAttribute("panY");
-    graphXml->removeAttribute("zoom");
-    graphXml->removeAttribute("mapVisible");
-    graphXml->removeAttribute("focusedGroupId");
-  }
+  stripViewOnlyAttributes(xml->getChildByName("GraphDocument"));
   const auto text = xml->toString();
   return juce::String::toHexString(static_cast<juce::int64>(text.hashCode64())) +
          "-" + juce::String(text.length());
@@ -86,12 +131,14 @@ juce::String PatchSnapshot::sonicFingerprint() const {
 void PatchSnapshot::copyViewportFrom(const juce::ValueTree &viewportSource) {
   if (!graphDocument.isValid() || !viewportSource.isValid())
     return;
-  for (const auto *key : {"panX", "panY", "zoom", "mapVisible", "focusedGroupId"}) {
+  for (const auto *key : {"panX", "panY", "zoom", "mapVisible", "focusedGroupId",
+                          "stickySpine"}) {
     if (viewportSource.hasProperty(key))
       graphDocument.setProperty(key, viewportSource.getProperty(key), nullptr);
     else
       graphDocument.removeProperty(key, nullptr);
   }
+  copyGroupViews(graphDocument, viewportSource);
 }
 
 namespace {

@@ -91,8 +91,44 @@ int main() {
   auto moved = captured;
   moved.graphDocument.setProperty("panX", 123.0f, nullptr);
   moved.graphDocument.setProperty("zoom", 2.0f, nullptr);
+  moved.graphDocument.setProperty("stickySpine", "1,2", nullptr);
   passed &= expect(fingerprintA == moved.sonicFingerprint(),
-                   "sonic fingerprint must ignore pan and zoom");
+                   "sonic fingerprint must ignore pan, zoom, and sticky spine");
+
+  juce::ValueTree groupView{"Group"};
+  groupView.setProperty("id", 7, nullptr);
+  groupView.setProperty("viewPanX", 10.0f, nullptr);
+  groupView.setProperty("viewPanY", 20.0f, nullptr);
+  groupView.setProperty("viewZoom", 1.0f, nullptr);
+  moved.graphDocument.appendChild(groupView, nullptr);
+  const auto groupedFingerprint = moved.sonicFingerprint();
+  moved.graphDocument.getChildWithName("Group").setProperty("viewZoom", 2.5f,
+                                                            nullptr);
+  passed &= expect(groupedFingerprint == moved.sonicFingerprint(),
+                   "sonic fingerprint must ignore group cameras");
+
+  openyourbox::state::PatchSnapshot viewportDest;
+  viewportDest.graphDocument = juce::ValueTree{"GraphDocument"};
+  viewportDest.graphDocument.setProperty("panX", 0.0f, nullptr);
+  juce::ValueTree destGroup{"Group"};
+  destGroup.setProperty("id", 7, nullptr);
+  destGroup.setProperty("viewZoom", 1.0f, nullptr);
+  viewportDest.graphDocument.appendChild(destGroup, nullptr);
+  juce::ValueTree viewportSource{"GraphDocument"};
+  viewportSource.setProperty("panX", 50.0f, nullptr);
+  viewportSource.setProperty("stickySpine", "7", nullptr);
+  juce::ValueTree sourceGroup{"Group"};
+  sourceGroup.setProperty("id", 7, nullptr);
+  sourceGroup.setProperty("viewZoom", 1.75f, nullptr);
+  viewportSource.appendChild(sourceGroup, nullptr);
+  viewportDest.copyViewportFrom(viewportSource);
+  passed &=
+      expect(static_cast<float>(viewportDest.graphDocument["panX"]) == 50.0f &&
+                 viewportDest.graphDocument["stickySpine"].toString() == "7" &&
+                 static_cast<float>(viewportDest.graphDocument
+                                        .getChildWithName("Group")["viewZoom"]) ==
+                     1.75f,
+             "copyViewportFrom must keep live root and group cameras");
 
   OpenYourBoxAudioProcessor restored;
   juce::String error;

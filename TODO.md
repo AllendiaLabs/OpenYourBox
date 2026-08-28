@@ -46,4 +46,15 @@
 
 - [ ] add depthwise to TCN. and to conv1d? what is it exactly? like groups?
 
-- [x] add mod sigmoid? Composable as Sigmoid → Math Expression `2 * x1^2.3 + 1e-7` (`specs/012-math-expr-param-i/`); no dedicated palette entry.
+- [x] when I move or zoom it breaks the undo/redo
+
+- [ ] move parameters from boxes to new tab in right menu
+- [ ] double click on group box to open it (it does not work anymore)
+- [ ] from user library or project structure, clicking on an element should open its property panel
+- [ ] from project structure, double clicking on an element should go to that element (camera centered on it). if it is a group, do not open it, go to its box (in parent canva)
+- [ ] from project structure, dragging an element can move it within the structure, outside a group or in a group. during drag, highlight parent folder/group or new folder it will be added to. highlight by showing bounds of the group, ie a rectangle around its name and content.
+- [ ] from user library, dragging to the canva should enable the user to add to project
+- [ ] now it is very annoying to move a box, I must click on it many times before being able to drag it. clicking on it should directly select it and make it draggable, in one hold click
+- [ ] when I move group boxes they glitch: they can change size, and the randomize button changes size too. the button should be in right property menu.
+- [ ] only keep name and pins on boxes. the rest goes to property menu.
+- [ ] selecting or clicking on a box should open its property menu 

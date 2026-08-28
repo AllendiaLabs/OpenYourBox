@@ -2503,7 +2503,6 @@ void NodeRenderer::setCanvasFocus(NodeGraph &graph,
   restoreViewPending = true;
   scopeBreadcrumbFollowFocus = true;
   layoutMutatedThisFrame = true;
-  mutatedThisFrame = true;
 }
 
 void NodeRenderer::renderProjectStructure(NodeGraph &graph) {

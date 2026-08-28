@@ -76,12 +76,15 @@ struct PatchSnapshot {
   /**
    * @brief Hash of sonic-relevant contents (excludes canvas pan/zoom).
    *
+   * Ignores root pan/zoom/focus, group cameras, and sticky spine so view-only
+   * navigation cannot mark a preset dirty or create a history step.
+   *
    * Used to detect dirty presets and skip no-op history steps.
    */
   [[nodiscard]] juce::String sonicFingerprint() const;
 
   /**
-   * @brief Copies pan/zoom/map fields from @p viewportSource into the graph.
+   * @brief Copies pan/zoom/map and per-group camera fields from @p viewportSource.
    * @param viewportSource Graph document whose view should be kept.
    */
   void copyViewportFrom(const juce::ValueTree &viewportSource);
