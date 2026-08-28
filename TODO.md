@@ -34,19 +34,9 @@
   - [x] PCA on μ in eval mode over a validation pass, use linear singular-value cumulative sum for r_f, and load compactness buffers onto the live bottleneck after Unfreeze.
 
 
-- [x] add leakyrelu negative slope parameter, defaults to .01, rave mostly uses 0.2
-- [x] add expandable project structure/tree, and save parts of these instead of just saving top level folder: in the library, the saved elements must be expandable as if they were folders, so that the user can choose to insert the whole thing or a subpart
-- [x] make left and right menus resizable
-- [x] in top active hierarchy tree, when going back to a parent canva, the children that were once open should stay displayed and clickable for navigating back to them, until branching to somewhere else
-
-- [x] add keyword to preserve whatever input dim/channels/features as output dim/channels/features, even when dims change because of group copies if eg list of the keyword is provided
-- [x] when a group with N copies is in a group with M copies, which itself is in a group with O copies, its elements display a list of M*N*O parameter values. It should also accept N values, or M*N, or 1 value. The values should be copied under the hood. 
-
-- [x] parameters should accept simple expressions of i, i being the index in the copies list, or if 1 copy or not in group: i is always 0. accept ()+-*^ (`specs/012-math-expr-param-i/`)
 
 - [ ] add depthwise to TCN. and to conv1d? what is it exactly? like groups?
 
-- [x] when I move or zoom it breaks the undo/redo
 
 - [ ] move parameters from boxes to new tab in right menu
 - [ ] double click on group box to open it (it does not work anymore)
