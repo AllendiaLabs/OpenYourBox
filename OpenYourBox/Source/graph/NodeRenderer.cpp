@@ -177,6 +177,40 @@ std::int32_t groupBoxAtCanvas(
 }
 
 /**
+ * @brief Boxes removed by context-menu Delete, expanding to the selection.
+ *
+ * When the right-clicked box is selected, every selected node and group is
+ * included so a multi-selection is one cut. Host I/O and group hubs stay
+ * out of the list.
+ * @param graph Graph owning undeletable checks.
+ * @param contextId Right-clicked node or group identifier.
+ * @param selectedNodeIds Current node selection.
+ * @param selectedGroupIds Current group selection.
+ */
+std::vector<std::int32_t> contextDeleteBoxIds(
+    const openyourbox::graph::NodeGraph &graph, std::int32_t contextId,
+    const std::vector<std::int32_t> &selectedNodeIds,
+    const std::vector<std::int32_t> &selectedGroupIds) {
+  const auto selected =
+      std::find(selectedNodeIds.begin(), selectedNodeIds.end(), contextId) !=
+          selectedNodeIds.end() ||
+      std::find(selectedGroupIds.begin(), selectedGroupIds.end(), contextId) !=
+          selectedGroupIds.end();
+  std::vector<std::int32_t> ids;
+  if (selected) {
+    for (const auto id : selectedNodeIds) {
+      if (!graph.isFixedIoNode(id) && !graph.isGroupBoundaryNode(id))
+        ids.push_back(id);
+    }
+    ids.insert(ids.end(), selectedGroupIds.begin(), selectedGroupIds.end());
+  } else if (contextId != 0 && !graph.isFixedIoNode(contextId) &&
+             !graph.isGroupBoundaryNode(contextId)) {
+    ids.push_back(contextId);
+  }
+  return ids;
+}
+
+/**
  * @brief Converts a positive graph identifier to imgui-node-editor storage.
  * @param identifier Stable signed graph identifier.
  * @return Width-safe editor identifier payload.
@@ -1362,56 +1396,62 @@ void NodeRenderer::handleConnections(NodeGraph &graph,
 void NodeRenderer::handleDeletion(NodeGraph &graph) {
   if (!ed::BeginDelete())
     return;
+  std::vector<std::int32_t> deletedLinkIds;
+  std::vector<std::int32_t> deletedBoxIds;
+  const auto focus = graph.getViewport().focusedGroupId;
   ed::LinkId linkId;
   while (ed::QueryDeletedLink(&linkId)) {
-    if (ed::AcceptDeletedItem()) {
-      mutatedThisFrame =
-          graph.removeLink(static_cast<std::int32_t>(linkId.Get())) ||
-          mutatedThisFrame;
-      recompileThisFrame = mutatedThisFrame || recompileThisFrame;
-    }
+    if (ed::AcceptDeletedItem())
+      deletedLinkIds.push_back(static_cast<std::int32_t>(linkId.Get()));
   }
   ed::NodeId nodeId;
   while (ed::QueryDeletedNode(&nodeId)) {
     const auto id = static_cast<std::int32_t>(nodeId.Get());
     if (graph.findGroup(id) != nullptr) {
       if (ed::AcceptDeletedItem()) {
-        const auto *group = graph.findGroup(id);
-        const auto parent =
-            group != nullptr ? group->parentGroupId : std::nullopt;
-        const auto focus = graph.getViewport().focusedGroupId;
-        bool leaveScope = false;
-        if (focus.has_value()) {
-          for (const auto ancestor : graph.groupAncestorChain(*focus)) {
-            if (ancestor == id) {
-              leaveScope = true;
-              break;
-            }
-          }
-        }
-        mutatedThisFrame = graph.deleteGroup(id).accepted || mutatedThisFrame;
-        recompileThisFrame = mutatedThisFrame || recompileThisFrame;
+        deletedBoxIds.push_back(id);
         positionedGroupIds.erase(id);
-        if (leaveScope)
-          setCanvasFocus(graph, parent);
       }
       continue;
     }
     const auto *node = graph.findNode(id);
     if (node == nullptr || graph.isFixedIoNode(id) ||
-        graph.isGroupBoundaryNode(id) ||
-        (node->state == NodeState::frozenGold &&
-         node->type != NodeType::blackBox)) {
+        graph.isGroupBoundaryNode(id)) {
       ed::RejectDeletedItem();
       continue;
     }
     if (ed::AcceptDeletedItem()) {
-      mutatedThisFrame = graph.removeNode(id) || mutatedThisFrame;
-      recompileThisFrame = mutatedThisFrame || recompileThisFrame;
+      deletedBoxIds.push_back(id);
       positionedNodeIds.erase(id);
     }
   }
   ed::EndDelete();
+
+  std::optional<std::int32_t> focusAfterDelete;
+  bool retargetFocus = false;
+  if (focus.has_value()) {
+    for (const auto ancestor : graph.groupAncestorChain(*focus)) {
+      if (std::find(deletedBoxIds.begin(), deletedBoxIds.end(), ancestor) !=
+          deletedBoxIds.end()) {
+        const auto *group = graph.findGroup(ancestor);
+        focusAfterDelete =
+            group != nullptr ? group->parentGroupId : std::nullopt;
+        retargetFocus = true;
+        break;
+      }
+    }
+  }
+
+  if (!deletedBoxIds.empty()) {
+    mutatedThisFrame = graph.removeBoxes(deletedBoxIds) || mutatedThisFrame;
+    recompileThisFrame = mutatedThisFrame || recompileThisFrame;
+    if (retargetFocus)
+      setCanvasFocus(graph, focusAfterDelete);
+  }
+  for (const auto id : deletedLinkIds) {
+    mutatedThisFrame = graph.removeLink(id) || mutatedThisFrame;
+    recompileThisFrame = mutatedThisFrame || recompileThisFrame;
+  }
 }
 
 void NodeRenderer::handleContextMenus(NodeGraph &graph,
@@ -1485,12 +1525,17 @@ void NodeRenderer::handleContextMenus(NodeGraph &graph,
       if (ImGui::MenuItem("Freeze Selection", nullptr, false, canFreeze) &&
           callbacks.freezeSelection)
         callbacks.freezeSelection(freezeIds);
-      if (node != nullptr && !graph.isFixedIoNode(contextNodeId) &&
-          !graph.isGroupBoundaryNode(contextNodeId) &&
-          ImGui::MenuItem("Delete")) {
-        mutatedThisFrame = graph.removeNode(contextNodeId) || mutatedThisFrame;
-        recompileThisFrame = mutatedThisFrame || recompileThisFrame;
-        positionedNodeIds.erase(contextNodeId);
+    }
+    if (node != nullptr && !graph.isFixedIoNode(contextNodeId) &&
+        !graph.isGroupBoundaryNode(contextNodeId) &&
+        ImGui::MenuItem("Delete")) {
+      const auto ids = contextDeleteBoxIds(graph, contextNodeId,
+                                           selectedNodeIds, selectedGroupIds);
+      mutatedThisFrame = graph.removeBoxes(ids) || mutatedThisFrame;
+      recompileThisFrame = mutatedThisFrame || recompileThisFrame;
+      for (const auto id : ids) {
+        positionedNodeIds.erase(id);
+        positionedGroupIds.erase(id);
       }
     }
 
@@ -1536,9 +1581,12 @@ void NodeRenderer::handleContextMenus(NodeGraph &graph,
           }
         }
       }
-      mutatedThisFrame =
-          graph.deleteGroup(contextGroupId).accepted || mutatedThisFrame;
+      const auto ids = contextDeleteBoxIds(graph, contextGroupId,
+                                           selectedNodeIds, selectedGroupIds);
+      mutatedThisFrame = graph.removeBoxes(ids) || mutatedThisFrame;
       recompileThisFrame = mutatedThisFrame || recompileThisFrame;
+      for (const auto id : ids)
+        positionedGroupIds.erase(id);
       positionedGroupIds.erase(contextGroupId);
       if (leaveScope)
         setCanvasFocus(graph, parent);

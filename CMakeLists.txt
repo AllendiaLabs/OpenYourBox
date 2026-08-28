@@ -318,6 +318,22 @@ if(BUILD_TESTING)
         juce::juce_recommended_warning_flags)
     add_test(NAME OpenYourBoxGroups COMMAND OpenYourBoxGroupTests)
 
+    juce_add_console_app(OpenYourBoxBypassDeleteTests PRODUCT_NAME "OpenYourBox Bypass Delete Tests")
+    target_sources(OpenYourBoxBypassDeleteTests PRIVATE Tests/GraphBypassDeleteTests.cpp)
+    target_include_directories(OpenYourBoxBypassDeleteTests BEFORE PRIVATE
+        "${CMAKE_CURRENT_BINARY_DIR}/OpenYourBox_artefacts/JuceLibraryCode"
+        OpenYourBox/Source
+        "${TORCH_INCLUDE_DIRS}")
+    target_link_libraries(OpenYourBoxBypassDeleteTests PRIVATE
+        OpenYourBox
+        OpenYourBoxResources
+        juce::juce_audio_utils
+        juce::juce_dsp
+        juce::juce_opengl
+        juce::juce_recommended_config_flags
+        juce::juce_recommended_warning_flags)
+    add_test(NAME OpenYourBoxBypassDelete COMMAND OpenYourBoxBypassDeleteTests)
+
     juce_add_console_app(OpenYourBoxRepeatListTests PRODUCT_NAME "OpenYourBox Repeat List Tests")
     target_sources(OpenYourBoxRepeatListTests PRIVATE Tests/RepeatListTilingTests.cpp)
     target_include_directories(OpenYourBoxRepeatListTests BEFORE PRIVATE

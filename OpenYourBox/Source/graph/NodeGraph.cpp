@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstdint>
 #include <cstring>
 #include <functional>
 #include <limits>
@@ -47,6 +48,155 @@ int inputPinIndexForId(const openyourbox::graph::GraphNode &node,
       return index;
   }
   return 0;
+}
+
+/**
+ * @brief Output pins that continue a signal entering @p node at @p entryPinId.
+ *
+ * Group Input/Output hubs pair lane i to lane i. Control inputs have no
+ * through-path. Other pins continue to every non-control output so internal
+ * latent hops can be walked when a selection deletes several boxes at once.
+ * @param node Element being traversed.
+ * @param entryPinId Input pin that received an incoming cable.
+ */
+std::vector<std::int32_t>
+throughOutputPinIds(const openyourbox::graph::GraphNode &node,
+                    std::int32_t entryPinId) {
+  using openyourbox::graph::isControlInputPin;
+  using openyourbox::graph::isGroupBoundaryType;
+  using openyourbox::graph::resolveCollapsedPin;
+  entryPinId = resolveCollapsedPin(entryPinId);
+  if (isGroupBoundaryType(node.type)) {
+    for (std::size_t index = 0; index < node.inputs.size(); ++index) {
+      if (node.inputs[index].id != entryPinId)
+        continue;
+      if (index < node.outputs.size())
+        return {node.outputs[index].id};
+      return {};
+    }
+    return {};
+  }
+  const openyourbox::graph::Pin *entry = nullptr;
+  for (const auto &pin : node.inputs) {
+    if (pin.id == entryPinId) {
+      entry = &pin;
+      break;
+    }
+  }
+  if (entry == nullptr || isControlInputPin(*entry))
+    return {};
+  std::vector<std::int32_t> outputs;
+  outputs.reserve(node.outputs.size());
+  for (const auto &pin : node.outputs)
+    outputs.push_back(pin.id);
+  return outputs;
+}
+
+/**
+ * @brief Source/destination pin pairs that bypass a deleted node set.
+ *
+ * Each external incoming cable is walked through the cut along through-pins
+ * until it exits to a surviving destination. When that walk finds no exit,
+ * a 1-in or 1-out boundary still skip-wires (Audio In feeding the cut and
+ * Audio Out leaving it, even if interiors are disconnected). Two-or-more
+ * inputs with two-or-more outputs stay walk-only so lanes are not
+ * cross-wired. Duplicate pairs are omitted.
+ * @param graph Graph owning topology.
+ * @param removedNodeIds Nodes that will be deleted, including group interiors.
+ */
+std::vector<std::pair<std::int32_t, std::int32_t>>
+collectBypassPinPairs(const openyourbox::graph::NodeGraph &graph,
+                      const std::unordered_set<std::int32_t> &removedNodeIds) {
+  using openyourbox::graph::resolveCollapsedPin;
+  std::unordered_set<std::int32_t> removedPins;
+  for (const auto nodeId : removedNodeIds) {
+    const auto *node = graph.findNode(nodeId);
+    if (node == nullptr)
+      continue;
+    for (const auto &pin : node->inputs)
+      removedPins.insert(pin.id);
+    for (const auto &pin : node->outputs)
+      removedPins.insert(pin.id);
+  }
+
+  std::vector<std::pair<std::int32_t, std::int32_t>> pairs;
+  std::unordered_set<std::uint64_t> seen;
+  const auto addPair = [&](std::int32_t sourcePin, std::int32_t destPin) {
+    sourcePin = resolveCollapsedPin(sourcePin);
+    destPin = resolveCollapsedPin(destPin);
+    if (sourcePin == destPin)
+      return;
+    const auto key =
+        (static_cast<std::uint64_t>(static_cast<std::uint32_t>(sourcePin))
+         << 32) |
+        static_cast<std::uint32_t>(destPin);
+    if (!seen.insert(key).second)
+      return;
+    pairs.emplace_back(sourcePin, destPin);
+  };
+
+  std::vector<std::int32_t> incomingSources;
+  std::vector<std::int32_t> outgoingDests;
+  std::unordered_set<std::int32_t> seenIncoming;
+  std::unordered_set<std::int32_t> seenOutgoing;
+  for (const auto &link : graph.getLinks()) {
+    const auto sourcePin = resolveCollapsedPin(link.sourcePinId);
+    const auto destPin = resolveCollapsedPin(link.destinationPinId);
+    const auto destRemoved = removedPins.count(destPin) != 0;
+    const auto sourceRemoved = removedPins.count(sourcePin) != 0;
+    if (!sourceRemoved && destRemoved && seenIncoming.insert(sourcePin).second)
+      incomingSources.push_back(sourcePin);
+    if (sourceRemoved && !destRemoved && seenOutgoing.insert(destPin).second)
+      outgoingDests.push_back(destPin);
+  }
+
+  for (const auto &link : graph.getLinks()) {
+    const auto sourcePin = resolveCollapsedPin(link.sourcePinId);
+    const auto destPin = resolveCollapsedPin(link.destinationPinId);
+    if (removedPins.count(destPin) == 0 || removedPins.count(sourcePin) != 0)
+      continue;
+    std::queue<std::int32_t> pending;
+    std::unordered_set<std::int32_t> visitedPins;
+    pending.push(destPin);
+    while (!pending.empty()) {
+      const auto pinId = pending.front();
+      pending.pop();
+      if (!visitedPins.insert(pinId).second)
+        continue;
+      const auto ownerId = graph.findNodeForPin(pinId);
+      if (!ownerId.has_value() || removedNodeIds.count(*ownerId) == 0) {
+        addPair(sourcePin, pinId);
+        continue;
+      }
+      const auto *node = graph.findNode(*ownerId);
+      if (node == nullptr)
+        continue;
+      for (const auto outPin : throughOutputPinIds(*node, pinId)) {
+        for (const auto &hop : graph.getLinks()) {
+          if (resolveCollapsedPin(hop.sourcePinId) != outPin)
+            continue;
+          pending.push(resolveCollapsedPin(hop.destinationPinId));
+        }
+      }
+    }
+  }
+
+  std::unordered_set<std::int32_t> walkedSources;
+  for (const auto &pair : pairs)
+    walkedSources.insert(pair.first);
+  const auto singleIncoming = incomingSources.size() == 1;
+  const auto singleOutgoing = outgoingDests.size() == 1;
+  for (const auto sourcePin : incomingSources) {
+    if (walkedSources.count(sourcePin) != 0)
+      continue;
+    if (singleIncoming) {
+      for (const auto destPin : outgoingDests)
+        addPair(sourcePin, destPin);
+    } else if (singleOutgoing) {
+      addPair(sourcePin, outgoingDests.front());
+    }
+  }
+  return pairs;
 }
 
 /**
@@ -3423,18 +3573,55 @@ NodeGraph::attachNodeToPin(std::int32_t pinId, NodeType type,
 }
 
 bool NodeGraph::removeNode(std::int32_t nodeId) {
-  const auto *node = findNode(nodeId);
-  if (node == nullptr || isFixedIoType(node->type) ||
-      isGroupBoundaryType(node->type) ||
-      (node->state == NodeState::frozenGold &&
-       node->type != NodeType::blackBox))
+  return removeBoxes({nodeId});
+}
+
+bool NodeGraph::removeBoxes(const std::vector<std::int32_t> &boxIds) {
+  std::unordered_set<std::int32_t> nodeIds;
+  std::unordered_set<std::int32_t> groupIds;
+  for (const auto boxId : boxIds) {
+    if (const auto *node = findNode(boxId)) {
+      if (isFixedIoType(node->type) || isGroupBoundaryType(node->type))
+        continue;
+      nodeIds.insert(boxId);
+    } else if (findGroup(boxId) != nullptr) {
+      collectGroupSubtree(*this, boxId, nodeIds, groupIds);
+    }
+  }
+  if (nodeIds.empty() && groupIds.empty())
     return false;
 
+  bool cutFedFromHostInput = false;
+  bool cutFedHostOutput = false;
+  for (const auto &link : links) {
+    const auto sourceId = findNodeForPin(link.sourcePinId);
+    const auto destId = findNodeForPin(link.destinationPinId);
+    if (!sourceId.has_value() || !destId.has_value())
+      continue;
+    const auto sourceInCut = nodeIds.count(*sourceId) != 0;
+    const auto destInCut = nodeIds.count(*destId) != 0;
+    const auto *source = findNode(*sourceId);
+    const auto *destination = findNode(*destId);
+    if (!sourceInCut && destInCut && source != nullptr &&
+        source->type == NodeType::audioInput)
+      cutFedFromHostInput = true;
+    if (sourceInCut && !destInCut && destination != nullptr &&
+        destination->type == NodeType::audioOutput)
+      cutFedHostOutput = true;
+  }
+
+  const auto bypasses = collectBypassPinPairs(*this, nodeIds);
+
   std::unordered_set<std::int32_t> pins;
-  for (const auto &pin : node->inputs)
-    pins.insert(pin.id);
-  for (const auto &pin : node->outputs)
-    pins.insert(pin.id);
+  for (const auto nodeId : nodeIds) {
+    const auto *node = findNode(nodeId);
+    if (node == nullptr)
+      continue;
+    for (const auto &pin : node->inputs)
+      pins.insert(pin.id);
+    for (const auto &pin : node->outputs)
+      pins.insert(pin.id);
+  }
   links.erase(std::remove_if(links.begin(), links.end(),
                              [&pins](const GraphLink &link) {
                                return pins.count(link.sourcePinId) != 0 ||
@@ -3442,11 +3629,47 @@ bool NodeGraph::removeNode(std::int32_t nodeId) {
                              }),
               links.end());
   nodes.erase(std::remove_if(nodes.begin(), nodes.end(),
-                             [nodeId](const GraphNode &candidate) {
-                               return candidate.id == nodeId;
+                             [&nodeIds](const GraphNode &candidate) {
+                               return nodeIds.count(candidate.id) != 0;
                              }),
               nodes.end());
-  eraseMemberFromParents(groups, nodeId);
+  for (const auto nodeId : nodeIds)
+    eraseMemberFromParents(groups, nodeId);
+  for (const auto groupId : groupIds)
+    eraseMemberFromParents(groups, groupId);
+  groups.erase(std::remove_if(groups.begin(), groups.end(),
+                              [&groupIds](const GraphGroup &candidate) {
+                                return groupIds.count(candidate.id) != 0;
+                              }),
+               groups.end());
+  for (const auto id : groupIds)
+    pruneStickySpineId(viewport.stickySpine, id);
+  if (viewport.focusedGroupId.has_value() &&
+      groupIds.count(*viewport.focusedGroupId) != 0)
+    viewport.focusedGroupId.reset();
+
+  refreshPropagatedPinShapes(*this);
+  for (auto &node : nodes) {
+    if (isFixedIoType(node.type))
+      applyHostIoChannels(node);
+  }
+  for (const auto &pair : bypasses)
+    connect(pair.first, pair.second);
+  if (cutFedFromHostInput || cutFedHostOutput) {
+    GraphNode *hostInput = nullptr;
+    GraphNode *hostOutput = nullptr;
+    for (auto &node : nodes) {
+      if (node.type == NodeType::audioInput && hostInput == nullptr)
+        hostInput = &node;
+      else if (node.type == NodeType::audioOutput && hostOutput == nullptr)
+        hostOutput = &node;
+    }
+    if (hostInput != nullptr && hostOutput != nullptr &&
+        !hostInput->outputs.empty() && !hostOutput->inputs.empty() &&
+        !isPinConnected(hostInput->outputs.front().id) &&
+        !isPinConnected(hostOutput->inputs.front().id))
+      connect(hostInput->outputs.front().id, hostOutput->inputs.front().id);
+  }
   return true;
 }
 
@@ -4429,41 +4652,8 @@ GroupActionResult NodeGraph::ungroup(std::int32_t groupId) {
 GroupActionResult NodeGraph::deleteGroup(std::int32_t groupId) {
   if (findGroup(groupId) == nullptr)
     return {false, "Group no longer exists", 0};
-  std::unordered_set<std::int32_t> nodeIds;
-  std::unordered_set<std::int32_t> groupIds;
-  collectGroupSubtree(*this, groupId, nodeIds, groupIds);
-  std::unordered_set<std::int32_t> pins;
-  for (const auto nodeId : nodeIds) {
-    const auto *node = findNode(nodeId);
-    if (node == nullptr)
-      continue;
-    for (const auto &pin : node->inputs)
-      pins.insert(pin.id);
-    for (const auto &pin : node->outputs)
-      pins.insert(pin.id);
-  }
-  links.erase(std::remove_if(links.begin(), links.end(),
-                             [&pins](const GraphLink &link) {
-                               return pins.count(link.sourcePinId) != 0 ||
-                                      pins.count(link.destinationPinId) != 0;
-                             }),
-              links.end());
-  nodes.erase(std::remove_if(nodes.begin(), nodes.end(),
-                             [&nodeIds](const GraphNode &candidate) {
-                               return nodeIds.count(candidate.id) != 0;
-                             }),
-              nodes.end());
-  eraseMemberFromParents(groups, groupId);
-  groups.erase(std::remove_if(groups.begin(), groups.end(),
-                              [&groupIds](const GraphGroup &candidate) {
-                                return groupIds.count(candidate.id) != 0;
-                              }),
-               groups.end());
-  for (const auto id : groupIds)
-    pruneStickySpineId(viewport.stickySpine, id);
-  if (viewport.focusedGroupId.has_value() &&
-      groupIds.count(*viewport.focusedGroupId) != 0)
-    viewport.focusedGroupId.reset();
+  if (!removeBoxes({groupId}))
+    return {false, "Group no longer exists", 0};
   return {true, {}, groupId};
 }
 

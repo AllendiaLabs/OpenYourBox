@@ -45,11 +45,29 @@ public:
   void ensureFixedHostIo();
 
   /**
-   * @brief Removes a node and every connection attached to it.
+   * @brief Removes a node and bypasses surviving neighbours when possible.
+   *
+   * Incoming cables are reconnected to destinations they could reach through
+   * this node. Incompatible, occupied, cyclic, or duplicate links are skipped
+   * with no warning. The node is always removed when it is not host I/O or a
+   * group hub; a failed bypass never keeps the node.
    * @param nodeId Stable node identifier.
-   * @return True when a deletable node was removed.
+   * @return True when a node was removed.
    */
   bool removeNode(std::int32_t nodeId);
+
+  /**
+   * @brief Removes nodes and/or groups as one cut and bypasses surviving neighbours.
+   *
+   * The deleted set is one subgraph: A→B→C→D with B and C removed becomes A→D
+   * when that cable is legal. Groups expand to every descendant node. Host I/O
+   * and group hubs are skipped when named directly. Clearing the last boxes
+   * between Audio Input and Audio Output reconnects them when both pins are
+   * free. Failed bypasses are silent and never restore a removed box.
+   * @param boxIds Node and/or group identifiers.
+   * @return True when at least one box was removed.
+   */
+  bool removeBoxes(const std::vector<std::int32_t> &boxIds);
 
   /**
    * @brief Splits a connection and inserts a processing element on that cable.
@@ -96,6 +114,9 @@ public:
 
   /**
    * @brief Deletes a group and every descendant node and nested group.
+   *
+   * External cables that reached through the group are bypassed onto surviving
+   * neighbours when the resulting links are legal. Failed bypasses are silent.
    * @param groupId Group to remove.
    */
   GroupActionResult deleteGroup(std::int32_t groupId);
