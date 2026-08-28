@@ -77,10 +77,14 @@ public:
    * @param graph Message-thread graph document.
    * @param callbacks Runtime actions owned by the plug-in editor.
    * @param pinchMagnification Relative trackpad pinch scale for this frame.
+   * @param boxLibrary User box catalog, or null when the library is unavailable.
+   * @param outputRmsByNodeId Latest live output RMS keyed by node id, or null.
    */
   void render(NodeGraph &graph, const NodeRendererCallbacks &callbacks,
               float pinchMagnification = 1.0f,
-              openyourbox::library::UserBoxLibrary *boxLibrary = nullptr);
+              openyourbox::library::UserBoxLibrary *boxLibrary = nullptr,
+              const std::unordered_map<std::int32_t, float> *outputRmsByNodeId =
+                  nullptr);
 
   /** @brief Returns the first selected node identifier, or zero. */
   [[nodiscard]] std::int32_t getPrimarySelectedNodeId() const noexcept;
@@ -368,6 +372,13 @@ private:
   std::vector<std::int32_t> selectedGroupIds;
   /** @brief Stable selected connection identifiers. */
   std::vector<std::int32_t> selectedLinkIds;
+  /**
+   * @brief Smoothed RMS fill fraction per visible link, in `[0, 1]`.
+   *
+   * Fill grows from the source pin toward the destination so the cable
+   * reads in the direction of information flow.
+   */
+  std::unordered_map<std::int32_t, float> displayedLinkFill;
   /** @brief Nodes whose persisted positions were applied to the editor. */
   std::unordered_set<std::int32_t> positionedNodeIds;
   /** @brief Groups whose persisted bounds were applied to the editor. */

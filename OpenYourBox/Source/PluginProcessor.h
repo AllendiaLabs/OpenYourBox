@@ -232,6 +232,15 @@ public:
                                          float &outputPeak) const noexcept;
 
   /**
+   * @brief Reads the latest audio-thread output RMS for one compiled node.
+   * @param nodeId Stable graph node identifier.
+   * @param outputRms Receives the linear RMS level collapsed over all dimensions.
+   * @return True when a published runtime contains the node.
+   */
+  [[nodiscard]] bool getNodeOutputRms(std::int32_t nodeId,
+                                      float &outputRms) const noexcept;
+
+  /**
    * @brief Loads, warms, and publishes a validated frozen artifact handle.
    * @param result Worker result containing artifact path and channel metadata.
    * @param error Receives a human-readable load or validation error.

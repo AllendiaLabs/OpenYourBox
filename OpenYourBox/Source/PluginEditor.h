@@ -290,6 +290,13 @@ private:
   std::uint64_t analysisRevision = 0;
   /** @brief Dear ImGui time of the last analysis computation. */
   double lastAnalysisTime = 0.0;
+  /**
+   * @brief True when the open patch gesture still needs a live-graph recompile.
+   *
+   * Integer/topology edits defer compilation until mouse-up; a press-and-hold
+   * that never mutates the graph must not rebuild the runtime.
+   */
+  bool gestureNeedsRecompile = false;
   /** @brief True while the Dry/Wet slider is recording a host gesture. */
   bool dryWetGestureActive = false;
   /** @brief Native file chooser kept alive across async host dialogs. */

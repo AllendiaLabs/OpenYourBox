@@ -542,6 +542,18 @@ juce::String OpenYourBoxAudioProcessor::getModelError() const {
   const auto graphError = graphPublisher.getLastError();
   if (graphError.isNotEmpty())
     return graphError;
+  if (const auto runtime = graphPublisher.getPublishedRuntime()) {
+    const auto nodeId = runtime->getLastProcessingFailureNodeId();
+    if (nodeId != 0) {
+      auto message = juce::String("Live graph processing failed");
+      if (nodeId > 0)
+        message += " at node " + juce::String(nodeId);
+      message +=
+          ". The wet output was muted for safety. Check element tensor shapes "
+          "and temporal rates.";
+      return message;
+    }
+  }
   const juce::ScopedLock lock(errorLock);
   return runtimeError.isNotEmpty() ? runtimeError : modelBuilder.getLastError();
 }
@@ -656,6 +668,15 @@ bool OpenYourBoxAudioProcessor::getAnalysisTapPeaks(std::int32_t nodeId,
   if (runtime == nullptr)
     return false;
   return runtime->getTapPeaks(nodeId, inputPeak, outputPeak);
+}
+
+bool OpenYourBoxAudioProcessor::getNodeOutputRms(std::int32_t nodeId,
+                                                 float &outputRms) const
+    noexcept {
+  auto runtime = graphPublisher.getPublishedRuntime();
+  if (runtime == nullptr)
+    return false;
+  return runtime->getTapRms(nodeId, outputRms);
 }
 
 bool OpenYourBoxAudioProcessor::prepareFrozenArtifact(

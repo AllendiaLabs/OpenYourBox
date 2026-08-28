@@ -11,6 +11,7 @@
 #include <cstring>
 #include <memory>
 #include <string>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -209,9 +210,11 @@ void OpenYourBoxAudioProcessorEditor::renderFrame() {
   };
   callbacks.documentChanged = [this](bool recompile, bool refreshAnalysis) {
     auto &history = audioProcessor.getEditHistory();
-    if (history.isGestureOpen())
+    if (history.isGestureOpen()) {
+      if (recompile)
+        gestureNeedsRecompile = true;
       persistGraph(false, false);
-    else
+    } else
       persistGraph(recompile, refreshAnalysis);
     if (refreshAnalysis)
       invalidateAnalysis();
@@ -241,8 +244,14 @@ void OpenYourBoxAudioProcessorEditor::renderFrame() {
 
   ImGui::BeginChild("GraphArea", ImVec2(-(right + splitterWidth), 0.0f), false,
                     ImGuiWindowFlags_NoScrollbar);
+  std::unordered_map<std::int32_t, float> outputRmsByNodeId;
+  for (const auto &node : nodeGraph.getNodes()) {
+    float rms = 0.0f;
+    if (audioProcessor.getNodeOutputRms(node.id, rms))
+      outputRmsByNodeId[node.id] = rms;
+  }
   nodeRenderer.render(nodeGraph, callbacks, imguiHost.takeMagnification(),
-                      &boxLibrary);
+                      &boxLibrary, &outputRmsByNodeId);
   ImGui::EndChild();
 
   ImGui::SameLine(0.0f, 0.0f);
@@ -1160,12 +1169,14 @@ void OpenYourBoxAudioProcessorEditor::commitHistoryFromBaseline(
 
 void OpenYourBoxAudioProcessorEditor::beginHistoryGesture(
     const juce::String &label) {
+  gestureNeedsRecompile = false;
   audioProcessor.getEditHistory().beginGesture(label, lastCommittedSnapshot,
                                                lastCommittedCurrent);
 }
 
 void OpenYourBoxAudioProcessorEditor::endHistoryGesture() {
-  persistGraph(true, false);
+  persistGraph(gestureNeedsRecompile, false);
+  gestureNeedsRecompile = false;
   auto after = captureLiveSnapshot();
   auto afterCurrent = audioProcessor.getCurrentPreset();
   const auto fingerprint = after.sonicFingerprint();

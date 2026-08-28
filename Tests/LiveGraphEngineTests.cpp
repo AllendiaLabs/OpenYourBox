@@ -385,6 +385,47 @@ int main() {
                        tail.abs().max().item<float>() > 1.0e-6f,
                    "causal history must keep sounding into following silence");
 
+  {
+    openyourbox::graph::NodeGraph meterGraph;
+    const auto meterInput = meterGraph.addNode(
+        openyourbox::graph::NodeType::audioInput, {0.0f, 0.0f});
+    const auto meterOutput = meterGraph.addNode(
+        openyourbox::graph::NodeType::audioOutput, {180.0f, 0.0f});
+    passed &= expect(
+        meterGraph
+            .connect(meterGraph.findNode(meterInput)->outputs.front().id,
+                     meterGraph.findNode(meterOutput)->inputs.front().id)
+            .accepted,
+        "passthrough meter graph must connect Audio In to Audio Out");
+    const auto meterCompiled = LiveGraphEngine::compile(meterGraph, options);
+    const auto meterRuntime =
+        LiveGraphEngine::prepare(meterCompiled.snapshot, error);
+    passed &= expect(meterRuntime != nullptr,
+                     "passthrough meter graph must prepare");
+    if (meterRuntime != nullptr) {
+      float rms = 1.0f;
+      meterRuntime->processTensor(torch::zeros({1, 2, 64}, torch::kFloat32));
+      passed &= expect(meterRuntime->getTapRms(meterInput, rms) && rms == 0.0f,
+                       "silence must publish zero output RMS");
+      auto ones = torch::ones({1, 2, 64}, torch::kFloat32);
+      meterRuntime->processTensor(ones);
+      passed &= expect(meterRuntime->getTapRms(meterInput, rms) &&
+                           std::abs(rms - 1.0f) < 1.0e-5f,
+                       "unity stereo must publish RMS 1 after collapsing dims");
+      auto leftOnly = torch::zeros({1, 2, 64}, torch::kFloat32);
+      leftOnly[0][0] = 1.0f;
+      meterRuntime->processTensor(leftOnly);
+      const auto expectedCollapsed = std::sqrt(0.5f);
+      passed &= expect(
+          meterRuntime->getTapRms(meterInput, rms) &&
+              std::abs(rms - expectedCollapsed) < 1.0e-5f,
+          "multi-channel tensors must collapse to a single RMS level");
+      passed &= expect(meterRuntime->getTapRms(meterOutput, rms) &&
+                           std::abs(rms - expectedCollapsed) < 1.0e-5f,
+                       "Audio Out RMS must match the collapsed passthrough");
+    }
+  }
+
   openyourbox::graph::NodeGraph linearGraph;
   const auto linearInput = linearGraph.addNode(
       openyourbox::graph::NodeType::audioInput, {0.0f, 0.0f});
@@ -1793,11 +1834,11 @@ int main() {
                    "library import must succeed for aligned files");
   passed &= expect(library.getSelectedCount() == 1,
                    "imported pairs are selected for train by default");
-  juce::String mixed;
-  passed &= expect(library.selectedSampleRatesMatch(mixed),
+  juce::String mixedRateMessage;
+  passed &= expect(library.selectedSampleRatesMatch(mixedRateMessage),
                    "single selected pair must pass sample-rate gate");
   library.selectNone();
-  passed &= expect(!library.selectedSampleRatesMatch(mixed),
+  passed &= expect(!library.selectedSampleRatesMatch(mixedRateMessage),
                    "empty selection must block Train");
   tempRoot.deleteRecursively();
 
@@ -1889,6 +1930,137 @@ int main() {
     const auto upsampled = up.process(downsampled, upWeight);
     passed &= expect(upsampled.size(2) == 64,
                      "causal upsample rateConv must restore T * stride samples");
+  }
+
+  {
+    using openyourbox::graph::NodeGraph;
+    using openyourbox::graph::NodeType;
+    NodeGraph raveGraph;
+    const auto raveInputId =
+        raveGraph.addNode(NodeType::audioInput, {0.0f, 0.0f});
+    const auto analysis =
+        raveGraph.addNode(NodeType::pqmfAnalysis, {100.0f, 0.0f});
+    const auto downsample =
+        raveGraph.addNode(NodeType::convolution, {200.0f, 0.0f});
+    const auto bottleneck =
+        raveGraph.addNode(NodeType::variationalBottleneck, {300.0f, 0.0f});
+    const auto upsample =
+        raveGraph.addNode(NodeType::convTranspose, {400.0f, 0.0f});
+    const auto left =
+        raveGraph.addNode(NodeType::activation, {500.0f, -50.0f});
+    const auto right =
+        raveGraph.addNode(NodeType::activation, {500.0f, 50.0f});
+    const auto envelopeMath =
+        raveGraph.addNode(NodeType::mathExpression, {600.0f, 50.0f});
+    const auto merge =
+        raveGraph.addNode(NodeType::merge, {700.0f, 0.0f});
+    const auto synthesis =
+        raveGraph.addNode(NodeType::pqmfSynthesis, {800.0f, 0.0f});
+    const auto raveOutputId =
+        raveGraph.addNode(NodeType::audioOutput, {900.0f, 0.0f});
+    raveGraph.setProperty(analysis, "n_band", 2);
+    raveGraph.setProperty(downsample, "channels", 4);
+    raveGraph.setProperty(downsample, "stride", 2);
+    raveGraph.setProperty(bottleneck, "latent_size", 2);
+    raveGraph.setProperty(upsample, "channels", 4);
+    raveGraph.setProperty(upsample, "stride", 2);
+    raveGraph.setProperty(synthesis, "n_band", 2);
+
+    const auto *raveInputNode = raveGraph.findNode(raveInputId);
+    const auto *analysisNode = raveGraph.findNode(analysis);
+    const auto *downsampleNode = raveGraph.findNode(downsample);
+    const auto *bottleneckNode = raveGraph.findNode(bottleneck);
+    const auto *upsampleNode = raveGraph.findNode(upsample);
+    const auto *leftNode = raveGraph.findNode(left);
+    const auto *rightNode = raveGraph.findNode(right);
+    const auto *envelopeMathNode = raveGraph.findNode(envelopeMath);
+    const auto *raveMergeNode = raveGraph.findNode(merge);
+    const auto *synthesisNode = raveGraph.findNode(synthesis);
+    const auto *raveOutputNode = raveGraph.findNode(raveOutputId);
+    const auto wired =
+        raveInputNode != nullptr && analysisNode != nullptr &&
+        downsampleNode != nullptr && bottleneckNode != nullptr &&
+        upsampleNode != nullptr && leftNode != nullptr && rightNode != nullptr &&
+        envelopeMathNode != nullptr && raveMergeNode != nullptr &&
+        synthesisNode != nullptr && raveOutputNode != nullptr &&
+        raveGraph
+            .connect(raveInputNode->outputs.front().id,
+                     analysisNode->inputs.front().id)
+            .accepted &&
+        raveGraph
+            .connect(analysisNode->outputs.front().id,
+                     downsampleNode->inputs.front().id)
+            .accepted &&
+        raveGraph
+            .connect(downsampleNode->outputs.front().id,
+                     bottleneckNode->inputs.front().id)
+            .accepted &&
+        raveGraph
+            .connect(bottleneckNode->outputs.front().id,
+                     upsampleNode->inputs.front().id)
+            .accepted &&
+        raveGraph
+            .connect(upsampleNode->outputs.front().id,
+                     leftNode->inputs.front().id)
+            .accepted &&
+        raveGraph
+            .connect(upsampleNode->outputs.front().id,
+                     rightNode->inputs.front().id)
+            .accepted &&
+        raveGraph
+            .connect(rightNode->outputs.front().id,
+                     envelopeMathNode->inputs.front().id)
+            .accepted &&
+        raveGraph
+            .connect(leftNode->outputs.front().id,
+                     raveMergeNode->inputs[0].id)
+            .accepted &&
+        raveGraph
+            .connect(envelopeMathNode->outputs.front().id,
+                     raveMergeNode->inputs[1].id)
+            .accepted &&
+        raveGraph
+            .connect(raveMergeNode->outputs.front().id,
+                     synthesisNode->inputs.front().id)
+            .accepted &&
+        raveGraph
+            .connect(synthesisNode->outputs.front().id,
+                     raveOutputNode->inputs.front().id)
+            .accepted;
+    passed &= expect(wired, "end-to-end RAVE fixture must wire");
+
+    const auto raveCompiled = LiveGraphEngine::compile(raveGraph, options);
+    const auto raveRuntime =
+        LiveGraphEngine::prepare(raveCompiled.snapshot, error);
+    passed &= expect(raveCompiled.succeeded() && raveRuntime != nullptr,
+                     "end-to-end RAVE graph must compile and prepare");
+    if (raveRuntime != nullptr) {
+      torch::Tensor raveOutput;
+      bool processed = false;
+      try {
+        raveOutput =
+            raveRuntime->processTensor(torch::randn({1, 2, 256}, torch::kFloat32));
+        processed = true;
+      } catch (...) {
+      }
+      passed &= expect(processed && raveOutput.defined() &&
+                           raveOutput.size(2) == 256 &&
+                           raveOutput.abs().max().item<float>() > 0.0f,
+                       "untrained end-to-end RAVE must emit non-silent audio");
+
+      std::array<std::vector<float>, 2> inputPlanes{
+          std::vector<float>(256, 0.25f), std::vector<float>(256, -0.25f)};
+      std::array<std::vector<float>, 2> outputPlanes{
+          std::vector<float>(256), std::vector<float>(256)};
+      const float *inputPointers[] = {inputPlanes[0].data(),
+                                      inputPlanes[1].data()};
+      float *outputPointers[] = {outputPlanes[0].data(),
+                                 outputPlanes[1].data()};
+      passed &= expect(
+          !raveRuntime->processHost(inputPointers, 1, outputPointers, 2, 256) &&
+              raveRuntime->getLastProcessingFailureNodeId() == -1,
+          "host processing failures must latch a UI-readable warning");
+    }
   }
 
   {

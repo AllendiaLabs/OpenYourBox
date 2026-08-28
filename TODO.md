@@ -48,3 +48,5 @@
 - [ ] when I move group boxes they glitch: they can change size, and the randomize button changes size too. the button should be in right property menu.
 - [ ] only keep name and pins on boxes. the rest goes to property menu.
 - [ ] selecting or clicking on a box should open its property menu 
+
+- [ ] deleting B in A->B->C should lead to A->C, not disconnected A C. B being a box, a selection of boxes, groups, etc. if connection cannot be made then do not connect (no need for warning in ui). make sure all edge cases are taken into account

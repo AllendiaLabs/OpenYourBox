@@ -75,6 +75,25 @@ constexpr float canvasFitPadding = 48.0f;
 constexpr const char *rootCanvasLabel = "Main";
 /** @brief Sentinel id for the Project structure Main row double-click. */
 constexpr std::int32_t mainStructureRowId = -1;
+/** @brief Idle cable colour before RMS fill is applied. */
+constexpr ImU32 idleLinkColour = IM_COL32(100, 180, 255, 220);
+/** @brief RMS fill colour drawn from source toward destination. */
+constexpr ImU32 levelLinkColour = IM_COL32(255, 176, 64, 255);
+/** @brief Thickness of the idle cable in canvas units. */
+constexpr float idleLinkThickness = 2.0f;
+/** @brief Thickness of the RMS fill overlay in canvas units. */
+constexpr float levelLinkThickness = 3.0f;
+/** @brief Floor of the cable meter in dBFS; below this the fill is empty. */
+constexpr float rmsMeterFloorDb = -60.0f;
+/** @brief Smoothing time constant for cable fill animation, in seconds. */
+constexpr float linkFillSmoothSeconds = 0.08f;
+/**
+ * @brief imgui-node-editor `c_LinkChannel_Flow` (above cables, below nodes).
+ * @see imgui_node_editor.cpp channel layout
+ */
+constexpr int imguiLinkFlowChannel = 8;
+/** @brief imgui-node-editor `c_UserChannel_Content` restored after fill draw. */
+constexpr int imguiUserContentChannel = 1;
 
 /**
  * @brief Draws node/group chrome that must not steal canvas clicks or drags.
@@ -181,6 +200,46 @@ ax::NodeEditor::Detail::EditorContext *detailEditor() {
 }
 
 /**
+ * @brief Maps a linear RMS amplitude to a `[0, 1]` cable-fill fraction.
+ * @param rms Collapsed linear RMS, typically in `[0, 1]`.
+ * @return Fill amount from the source pin toward the destination.
+ */
+float rmsToLinkFill(float rms) noexcept {
+  if (!(rms > 1.0e-8f))
+    return 0.0f;
+  const float db = 20.0f * std::log10(std::min(rms, 1.0f));
+  return std::clamp((db - rmsMeterFloorDb) / -rmsMeterFloorDb, 0.0f, 1.0f);
+}
+
+/**
+ * @brief Strokes the source-to-destination portion of a live editor link.
+ * @param linkId Stable graph link identifier.
+ * @param fill Fraction of the cubic in `[0, 1]`.
+ */
+void drawDirectedLinkFill(std::int32_t linkId, float fill) {
+  auto *editor = detailEditor();
+  if (editor == nullptr || fill <= 0.001f)
+    return;
+  auto *link = editor->FindLink(ed::LinkId(editorIdentifier(linkId)));
+  if (link == nullptr || !link->m_IsLive)
+    return;
+  auto *drawList = editor->GetDrawList();
+  if (drawList == nullptr)
+    return;
+  drawList->ChannelsSetCurrent(imguiLinkFlowChannel);
+  const auto curve = link->GetCurve();
+  const auto t = std::clamp(fill, 0.0f, 1.0f);
+  if (t >= 0.999f) {
+    drawList->AddBezierCubic(curve.P0, curve.P1, curve.P2, curve.P3,
+                             levelLinkColour, levelLinkThickness);
+    return;
+  }
+  const auto split = ImCubicBezierSplit(curve, t);
+  drawList->AddBezierCubic(split.Left.P0, split.Left.P1, split.Left.P2,
+                           split.Left.P3, levelLinkColour, levelLinkThickness);
+}
+
+/**
  * @brief Applies a canvas view rectangle, including zoom, without animation.
  * @param view Target visible region in editor canvas coordinates.
  */
@@ -265,11 +324,14 @@ void drawEastWestArrows(ImDrawList *draw, ImVec2 center, ImU32 color) {
 }
 
 /**
- * @brief Draws a drag handle and returns integer steps from horizontal dragging.
- * @param id ImGui identifier for the handle.
- * @param size Handle size in pixels.
- * @return Signed steps to apply; zero when the handle is idle.
- */
+   * @brief Draws a drag handle and returns integer steps from horizontal dragging.
+   *
+   * The click frame and sub-step pointer jitter are ignored so a press-and-hold
+   * does not emit a value change.
+   * @param id ImGui identifier for the handle.
+   * @param size Handle size in pixels.
+   * @return Signed steps to apply; zero when the handle is idle or still held.
+   */
 int propertyDragSteps(const char *id, ImVec2 size) {
   ImGui::InvisibleButton(id, size);
   const auto hovered = ImGui::IsItemHovered();
@@ -287,17 +349,33 @@ int propertyDragSteps(const char *id, ImVec2 size) {
                      color);
 
   auto *storage = ImGui::GetStateStorage();
-  const auto storageId = ImGui::GetItemID();
+  const auto accumId = ImGui::GetItemID();
+  const auto phaseId = ImGui::GetID("##dragPhase");
   if (!active) {
-    storage->SetFloat(storageId, 0.0f);
+    storage->SetFloat(accumId, 0.0f);
+    storage->SetInt(phaseId, 0);
     return 0;
   }
 
   const auto pixelsPerStep = ImGui::GetIO().KeyShift ? 3.0f : 8.0f;
-  auto accum = storage->GetFloat(storageId) + ImGui::GetIO().MouseDelta.x;
+  auto phase = storage->GetInt(phaseId);
+  if (phase == 0) {
+    storage->SetInt(phaseId, 1);
+    storage->SetFloat(accumId, 0.0f);
+    return 0;
+  }
+
+  auto accum = storage->GetFloat(accumId) + ImGui::GetIO().MouseDelta.x;
+  if (phase == 1) {
+    if (std::abs(accum) < pixelsPerStep) {
+      storage->SetFloat(accumId, accum);
+      return 0;
+    }
+    storage->SetInt(phaseId, 2);
+  }
   const auto steps = static_cast<int>(accum / pixelsPerStep);
   accum -= static_cast<float>(steps) * pixelsPerStep;
-  storage->SetFloat(storageId, accum);
+  storage->SetFloat(accumId, accum);
   return steps;
 }
 
@@ -477,7 +555,9 @@ NodeRenderer::~NodeRenderer() { ed::DestroyEditor(context); }
 void NodeRenderer::render(NodeGraph &graph,
                           const NodeRendererCallbacks &callbacks,
                           float pinchMagnification,
-                          openyourbox::library::UserBoxLibrary *boxLibrary) {
+                          openyourbox::library::UserBoxLibrary *boxLibrary,
+                          const std::unordered_map<std::int32_t, float>
+                              *outputRmsByNodeId) {
   mutatedThisFrame = false;
   layoutMutatedThisFrame = false;
   recompileThisFrame = false;
@@ -701,6 +781,10 @@ void NodeRenderer::render(NodeGraph &graph,
       renderNode(graph, node, callbacks);
   }
 
+  std::unordered_set<std::int32_t> liveLinkIds;
+  liveLinkIds.reserve(graph.getLinks().size());
+  const float fillSmooth =
+      1.0f - std::exp(-ImGui::GetIO().DeltaTime / linkFillSmoothSeconds);
   for (const auto &link : graph.getLinks()) {
     const auto sourceNode = graph.findNodeForPin(link.sourcePinId);
     const auto destNode = graph.findNodeForPin(link.destinationPinId);
@@ -722,8 +806,27 @@ void NodeRenderer::render(NodeGraph &graph,
     ed::Link(ed::LinkId(editorIdentifier(link.id)),
              ed::PinId(editorIdentifier(sourcePin)),
              ed::PinId(editorIdentifier(destPin)),
-             ImColor(100, 180, 255, 220), 2.0f);
+             ImColor(idleLinkColour), idleLinkThickness);
+    liveLinkIds.insert(link.id);
+    float targetFill = 0.0f;
+    if (outputRmsByNodeId != nullptr) {
+      const auto found = outputRmsByNodeId->find(*sourceNode);
+      if (found != outputRmsByNodeId->end())
+        targetFill = rmsToLinkFill(found->second);
+    }
+    auto &displayed = displayedLinkFill[link.id];
+    displayed += (targetFill - displayed) * fillSmooth;
+    drawDirectedLinkFill(link.id, displayed);
   }
+  for (auto it = displayedLinkFill.begin(); it != displayedLinkFill.end();) {
+    if (liveLinkIds.count(it->first) == 0)
+      it = displayedLinkFill.erase(it);
+    else
+      ++it;
+  }
+  if (auto *editor = detailEditor();
+      editor != nullptr && editor->GetDrawList() != nullptr)
+    editor->GetDrawList()->ChannelsSetCurrent(imguiUserContentChannel);
 
   flushPendingInfoTooltip();
   handleConnections(graph, callbacks);

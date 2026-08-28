@@ -838,12 +838,18 @@ struct LiveGraphRuntime::Impl {
   std::unique_ptr<std::atomic<float>[]> inputPeaks;
   /** @brief Latest output peak per compiled element. */
   std::unique_ptr<std::atomic<float>[]> outputPeaks;
+  /** @brief Latest output RMS per compiled element, collapsed over all dims. */
+  std::unique_ptr<std::atomic<float>[]> outputRms;
   /** @brief Published Gain/conditioning table, or null for compiled defaults. */
   std::shared_ptr<const RuntimeControlState> controls;
   /** @brief Per-element Gain ramps for Activation and TCN. */
   std::vector<OnePoleSmoother> gainSmoothers;
   /** @brief Per-element Knob/XY ramps; XY stores X in [0] and Y in [1]. */
   std::vector<std::array<OnePoleSmoother, 2>> conditioningSmoothers;
+  /** @brief Node currently executing on the single owning audio thread. */
+  std::int32_t executingNodeId = 0;
+  /** @brief Lock-free marker for the latest latched host-processing failure. */
+  std::atomic<std::int32_t> processingFailureNodeId{0};
 };
 
 /** @brief Constructs a snapshot from validated immutable storage. */
@@ -967,6 +973,26 @@ float tensorPeak(const torch::Tensor &value) noexcept {
   return peak;
 }
 
+/**
+ * @brief Collapses a tensor of any rank to one linear RMS scalar.
+ * @param value Output or tap tensor; empty tensors report 0.
+ * @return `sqrt(mean(x^2))` over every element.
+ */
+float tensorRms(const torch::Tensor &value) noexcept {
+  if (!value.defined() || value.numel() == 0)
+    return 0.0f;
+  const auto contiguous = value.is_contiguous() ? value : value.contiguous();
+  const auto *data = contiguous.data_ptr<float>();
+  const auto count = contiguous.numel();
+  double sumSquares = 0.0;
+  for (std::int64_t index = 0; index < count; ++index) {
+    const double sample = static_cast<double>(data[index]);
+    sumSquares += sample * sample;
+  }
+  return static_cast<float>(
+      std::sqrt(sumSquares / static_cast<double>(count)));
+}
+
 torch::Tensor matchTimeLength(const torch::Tensor &value, std::int64_t samples) {
   if (!value.defined() || value.size(2) == samples)
     return value;
@@ -1049,8 +1075,21 @@ torch::Tensor executeMerge(const CompiledElement &element,
     return torch::full({1, 1, samples}, fill, options);
   }
 
-  if (element.mergeMode == 2)
-    return torch::cat(inputs, 1);
+  auto localSamples = samples;
+  for (const auto &value : inputs) {
+    if (value.defined()) {
+      localSamples = value.size(2);
+      break;
+    }
+  }
+
+  if (element.mergeMode == 2) {
+    std::vector<torch::Tensor> aligned;
+    aligned.reserve(inputs.size());
+    for (const auto &value : inputs)
+      aligned.push_back(matchTimeLength(value, localSamples));
+    return torch::cat(aligned, 1);
+  }
 
   int width = 1;
   for (const auto &value : inputs) {
@@ -1059,10 +1098,11 @@ torch::Tensor executeMerge(const CompiledElement &element,
   }
 
   auto output = element.mergeMode == 1
-                    ? torch::ones({1, width, samples}, options)
-                    : torch::zeros({1, width, samples}, options);
+                    ? torch::ones({1, width, localSamples}, options)
+                    : torch::zeros({1, width, localSamples}, options);
   for (const auto &value : inputs) {
-    const auto aligned = broadcastChannels(value, width);
+    const auto aligned =
+        broadcastChannels(matchTimeLength(value, localSamples), width);
     output = element.mergeMode == 1 ? output * aligned : output + aligned;
   }
   return output;
@@ -1081,25 +1121,33 @@ torch::Tensor executeMathExpression(const CompiledElement &element,
                                     torch::TensorOptions options) {
   using openyourbox::graph::ExpressionInstruction;
   int width = 1;
+  auto localSamples = samples;
+  bool foundReferencedInput = false;
   for (std::size_t index = 0; index < pinTensors.size(); ++index) {
     if (!openyourbox::graph::mathExpressionReferencesInput(
             element.mathAst, static_cast<int>(index) + 1))
       continue;
-    if (pinTensors[index].defined())
+    if (pinTensors[index].defined()) {
       width = std::max(width, static_cast<int>(pinTensors[index].size(1)));
+      if (!foundReferencedInput) {
+        localSamples = pinTensors[index].size(2);
+        foundReferencedInput = true;
+      }
+    }
   }
   std::vector<torch::Tensor> stack;
   stack.reserve(element.mathAst.instructions.size());
   const auto asTensor = [&](double literal) {
-    return torch::full({1, width, samples}, static_cast<float>(literal), options);
+    return torch::full({1, width, localSamples}, static_cast<float>(literal),
+                       options);
   };
   const auto binary = [&](auto op) {
     auto b = stack.back();
     stack.pop_back();
     auto a = stack.back();
     stack.pop_back();
-    a = matchTimeLength(a, samples);
-    b = matchTimeLength(b, samples);
+    a = matchTimeLength(a, localSamples);
+    b = matchTimeLength(b, localSamples);
     const auto opWidth =
         std::max(static_cast<int>(a.size(1)), static_cast<int>(b.size(1)));
     a = broadcastChannels(a, opWidth);
@@ -1119,7 +1167,7 @@ torch::Tensor executeMathExpression(const CompiledElement &element,
         break;
       }
       auto value = matchTimeLength(pinTensors[static_cast<std::size_t>(pin)],
-                                   samples);
+                                   localSamples);
       stack.push_back(broadcastChannels(value, width));
       break;
     }
@@ -1151,8 +1199,8 @@ torch::Tensor executeMathExpression(const CompiledElement &element,
     }
   }
   if (stack.empty())
-    return torch::zeros({1, width, samples}, options);
-  return matchTimeLength(stack.back(), samples);
+    return torch::zeros({1, width, localSamples}, options);
+  return matchTimeLength(stack.back(), localSamples);
 }
 
 } // namespace
@@ -1165,9 +1213,18 @@ void LiveGraphRuntime::executeElement(std::size_t index,
   auto &output = runtime.outputs[index];
   const auto *controls = runtime.controls.get();
   const auto samples = blockInput.size(2);
+  const auto publishOutputMeters = [&]() {
+    if (runtime.outputPeaks)
+      runtime.outputPeaks[index].store(tensorPeak(output),
+                                       std::memory_order_relaxed);
+    if (runtime.outputRms)
+      runtime.outputRms[index].store(tensorRms(output),
+                                     std::memory_order_relaxed);
+  };
 
   if (element.type == openyourbox::graph::NodeType::audioInput) {
     output = adaptHostInputToMode(blockInput, element.hostIoMode);
+    publishOutputMeters();
     return;
   }
   if (element.type == openyourbox::graph::NodeType::knobInput) {
@@ -1176,6 +1233,7 @@ void LiveGraphRuntime::executeElement(std::size_t index,
     smoother.setTargetValue(values[0]);
     output = torch::empty({1, 1, samples}, blockInput.options());
     writeSmoothedChannel(output.data_ptr<float>(), samples, smoother);
+    publishOutputMeters();
     return;
   }
   if (element.type == openyourbox::graph::NodeType::xyTrackpad) {
@@ -1188,6 +1246,7 @@ void LiveGraphRuntime::executeElement(std::size_t index,
     auto *data = output.data_ptr<float>();
     writeSmoothedChannel(data, samples, xSmoother);
     writeSmoothedChannel(data + samples, samples, ySmoother);
+    publishOutputMeters();
     return;
   }
   if (element.type == openyourbox::graph::NodeType::mathExpression) {
@@ -1205,15 +1264,14 @@ void LiveGraphRuntime::executeElement(std::size_t index,
     }
     output = executeMathExpression(element, pinTensors, samples,
                                    blockInput.options());
-    if (runtime.outputPeaks)
-      runtime.outputPeaks[index].store(tensorPeak(output),
-                                       std::memory_order_relaxed);
+    publishOutputMeters();
     return;
   }
   if (element.inputIndices.empty()) {
     output = torch::zeros(
         {1, runtime.snapshot->implementation->outputChannels, samples},
         blockInput.options());
+    publishOutputMeters();
     return;
   }
 
@@ -1289,13 +1347,15 @@ void LiveGraphRuntime::executeElement(std::size_t index,
                                smoother.getCurrentValue(),
                                element.negativeSlope);
     } else {
-      output = applyActivation(upstream * makeGainEnvelope(smoother, samples,
-                                                           blockInput.options()),
+      output = applyActivation(upstream *
+                                   makeGainEnvelope(smoother, upstream.size(2),
+                                                    blockInput.options()),
                                element.activation, 1.0f, element.negativeSlope);
     }
     break;
   }
   case openyourbox::graph::NodeType::tcn: {
+    const auto localSamples = upstream.size(2);
     const auto historyLength =
         static_cast<std::int64_t>(element.receptiveField - 1);
     auto value =
@@ -1304,7 +1364,7 @@ void LiveGraphRuntime::executeElement(std::size_t index,
     auto &smoother = runtime.gainSmoothers[index];
     smoother.setTargetValue(resolveGain(element, controls));
     const auto gainEnvelope =
-        makeGainEnvelope(smoother, samples, blockInput.options());
+        makeGainEnvelope(smoother, localSamples, blockInput.options());
     torch::Tensor cond = resolveFilmConditioning(runtime.outputs, element);
     if (cond.defined())
       cond = extendCausalControl(cond, runtime.conditioningHistories[index],
@@ -1338,7 +1398,7 @@ void LiveGraphRuntime::executeElement(std::size_t index,
       }
     }
     value = project(value, element.weights.back());
-    output = value.narrow(2, value.size(2) - samples, samples);
+    output = value.narrow(2, value.size(2) - localSamples, localSamples);
     break;
   }
   case openyourbox::graph::NodeType::merge:
@@ -1437,9 +1497,7 @@ void LiveGraphRuntime::executeElement(std::size_t index,
     break;
   }
 
-  if (runtime.outputPeaks)
-    runtime.outputPeaks[index].store(tensorPeak(output),
-                                     std::memory_order_relaxed);
+  publishOutputMeters();
 }
 
 torch::Tensor LiveGraphRuntime::processTensor(const torch::Tensor &input) {
@@ -1452,8 +1510,10 @@ torch::Tensor LiveGraphRuntime::processTensor(const torch::Tensor &input) {
         "Live graph input must be CPU float [1, channels, valid samples]");
 
   torch::InferenceMode inferenceGuard;
-  for (std::size_t index = 0; index < snapshot.elements.size(); ++index)
+  for (std::size_t index = 0; index < snapshot.elements.size(); ++index) {
+    implementation->executingNodeId = snapshot.elements[index].nodeId;
     executeElement(index, input);
+  }
   return implementation->outputs.back();
 }
 
@@ -1512,6 +1572,21 @@ bool LiveGraphRuntime::getTapPeaks(std::int32_t nodeId, float &inputPeak,
   return false;
 }
 
+bool LiveGraphRuntime::getTapRms(std::int32_t nodeId,
+                                 float &outputRms) const noexcept {
+  const auto &elements = implementation->snapshot->implementation->elements;
+  for (std::size_t index = 0; index < elements.size(); ++index) {
+    if (elements[index].nodeId != nodeId)
+      continue;
+    outputRms = implementation->outputRms
+                    ? implementation->outputRms[index].load(
+                          std::memory_order_relaxed)
+                    : 0.0f;
+    return true;
+  }
+  return false;
+}
+
 /** @brief Executes planar host audio and converts failures to silence. */
 bool LiveGraphRuntime::processHost(const float *const *inputChannels,
                                    std::size_t inputChannelCount,
@@ -1524,12 +1599,18 @@ bool LiveGraphRuntime::processHost(const float *const *inputChannels,
       inputChannelCount != static_cast<std::size_t>(snapshot.inputChannels) ||
       outputChannelCount != static_cast<std::size_t>(snapshot.outputChannels) ||
       sampleCount == 0 ||
-      sampleCount > static_cast<std::size_t>(snapshot.maximumBlockSize))
+      sampleCount > static_cast<std::size_t>(snapshot.maximumBlockSize)) {
+    implementation->processingFailureNodeId.store(-1,
+                                                  std::memory_order_release);
     return false;
+  }
 
   for (std::size_t channel = 0; channel < inputChannelCount; ++channel) {
-    if (inputChannels[channel] == nullptr || outputChannels[channel] == nullptr)
+    if (inputChannels[channel] == nullptr || outputChannels[channel] == nullptr) {
+      implementation->processingFailureNodeId.store(-1,
+                                                    std::memory_order_release);
       return false;
+    }
   }
 
   try {
@@ -1549,6 +1630,11 @@ bool LiveGraphRuntime::processHost(const float *const *inputChannels,
     }
     return true;
   } catch (...) {
+    const auto nodeId =
+        implementation->executingNodeId != 0 ? implementation->executingNodeId
+                                             : -1;
+    implementation->processingFailureNodeId.store(nodeId,
+                                                  std::memory_order_release);
     clearHostOutput(outputChannels, outputChannelCount, sampleCount);
     return false;
   }
@@ -1567,9 +1653,16 @@ double LiveGraphRuntime::getFrozenInferenceTimeMilliseconds(
   return 0.0;
 }
 
+/** @brief Returns the lock-free marker for the latest host-processing failure. */
+std::int32_t LiveGraphRuntime::getLastProcessingFailureNodeId() const noexcept {
+  return implementation->processingFailureNodeId.load(std::memory_order_acquire);
+}
+
 /** @brief Clears all retained causal samples in place. */
 void LiveGraphRuntime::reset() noexcept {
   try {
+    implementation->executingNodeId = 0;
+    implementation->processingFailureNodeId.store(0, std::memory_order_release);
     for (auto &history : implementation->histories) {
       if (history.defined())
         history.zero_();
@@ -2519,6 +2612,8 @@ LiveGraphEngine::prepare(std::shared_ptr<const LiveGraphSnapshot> snapshot,
         std::make_unique<std::atomic<float>[]>(compiled.elements.size());
     runtime->outputPeaks =
         std::make_unique<std::atomic<float>[]>(compiled.elements.size());
+    runtime->outputRms =
+        std::make_unique<std::atomic<float>[]>(compiled.elements.size());
     runtime->gainSmoothers.resize(compiled.elements.size());
     runtime->conditioningSmoothers.resize(compiled.elements.size());
     for (std::size_t index = 0; index < compiled.elements.size(); ++index) {
@@ -2526,6 +2621,7 @@ LiveGraphEngine::prepare(std::shared_ptr<const LiveGraphSnapshot> snapshot,
                                                   std::memory_order_relaxed);
       runtime->inputPeaks[index].store(0.0f, std::memory_order_relaxed);
       runtime->outputPeaks[index].store(0.0f, std::memory_order_relaxed);
+      runtime->outputRms[index].store(0.0f, std::memory_order_relaxed);
       const auto &element = compiled.elements[index];
       auto &gain = runtime->gainSmoothers[index];
       gain.reset(compiled.sampleRate, compiled.controlRampSeconds);

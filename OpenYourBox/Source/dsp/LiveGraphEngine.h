@@ -533,12 +533,35 @@ public:
                                  float &outputPeak) const noexcept;
 
   /**
+   * @brief Returns the latest audio-thread output RMS for one compiled node.
+   *
+   * Multi-channel, feature, and latent tensors collapse to one scalar
+   * `sqrt(mean(x^2))` over every element of the output tensor.
+   * @param nodeId Stable graph node identifier.
+   * @param outputRms Receives the linear RMS level.
+   * @return True when the node is present in this runtime.
+   */
+  [[nodiscard]] bool getTapRms(std::int32_t nodeId, float &outputRms) const
+      noexcept;
+
+  /**
    * @brief Returns the latest measured inference time for one frozen node.
    * @param nodeId Stable graph node identifier.
    * @return Per-buffer duration in milliseconds, or zero when unavailable.
    */
   [[nodiscard]] double
   getFrozenInferenceTimeMilliseconds(std::int32_t nodeId) const noexcept;
+
+  /**
+   * @brief Returns the node where host processing most recently failed.
+   * @return Stable graph node id, zero when no failure is latched, or -1 when
+   *   the failure occurred outside an individual element.
+   *
+   * The audio thread publishes only this integer marker; UI text is assembled
+   * later on the message thread.
+   */
+  [[nodiscard]] std::int32_t
+  getLastProcessingFailureNodeId() const noexcept;
 
   /** @brief Clears causal audio and FiLM control history without changing architecture. */
   void reset() noexcept;
