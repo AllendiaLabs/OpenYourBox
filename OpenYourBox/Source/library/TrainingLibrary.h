@@ -134,6 +134,9 @@ public:
 
   /**
    * @brief Imports a clean/processed file pair, aligning/cropping to the shorter.
+   *
+   * Streams both files so long captures are not truncated by in-memory buffers.
+   *
    * @param cleanFile Source x audio.
    * @param processedFile Source y audio.
    * @param error Receives a user-facing failure.
@@ -161,6 +164,10 @@ public:
 
   /**
    * @brief Imports one unpaired clip as a `clip` library entry.
+   *
+   * Streams the full source file into the library WAV so duration is not
+   * truncated by in-memory buffer limits.
+   *
    * @param audioFile Source audio.
    * @param error Receives a user-facing failure.
    * @return The new entry, or no value on failure.
@@ -196,7 +203,7 @@ public:
 
 private:
   /**
-   * @brief Copies and length-aligns two audio files into the library folder.
+   * @brief Streams and length-aligns two audio files into the library folder.
    * @param cleanFile Source x.
    * @param processedFile Source y.
    * @param pairId Destination stem.

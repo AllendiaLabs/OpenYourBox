@@ -27,6 +27,40 @@ public:
     int segmentLength = graph::defaultTrainSegmentLength;
     /** @brief Steps between hear-while-training checkpoint exports. */
     int checkpointInterval = graph::defaultTrainCheckpointInterval;
+    /** @brief Acids-rave v1 representation-stage steps. */
+    int stage1Steps = graph::defaultReconstructionStage1Steps;
+    /** @brief Acids-rave v1 quality-stage steps. */
+    int stage2Steps = graph::defaultReconstructionStage2Steps;
+    /** @brief Reconstruction crop length in samples. */
+    int reconstructionSegmentLength = graph::defaultReconstructionSegmentLength;
+    /** @brief Reconstruction minibatch size. */
+    int batchSize = graph::defaultReconstructionBatchSize;
+    /** @brief Generator Adam learning rate. */
+    float generatorLr = graph::defaultReconstructionGeneratorLr;
+    /** @brief Discriminator Adam learning rate. */
+    float discriminatorLr = graph::defaultReconstructionDiscriminatorLr;
+    /** @brief Adam β1 for generator and discriminator. */
+    float adamBeta1 = graph::defaultReconstructionAdamBeta1;
+    /** @brief Adam β2 for generator and discriminator. */
+    float adamBeta2 = graph::defaultReconstructionAdamBeta2;
+    /** @brief LinearLR end factor applied across stage 1. */
+    float lrDecayEndFactor = graph::defaultReconstructionLrDecayEnd;
+    /** @brief Target / constant KL β (acids-rave v1 = 0.1). */
+    float klBeta = graph::defaultReconstructionKlBeta;
+    /** @brief KL β at warmup start (v1 equals @ref klBeta). */
+    float klBetaStart = graph::defaultReconstructionKlBetaStart;
+    /** @brief KL warmup length in steps; 1 is constant β. */
+    int klWarmupSteps = graph::defaultReconstructionKlWarmupSteps;
+    /** @brief Feature-matching loss weight. */
+    float featureMatchingWeight = graph::defaultReconstructionFeatureMatchingWeight;
+    /** @brief Quality-stage discriminator update period. */
+    int updateDiscriminatorEvery = graph::defaultReconstructionDiscUpdateEvery;
+    /** @brief Probability of the v1 random allpass augmentation. */
+    float phaseMangleProb = graph::defaultReconstructionPhaseMangleProb;
+    /** @brief Dequantization bits; 0 disables the augmentation. */
+    int dequantizeBits = graph::defaultReconstructionDequantizeBits;
+    /** @brief Accelerator sent as `train_options.device`. */
+    graph::TrainDevice device = graph::TrainDevice::automatic;
   };
 
   /** @brief Message-thread actions emitted by the Train panel. */

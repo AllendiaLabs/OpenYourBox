@@ -449,6 +449,119 @@ void collectGroupSubtree(const openyourbox::graph::NodeGraph &graph,
 }
 
 /**
+ * @brief Collects the same processing-node set that Train snapshots and absorbs.
+ *
+ * Starts from armed weighted nodes, then walks every live processing node
+ * reachable from Audio Input so unarmed RAVE elements (PQMF, Utility, Math,
+ * Activation, Noise Synth) stay in the trained module and the Gold replacement.
+ * @param graph Graph to inspect.
+ * @return Unique live processing node identifiers.
+ */
+std::unordered_set<std::int32_t> collectTrainSnapshotNodeIds(
+    const openyourbox::graph::NodeGraph &graph) {
+  using openyourbox::graph::NodeState;
+  using openyourbox::graph::NodeType;
+  using openyourbox::graph::isControlSourceType;
+  std::unordered_set<std::int32_t> selected;
+  for (const auto nodeId : graph.getArmedTrainableNodeIds())
+    selected.insert(nodeId);
+  std::int32_t inputId = 0;
+  for (const auto &node : graph.getNodes()) {
+    if (node.type == NodeType::audioInput)
+      inputId = node.id;
+  }
+  if (inputId == 0)
+    return selected;
+  std::queue<std::int32_t> pending;
+  pending.push(inputId);
+  std::unordered_set<std::int32_t> visited;
+  while (!pending.empty()) {
+    const auto current = pending.front();
+    pending.pop();
+    if (!visited.insert(current).second)
+      continue;
+    const auto *node = graph.findNode(current);
+    if (node != nullptr && !isControlSourceType(node->type) &&
+        node->state == NodeState::liveBlue)
+      selected.insert(current);
+    for (const auto &link : graph.getLinks()) {
+      const auto source = graph.findNodeForPin(link.sourcePinId);
+      const auto destination = graph.findNodeForPin(link.destinationPinId);
+      if (source.has_value() && *source == current && destination.has_value())
+        pending.push(*destination);
+    }
+  }
+  return selected;
+}
+
+/**
+ * @brief True when every non-hub member of @p groupId is in @p selected.
+ *
+ * Nested groups count as absorbed only when they themselves qualify. A Knob
+ * or other control source inside the group blocks whole-group absorb.
+ * @param graph Graph owning membership.
+ * @param groupId Candidate group.
+ * @param selected Processing nodes that will be replaced by Gold.
+ * @param memo Recursion cache, group id → result.
+ */
+bool groupIsFullyAbsorbed(
+    const openyourbox::graph::NodeGraph &graph, std::int32_t groupId,
+    const std::unordered_set<std::int32_t> &selected,
+    std::unordered_map<std::int32_t, bool> &memo) {
+  using openyourbox::graph::isControlSourceType;
+  using openyourbox::graph::isGroupBoundaryType;
+  if (const auto found = memo.find(groupId); found != memo.end())
+    return found->second;
+  const auto *group = graph.findGroup(groupId);
+  if (group == nullptr)
+    return false;
+  bool hasContent = false;
+  for (const auto member : group->memberIds) {
+    if (const auto *node = graph.findNode(member)) {
+      if (isGroupBoundaryType(node->type))
+        continue;
+      if (isControlSourceType(node->type) || selected.count(member) == 0) {
+        memo[groupId] = false;
+        return false;
+      }
+      hasContent = true;
+    } else if (graph.findGroup(member) != nullptr) {
+      if (!groupIsFullyAbsorbed(graph, member, selected, memo)) {
+        memo[groupId] = false;
+        return false;
+      }
+      hasContent = true;
+    }
+  }
+  memo[groupId] = hasContent;
+  return hasContent;
+}
+
+/**
+ * @brief True when @p nodeId sits in @p absorbedGroups or a descendant.
+ * @param graph Graph owning parent links.
+ * @param nodeId Processing node.
+ * @param absorbedGroups Groups that will be deleted with the chain.
+ */
+bool nodeCoveredByAbsorbedGroup(
+    const openyourbox::graph::NodeGraph &graph, std::int32_t nodeId,
+    const std::unordered_set<std::int32_t> &absorbedGroups) {
+  const auto *node = graph.findNode(nodeId);
+  if (node == nullptr)
+    return false;
+  auto current = node->parentGroupId;
+  while (current.has_value()) {
+    if (absorbedGroups.count(*current) != 0)
+      return true;
+    const auto *group = graph.findGroup(*current);
+    if (group == nullptr)
+      break;
+    current = group->parentGroupId;
+  }
+  return false;
+}
+
+/**
  * @brief Signal I/O used to stack independent group repeats in series.
  *
  * Uses the group's interface pins (unconnected internally) rather than
@@ -5704,7 +5817,35 @@ bool NodeGraph::unfreeze(std::int32_t nodeId) {
         node->blackBoxOrigin == BlackBoxOrigin::trainAutoload;
     const auto fidelity = node->fidelityPercent;
 
-    removeNode(nodeId);
+    // Strip Gold without bypassing so restored cables are the only signal path.
+    const auto goldId = nodeId;
+    std::unordered_set<std::int32_t> goldPins;
+    if (const auto *gold = findNode(goldId)) {
+      for (const auto &pin : gold->inputs)
+        goldPins.insert(pin.id);
+      for (const auto &pin : gold->outputs)
+        goldPins.insert(pin.id);
+    }
+    links.erase(std::remove_if(links.begin(), links.end(),
+                               [&goldPins](const GraphLink &link) {
+                                 return goldPins.count(link.sourcePinId) != 0 ||
+                                        goldPins.count(link.destinationPinId) != 0;
+                               }),
+                links.end());
+    nodes.erase(std::remove_if(nodes.begin(), nodes.end(),
+                                [goldId](const GraphNode &candidate) {
+                                  return candidate.id == goldId;
+                                }),
+                 nodes.end());
+    eraseMemberFromParents(groups, goldId);
+    for (const auto child : fragment) {
+      if (!child.hasType("Group"))
+        continue;
+      auto restored = groupFromTree(child);
+      nextNodeId = std::max(nextNodeId, restored.id + 1);
+      if (findGroup(restored.id) == nullptr)
+        groups.push_back(std::move(restored));
+    }
     for (const auto child : fragment) {
       if (!child.hasType("Node"))
         continue;
@@ -7139,35 +7280,7 @@ std::optional<TrainJobRequest> NodeGraph::createTrainRequest() const {
 
   juce::Array<juce::var> armedIds;
   juce::Array<juce::var> elements;
-  std::unordered_set<std::int32_t> selected(armed.begin(), armed.end());
-  std::int32_t inputId = 0;
-  for (const auto &node : nodes) {
-    if (node.type == NodeType::audioInput)
-      inputId = node.id;
-  }
-  if (inputId != 0) {
-    std::queue<std::int32_t> pending;
-    pending.push(inputId);
-    std::unordered_set<std::int32_t> visited;
-    while (!pending.empty()) {
-      const auto current = pending.front();
-      pending.pop();
-      if (!visited.insert(current).second)
-        continue;
-      const auto *node = findNode(current);
-      if (node != nullptr && !isControlSourceType(node->type) &&
-          node->state == NodeState::liveBlue)
-        selected.insert(current);
-      for (const auto &link : links) {
-        const auto source = findNodeForPin(link.sourcePinId);
-        const auto destination = findNodeForPin(link.destinationPinId);
-        if (source.has_value() && *source == current && destination.has_value())
-          pending.push(*destination);
-      }
-    }
-  }
-  const std::unordered_set<std::int32_t> snapshot(selected.begin(),
-                                                  selected.end());
+  const auto snapshot = collectTrainSnapshotNodeIds(*this);
   for (const auto nodeId : armed)
     armedIds.add(nodeId);
   for (const auto nodeId : snapshot) {
@@ -7239,21 +7352,47 @@ std::optional<std::int32_t>
 NodeGraph::absorbArmedChain(const TrainJobResult &result) {
   if (result.artifactPath.empty())
     return std::nullopt;
-  const auto armed = getArmedTrainableNodeIds();
-  if (armed.empty())
+  if (getArmedTrainableNodeIds().empty())
+    return std::nullopt;
+  const auto processing = collectTrainSnapshotNodeIds(*this);
+  if (processing.empty())
     return std::nullopt;
 
+  std::unordered_map<std::int32_t, bool> absorbMemo;
+  std::unordered_set<std::int32_t> absorbedGroups;
+  for (const auto &group : groups) {
+    if (groupIsFullyAbsorbed(*this, group.id, processing, absorbMemo))
+      absorbedGroups.insert(group.id);
+  }
+
+  std::unordered_set<std::int32_t> selected(processing.begin(),
+                                            processing.end());
+  for (const auto groupId : absorbedGroups) {
+    std::unordered_set<std::int32_t> subtreeNodes;
+    std::unordered_set<std::int32_t> subtreeGroups;
+    collectGroupSubtree(*this, groupId, subtreeNodes, subtreeGroups);
+    selected.insert(subtreeNodes.begin(), subtreeNodes.end());
+  }
+
   juce::ValueTree fragment{"GraphFragment"};
-  const std::unordered_set<std::int32_t> selected(armed.begin(), armed.end());
   juce::Point<float> centroid;
-  for (const auto nodeId : armed) {
+  int centroidCount = 0;
+  for (const auto nodeId : selected) {
     const auto *node = findNode(nodeId);
     if (node == nullptr)
       return std::nullopt;
     fragment.appendChild(nodeToTree(*node), nullptr);
-    centroid += node->position;
+    centroid += itemWorldPosition(*this, nodeId);
+    ++centroidCount;
   }
-  centroid /= static_cast<float>(armed.size());
+  for (const auto groupId : absorbedGroups) {
+    const auto *group = findGroup(groupId);
+    if (group == nullptr)
+      return std::nullopt;
+    fragment.appendChild(groupToTree(*group), nullptr);
+  }
+  if (centroidCount > 0)
+    centroid /= static_cast<float>(centroidCount);
   for (const auto &link : links) {
     const auto source = findNodeForPin(link.sourcePinId);
     const auto destination = findNodeForPin(link.destinationPinId);
@@ -7334,8 +7473,14 @@ NodeGraph::absorbArmedChain(const TrainJobResult &result) {
     }
   }
 
-  for (auto nodeId : armed)
-    removeNode(nodeId);
+  std::vector<std::int32_t> toRemove(absorbedGroups.begin(),
+                                      absorbedGroups.end());
+  for (const auto nodeId : processing) {
+    if (!nodeCoveredByAbsorbedGroup(*this, nodeId, absorbedGroups))
+      toRemove.push_back(nodeId);
+  }
+  if (!toRemove.empty())
+    removeBoxes(toRemove);
   return boxId;
 }
 

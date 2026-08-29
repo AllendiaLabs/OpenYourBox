@@ -340,11 +340,14 @@ TorchScriptBlackBoxFactory::load(const std::string &artifactPath,
       return {};
     }
     const auto output = value.toTensor();
+    // Rate-changing RAVE graphs (PQMF, strided conv, conv-transpose) may
+    // emit a different time length than the 256-sample probe. Live playback
+    // already crops or left-pads with matchTimeLength.
     if (!output.defined() || output.device().type() != torch::kCPU ||
         output.scalar_type() != torch::kFloat32 || output.dim() != 3 ||
         output.size(0) != 1 || output.size(1) < 1 ||
         output.size(1) > std::numeric_limits<int>::max() ||
-        output.size(2) != silence.size(2)) {
+        output.size(2) < 1) {
       error = "Frozen artifact returned an invalid audio tensor shape";
       return {};
     }

@@ -222,6 +222,15 @@ void TrainCoordinator::applyProgressObject(const juce::var &parsed) {
   progress.objective = jsonString(parsed, "objective");
   progress.hasEncodeDecode =
       static_cast<bool>(parsed.getProperty("has_encode_decode", false));
+  if (auto *object = parsed.getDynamicObject()) {
+    if (object->hasProperty("device"))
+      progress.device = jsonString(parsed, "device");
+    if (object->hasProperty("requested_device"))
+      progress.requestedDevice = jsonString(parsed, "requested_device");
+    if (object->hasProperty("device_fallback"))
+      progress.deviceFallback =
+          static_cast<bool>(object->getProperty("device_fallback"));
+  }
   const auto compactness = parsed.getProperty("compactness", {});
   if (compactness.isObject()) {
     progress.compactnessReady =
@@ -423,6 +432,7 @@ void TrainCoordinator::run() {
   std::string preparationError;
   if (prepareArtifact != nullptr &&
       !prepareArtifact(result, preparationError)) {
+    result.status = "failure";
     result.errorMessage = composeWorkerFailure(
         preparationError.empty() ? "Trained artifact could not be prepared"
                                  : preparationError,

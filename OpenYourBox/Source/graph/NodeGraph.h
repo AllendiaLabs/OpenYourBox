@@ -683,7 +683,11 @@ public:
   bool clearWeightsToSeed(std::int32_t nodeId, std::int32_t seed);
 
   /**
-   * @brief Replaces the armed trainable chain with a train-origin Gold BlackBox.
+   * @brief Replaces the trained processing chain with a train-origin Gold BlackBox.
+   *
+   * Absorbs armed weighted nodes and every live processing node on the Audio
+   * Input path (PQMF, Utility, Math, Activation, Noise Synth) so RAVE layouts
+   * become one Gold box instead of leaving an untrained decoder shell.
    * @param result Successful train artifact metadata.
    * @return Identifier of the new BlackBox, or no value on failure.
    */

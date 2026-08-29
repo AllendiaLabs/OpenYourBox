@@ -113,12 +113,13 @@ def _assign_deterministic_weights(module: nn.Module, seed: int) -> None:
         for layer in module.modules():
             if not isinstance(layer, (nn.Conv1d, nn.ConvTranspose1d)):
                 continue
-            # Skip modules that only expose a computed weight_norm view without
-            # owning the underlying Conv parameters (parent wrappers).
-            if not any(
+            # Skip parent wrappers that only expose a computed weight view.
+            owns_weight = any(
                 name == "weight" or name.startswith("weight_")
                 for name, _ in layer.named_parameters(recurse=False)
-            ):
+            )
+            parametrized = nn.utils.parametrize.is_parametrized(layer, "weight")
+            if not owns_weight and not parametrized:
                 continue
             weight, state = _make_weight(
                 layer.out_channels,

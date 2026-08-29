@@ -425,7 +425,11 @@ void OpenYourBoxAudioProcessorEditor::renderFrame() {
     gates.receptiveFieldMilliseconds = receptiveFieldMs;
     gates.trainWindowSeconds =
         sampleRate > 0.0
-            ? static_cast<double>(trainPanel.hyperparameters.segmentLength) /
+            ? static_cast<double>(
+                  trainPanel.objective ==
+                          openyourbox::graph::TrainObjective::reconstruction
+                      ? trainPanel.hyperparameters.reconstructionSegmentLength
+                      : trainPanel.hyperparameters.segmentLength) /
                   sampleRate
             : 0.0;
     gates.isMaster = pairing.getPairingRole() !=
@@ -897,9 +901,44 @@ void OpenYourBoxAudioProcessorEditor::handleTrainRun() {
       juce::String(openyourbox::graph::trainObjectiveName(trainPanel.objective)));
   auto reconstruction = std::make_unique<juce::DynamicObject>();
   reconstruction->setProperty("stage1_steps",
-                              openyourbox::graph::defaultReconstructionStage1Steps);
+                              trainPanel.hyperparameters.stage1Steps);
   reconstruction->setProperty("stage2_steps",
-                              openyourbox::graph::defaultReconstructionStage2Steps);
+                              trainPanel.hyperparameters.stage2Steps);
+  reconstruction->setProperty("generator_lr",
+                              static_cast<double>(trainPanel.hyperparameters.generatorLr));
+  reconstruction->setProperty(
+      "discriminator_lr",
+      static_cast<double>(trainPanel.hyperparameters.discriminatorLr));
+  reconstruction->setProperty("adam_beta1",
+                              static_cast<double>(trainPanel.hyperparameters.adamBeta1));
+  reconstruction->setProperty("adam_beta2",
+                              static_cast<double>(trainPanel.hyperparameters.adamBeta2));
+  reconstruction->setProperty(
+      "lr_decay_end_factor",
+      static_cast<double>(trainPanel.hyperparameters.lrDecayEndFactor));
+  reconstruction->setProperty("batch_size", trainPanel.hyperparameters.batchSize);
+  reconstruction->setProperty(
+      "segment_length", trainPanel.hyperparameters.reconstructionSegmentLength);
+  reconstruction->setProperty("kl_beta",
+                              static_cast<double>(trainPanel.hyperparameters.klBeta));
+  reconstruction->setProperty(
+      "kl_beta_start",
+      static_cast<double>(trainPanel.hyperparameters.klBetaStart));
+  reconstruction->setProperty("kl_warmup_steps",
+                              trainPanel.hyperparameters.klWarmupSteps);
+  reconstruction->setProperty(
+      "feature_matching_weight",
+      static_cast<double>(trainPanel.hyperparameters.featureMatchingWeight));
+  reconstruction->setProperty("update_discriminator_every",
+                              trainPanel.hyperparameters.updateDiscriminatorEvery);
+  reconstruction->setProperty(
+      "phase_mangle_prob",
+      static_cast<double>(trainPanel.hyperparameters.phaseMangleProb));
+  reconstruction->setProperty("dequantize_bits",
+                              trainPanel.hyperparameters.dequantizeBits);
+  reconstruction->setProperty(
+      "spectral_windows",
+      juce::Array<juce::var>{2048, 1024, 512, 256, 128});
   options->setProperty("reconstruction", juce::var(reconstruction.release()));
   auto loss = std::make_unique<juce::DynamicObject>();
   loss->setProperty("type", "multiresolution_stft");
@@ -908,17 +947,75 @@ void OpenYourBoxAudioProcessorEditor::handleTrainRun() {
   loss->setProperty("hop_sizes", juce::Array<juce::var>{16, 64, 256, 1024});
   options->setProperty("loss", juce::var(loss.release()));
   options->setProperty("steer_conditioning", 0.0);
-  options->setProperty("total_steps", trainPanel.hyperparameters.totalSteps);
-  options->setProperty("learning_rate",
-                       static_cast<double>(trainPanel.hyperparameters.learningRate));
-  options->setProperty("segment_length",
-                       trainPanel.hyperparameters.segmentLength);
+  options->setProperty("total_steps",
+                       trainPanel.objective ==
+                               openyourbox::graph::TrainObjective::reconstruction
+                           ? trainPanel.hyperparameters.stage1Steps +
+                                 trainPanel.hyperparameters.stage2Steps
+                           : trainPanel.hyperparameters.totalSteps);
+  options->setProperty(
+      "learning_rate",
+      static_cast<double>(
+          trainPanel.objective ==
+                  openyourbox::graph::TrainObjective::reconstruction
+              ? trainPanel.hyperparameters.generatorLr
+              : trainPanel.hyperparameters.learningRate));
+  options->setProperty(
+      "segment_length",
+      trainPanel.objective ==
+              openyourbox::graph::TrainObjective::reconstruction
+          ? trainPanel.hyperparameters.reconstructionSegmentLength
+          : trainPanel.hyperparameters.segmentLength);
   options->setProperty("checkpoint_interval",
                        trainPanel.hyperparameters.checkpointInterval);
   options->setProperty("export_checkpoints", trainPanel.hearWhileTraining);
   options->setProperty("rf_aware_crop", true);
-  options->setProperty("host_input_channels",
-                       std::max(1, audioProcessor.getTotalNumInputChannels()));
+  options->setProperty(
+      "device",
+      juce::String(openyourbox::graph::trainDeviceName(
+          trainPanel.hyperparameters.device)));
+  using openyourbox::graph::HostIoMode;
+  using openyourbox::graph::NodeType;
+  using openyourbox::graph::PropertyKind;
+  using openyourbox::graph::hostIoChannelsFromMode;
+  using openyourbox::graph::hostIoModeFromChannels;
+  using openyourbox::graph::hostIoModeFromChoice;
+  using openyourbox::graph::hostIoModeLabel;
+  HostIoMode graphInputMode = HostIoMode::stereo;
+  bool foundAudioInput = false;
+  for (const auto &node : nodeGraph.getNodes()) {
+    if (node.type != NodeType::audioInput)
+      continue;
+    foundAudioInput = true;
+    bool fromProperty = false;
+    for (const auto &property : node.properties) {
+      if (property.key != "channels")
+        continue;
+      if (property.kind == PropertyKind::choice) {
+        const auto legacyPair =
+            property.maximum <= 1 || property.choices.size() == 2;
+        graphInputMode = hostIoModeFromChoice(property.value, legacyPair);
+      } else {
+        graphInputMode =
+            hostIoModeFromChannels(std::clamp(property.value, 1, 2));
+      }
+      fromProperty = true;
+      break;
+    }
+    if (!fromProperty && !node.outputs.empty() &&
+        node.outputs.front().shape.channels > 0)
+      graphInputMode =
+          hostIoModeFromChannels(node.outputs.front().shape.channels);
+    break;
+  }
+  const int graphInputChannels =
+      foundAudioInput ? hostIoChannelsFromMode(graphInputMode)
+                      : std::max(1, audioProcessor.getTotalNumInputChannels());
+  options->setProperty("host_input_channels", graphInputChannels);
+  options->setProperty(
+      "host_io_mode",
+      juce::String(foundAudioInput ? hostIoModeLabel(graphInputMode) : "stereo")
+          .toLowerCase());
   int condDim = 2;
   for (const auto nodeId : nodeGraph.getArmedTrainableNodeIds()) {
     const auto *node = nodeGraph.findNode(nodeId);
@@ -942,7 +1039,11 @@ void OpenYourBoxAudioProcessorEditor::handleTrainRun() {
   mlflow->setProperty("tracking_uri", juce::String(trainPanel.mlflowTrackingUri));
   mlflow->setProperty("experiment", juce::String(trainPanel.mlflowExperiment));
   mlflow->setProperty("name", juce::String(trainPanel.mlflowRunName));
-  mlflow->setProperty("tags", juce::Array<juce::var>{"train", "steerable"});
+  mlflow->setProperty(
+      "tags", trainPanel.objective ==
+                     openyourbox::graph::TrainObjective::reconstruction
+                 ? juce::Array<juce::var>{"train", "reconstruction", "rave"}
+                 : juce::Array<juce::var>{"train", "steerable"});
   options->setProperty("mlflow", juce::var(mlflow.release()));
   root->setProperty("train_options", juce::var(options.release()));
   request->graphFragment = juce::JSON::toString(payload, true).toStdString();

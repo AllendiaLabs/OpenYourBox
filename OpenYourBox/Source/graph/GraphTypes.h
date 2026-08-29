@@ -52,6 +52,9 @@ enum class NodeType {
 /** @brief Train recipe selected in the unified Train panel. */
 enum class TrainObjective { mapping, reconstruction };
 
+/** @brief Accelerator requested for the Python train worker. */
+enum class TrainDevice { automatic, cpu, mps, cuda };
+
 /** @brief Rate-changing convolution direction. */
 enum class RateConvDirection { downsample, upsample };
 
@@ -278,6 +281,8 @@ inline constexpr int defaultTrainSegmentLength = 228308;
 inline constexpr float defaultTrainLearningRate = 1.0e-3f;
 /** @brief Default interval between hear-while-training checkpoint exports. */
 inline constexpr int defaultTrainCheckpointInterval = 50;
+/** @brief Default train-worker device token (`auto` prefers CUDA, then MPS). */
+inline constexpr const char *defaultTrainDevice = "auto";
 /** @brief Default MLflow experiment name for Train logging. */
 inline constexpr const char *defaultMlflowExperiment = "openyourbox";
 /** @brief Default MLflow tracking server origin for Train logging. */
@@ -304,6 +309,34 @@ inline constexpr int variationalBottleneckGroups = 2;
 inline constexpr int defaultReconstructionStage1Steps = 1000000;
 /** @brief Default reconstruction stage-2 (quality) steps. */
 inline constexpr int defaultReconstructionStage2Steps = 1000000;
+/** @brief Default acids-rave v1 crop length (`n_signal` = 65536). */
+inline constexpr int defaultReconstructionSegmentLength = 65536;
+/** @brief Default acids-rave v1 minibatch size. */
+inline constexpr int defaultReconstructionBatchSize = 8;
+/** @brief Default generator Adam learning rate (acids-rave v1). */
+inline constexpr float defaultReconstructionGeneratorLr = 1.0e-3f;
+/** @brief Default discriminator Adam learning rate (acids-rave v1). */
+inline constexpr float defaultReconstructionDiscriminatorLr = 1.0e-4f;
+/** @brief Default Adam β1 for reconstruction (acids-rave v1). */
+inline constexpr float defaultReconstructionAdamBeta1 = 0.5f;
+/** @brief Default Adam β2 for reconstruction (acids-rave v1). */
+inline constexpr float defaultReconstructionAdamBeta2 = 0.9f;
+/** @brief LinearLR end factor over stage 1 (acids-rave v1). */
+inline constexpr float defaultReconstructionLrDecayEnd = 0.1f;
+/** @brief Constant KL β in acids-rave v1.gin (`BetaWarmupCallback` target). */
+inline constexpr float defaultReconstructionKlBeta = 0.1f;
+/** @brief KL β at the start of warmup (v1 keeps this equal to the target). */
+inline constexpr float defaultReconstructionKlBetaStart = 0.1f;
+/** @brief KL warmup length; 1 yields a constant β (acids-rave v1.gin). */
+inline constexpr int defaultReconstructionKlWarmupSteps = 1;
+/** @brief Feature-matching weight (acids-rave v1.gin `weights.feature_matching`). */
+inline constexpr float defaultReconstructionFeatureMatchingWeight = 10.0f;
+/** @brief Discriminator update period (acids-rave default `update_discriminator_every`). */
+inline constexpr int defaultReconstructionDiscUpdateEvery = 2;
+/** @brief Random allpass probability (acids-rave dataset `RandomApply` p=0.8). */
+inline constexpr float defaultReconstructionPhaseMangleProb = 0.8f;
+/** @brief Dequantization bit depth; 0 disables (acids-rave `Dequantize(16)`). */
+inline constexpr int defaultReconstructionDequantizeBits = 16;
 /** @brief Default bottleneck/Gold fidelity percent. */
 inline constexpr float defaultFidelityPercent = 99.0f;
 /** @brief Inclusive lower bound for fidelity. */
@@ -445,6 +478,59 @@ inline TrainObjective trainObjectiveFromName(const std::string &name) noexcept {
 inline const char *trainObjectiveName(TrainObjective objective) noexcept {
   return objective == TrainObjective::reconstruction ? "reconstruction"
                                                      : "mapping";
+}
+
+/**
+ * @brief Parses a train-worker device token.
+ * @param name Device string (`auto`, `cpu`, `mps`, or `cuda`).
+ * @return Automatic unless the token names a concrete backend.
+ */
+inline TrainDevice trainDeviceFromName(const std::string &name) noexcept {
+  if (name == "cpu")
+    return TrainDevice::cpu;
+  if (name == "mps")
+    return TrainDevice::mps;
+  if (name == "cuda")
+    return TrainDevice::cuda;
+  return TrainDevice::automatic;
+}
+
+/**
+ * @brief Returns the train-worker device token.
+ * @param device Selected accelerator.
+ * @return `auto`, `cpu`, `mps`, or `cuda`.
+ */
+inline const char *trainDeviceName(TrainDevice device) noexcept {
+  switch (device) {
+  case TrainDevice::cpu:
+    return "cpu";
+  case TrainDevice::mps:
+    return "mps";
+  case TrainDevice::cuda:
+    return "cuda";
+  case TrainDevice::automatic:
+  default:
+    return "auto";
+  }
+}
+
+/**
+ * @brief Returns a short Train-panel label for a device choice.
+ * @param device Selected accelerator.
+ * @return `Auto`, `CPU`, `MPS`, or `CUDA`.
+ */
+inline const char *trainDeviceLabel(TrainDevice device) noexcept {
+  switch (device) {
+  case TrainDevice::cpu:
+    return "CPU";
+  case TrainDevice::mps:
+    return "MPS";
+  case TrainDevice::cuda:
+    return "CUDA";
+  case TrainDevice::automatic:
+  default:
+    return "Auto";
+  }
 }
 
 /**
@@ -1579,6 +1665,12 @@ struct TrainJobResult {
   int compactnessValidationSegments = 0;
   /** @brief Compactness status token (`ready`|`not_ready`). */
   std::string compactnessStatus = "not_ready";
+  /** @brief Effective PyTorch device type used by the worker (`cpu`, `mps`, `cuda`). */
+  std::string device;
+  /** @brief Device token requested in `train_options` (`auto`, `cpu`, `mps`, `cuda`). */
+  std::string requestedDevice;
+  /** @brief True when the worker fell back from a concrete requested accelerator. */
+  bool deviceFallback = false;
 };
 
 /**

@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <memory>
 
 namespace openyourbox::library {
 namespace {
@@ -26,70 +27,63 @@ PairSource sourceFromName(const juce::String &name) {
 }
 
 /**
- * @brief Reads an audio file into a buffer using JUCE format managers.
+ * @brief Opens a decoder for an imported audio file.
  * @param file Source audio.
- * @param buffer Destination samples.
- * @param sampleRate Receives the file sample rate.
  * @param error Receives a user-facing failure.
- * @return True when the file was decoded.
+ * @return A reader, or null when the file cannot be decoded.
  */
-bool readAudioFile(const juce::File &file, juce::AudioBuffer<float> &buffer,
-                   double &sampleRate, juce::String &error) {
+std::unique_ptr<juce::AudioFormatReader>
+openAudioReader(const juce::File &file, juce::String &error) {
   juce::AudioFormatManager formats;
   formats.registerBasicFormats();
   std::unique_ptr<juce::AudioFormatReader> reader(formats.createReaderFor(file));
-  if (reader == nullptr) {
+  if (reader == nullptr)
     error = "Could not decode " + file.getFileName();
-    return false;
-  }
-  sampleRate = reader->sampleRate;
-  const auto length = static_cast<int>(
-      std::min<juce::int64>(reader->lengthInSamples, 1 << 26));
-  if (length < 1) {
-    error = file.getFileName() + " contains no audio";
-    return false;
-  }
-  buffer.setSize(static_cast<int>(reader->numChannels), length);
-  if (!reader->read(&buffer, 0, length, 0, true, true)) {
-    error = "Failed to read " + file.getFileName();
-    return false;
-  }
-  return true;
+  return reader;
 }
 
 /**
- * @brief Writes a float buffer as a 32-bit WAV file.
- * @param file Destination path.
- * @param buffer Samples to write.
- * @param sampleRate Sample rate in Hz.
+ * @brief Streams a sample range from a decoder into a 32-bit float WAV.
+ *
+ * Copies the full requested range in reader-sized blocks so hour-long files
+ * are not truncated by in-memory AudioBuffer limits.
+ *
+ * @param reader Source decoder.
+ * @param destination Output WAV path.
+ * @param channels Channel count to write.
+ * @param numSamples Number of frames to copy.
  * @param error Receives a user-facing failure.
- * @return True when the file was written.
+ * @return True when the WAV was written.
  */
-bool writeWavFile(const juce::File &file, const juce::AudioBuffer<float> &buffer,
-                  double sampleRate, juce::String &error) {
-  file.getParentDirectory().createDirectory();
-  file.deleteFile();
-  auto stream = file.createOutputStream();
+bool streamCopyToWav(juce::AudioFormatReader &reader, const juce::File &destination,
+                     int channels, juce::int64 numSamples, juce::String &error) {
+  if (channels < 1 || numSamples < 1) {
+    error = destination.getFileName() + " contains no audio";
+    return false;
+  }
+  destination.getParentDirectory().createDirectory();
+  destination.deleteFile();
+  auto stream = destination.createOutputStream();
   if (stream == nullptr) {
-    error = "Could not create " + file.getFileName();
+    error = "Could not create " + destination.getFileName();
     return false;
   }
   juce::WavAudioFormat wav;
   auto options =
       juce::AudioFormatWriterOptions{}
-          .withSampleRate(sampleRate)
-          .withNumChannels(buffer.getNumChannels())
+          .withSampleRate(reader.sampleRate)
+          .withNumChannels(channels)
           .withBitsPerSample(32)
           .withSampleFormat(
               juce::AudioFormatWriterOptions::SampleFormat::floatingPoint);
   std::unique_ptr<juce::OutputStream> output(std::move(stream));
   auto writer = wav.createWriterFor(output, options);
   if (writer == nullptr) {
-    error = "Could not write " + file.getFileName();
+    error = "Could not write " + destination.getFileName();
     return false;
   }
-  if (!writer->writeFromAudioSampleBuffer(buffer, 0, buffer.getNumSamples())) {
-    error = "Failed while writing " + file.getFileName();
+  if (!writer->writeFromAudioReader(reader, 0, numSamples)) {
+    error = "Failed while writing " + destination.getFileName();
     return false;
   }
   return true;
@@ -288,39 +282,37 @@ bool TrainingLibrary::writeAlignedPair(const juce::File &cleanFile,
                                        const juce::String &pairId,
                                        TrainingLibraryEntry &entry,
                                        juce::String &error) const {
-  juce::AudioBuffer<float> clean;
-  juce::AudioBuffer<float> processed;
-  double cleanRate = 0.0;
-  double processedRate = 0.0;
-  if (!readAudioFile(cleanFile, clean, cleanRate, error) ||
-      !readAudioFile(processedFile, processed, processedRate, error))
+  auto clean = openAudioReader(cleanFile, error);
+  if (clean == nullptr)
     return false;
-  if (std::abs(cleanRate - processedRate) > 0.5) {
+  auto processed = openAudioReader(processedFile, error);
+  if (processed == nullptr)
+    return false;
+  if (std::abs(clean->sampleRate - processed->sampleRate) > 0.5) {
     error = "Imported files must share the same sample rate";
     return false;
   }
-  const auto channels = std::min(clean.getNumChannels(), processed.getNumChannels());
-  const auto samples = std::min(clean.getNumSamples(), processed.getNumSamples());
+  const auto channels = std::min(static_cast<int>(clean->numChannels),
+                                 static_cast<int>(processed->numChannels));
+  const auto samples =
+      std::min(clean->lengthInSamples, processed->lengthInSamples);
   if (channels < 1 || samples < 1) {
     error = "Imported files have no overlapping audio to align";
     return false;
   }
-  juce::AudioBuffer<float> alignedX(channels, samples);
-  juce::AudioBuffer<float> alignedY(channels, samples);
-  for (int channel = 0; channel < channels; ++channel) {
-    alignedX.copyFrom(channel, 0, clean, channel, 0, samples);
-    alignedY.copyFrom(channel, 0, processed, channel, 0, samples);
-  }
   const auto xFile = root.getChildFile(pairId + "_x.wav");
   const auto yFile = root.getChildFile(pairId + "_y.wav");
-  if (!writeWavFile(xFile, alignedX, cleanRate, error) ||
-      !writeWavFile(yFile, alignedY, cleanRate, error))
+  if (!streamCopyToWav(*clean, xFile, channels, samples, error) ||
+      !streamCopyToWav(*processed, yFile, channels, samples, error))
     return false;
   entry.xPath = xFile.getFullPathName();
   entry.yPath = yFile.getFullPathName();
-  entry.sampleRate = cleanRate;
+  entry.sampleRate = clean->sampleRate;
   entry.channels = channels;
-  entry.durationSeconds = static_cast<double>(samples) / cleanRate;
+  entry.durationSeconds =
+      clean->sampleRate > 0.0
+          ? static_cast<double>(samples) / clean->sampleRate
+          : 0.0;
   entry.byteSize = xFile.getSize() + yFile.getSize();
   return true;
 }
@@ -443,10 +435,15 @@ bool TrainingLibrary::selectedContainsUnpaired() const noexcept {
 
 std::optional<TrainingLibraryEntry>
 TrainingLibrary::importClip(const juce::File &audioFile, juce::String &error) {
-  juce::AudioBuffer<float> buffer;
-  double sampleRate = 0.0;
-  if (!readAudioFile(audioFile, buffer, sampleRate, error))
+  auto reader = openAudioReader(audioFile, error);
+  if (reader == nullptr)
     return std::nullopt;
+  const auto samples = reader->lengthInSamples;
+  const auto channels = static_cast<int>(reader->numChannels);
+  if (samples < 1 || channels < 1) {
+    error = audioFile.getFileName() + " contains no audio";
+    return std::nullopt;
+  }
   TrainingLibraryEntry entry;
   entry.id = juce::Uuid().toDashedString();
   entry.source = PairSource::imported;
@@ -456,14 +453,15 @@ TrainingLibrary::importClip(const juce::File &audioFile, juce::String &error) {
   entry.selectedForTrain = true;
   entry.tags.add("unpaired");
   const auto dest = root.getChildFile(entry.id + "_clip.wav");
-  if (!writeWavFile(dest, buffer, sampleRate, error))
+  if (!streamCopyToWav(*reader, dest, channels, samples, error))
     return std::nullopt;
   entry.xPath = dest.getFullPathName();
-  entry.sampleRate = sampleRate;
-  entry.channels = buffer.getNumChannels();
+  entry.sampleRate = reader->sampleRate;
+  entry.channels = channels;
   entry.durationSeconds =
-      sampleRate > 0.0 ? static_cast<double>(buffer.getNumSamples()) / sampleRate
-                       : 0.0;
+      reader->sampleRate > 0.0
+          ? static_cast<double>(samples) / reader->sampleRate
+          : 0.0;
   entry.byteSize = dest.getSize();
   entries.push_back(entry);
   if (!save()) {

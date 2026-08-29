@@ -25,6 +25,9 @@ public:
    *   When false, load still retries a conditioned forward if `forward(audio)`
    *   fails because `cond` is required (training checkpoints).
    * @param condDim Trained FiLM width, or 0 to detect during validation.
+   *
+   * The probe tensor is 256 samples. Rate-changing RAVE graphs may return a
+   * different time length; live playback crops or left-pads to the block size.
    */
   [[nodiscard]] static std::shared_ptr<const TorchScriptBlackBoxFactory>
   load(const std::string &artifactPath, int inputChannels,

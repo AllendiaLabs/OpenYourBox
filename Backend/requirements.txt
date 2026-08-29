@@ -1,2 +1,3 @@
 torch
 auraloss
+numpy

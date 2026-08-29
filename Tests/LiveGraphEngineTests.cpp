@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <exception>
 #include <iostream>
 #include <memory>
 #include <string>
@@ -1799,6 +1800,189 @@ int main() {
                            linksBefore,
                    "unfreeze must restore trained-chain nodes and cables");
 
+  {
+    using openyourbox::graph::NodeGraph;
+    using openyourbox::graph::NodeType;
+    using openyourbox::graph::NodeState;
+    NodeGraph raveAbsorb;
+    const auto inId =
+        raveAbsorb.addNode(NodeType::audioInput, {0.0f, 0.0f});
+    const auto analysis =
+        raveAbsorb.addNode(NodeType::pqmfAnalysis, {120.0f, 0.0f});
+    const auto conv =
+        raveAbsorb.addNode(NodeType::convolution, {240.0f, 0.0f});
+    const auto math =
+        raveAbsorb.addNode(NodeType::mathExpression, {360.0f, 0.0f});
+    const auto merge =
+        raveAbsorb.addNode(NodeType::merge, {480.0f, 0.0f});
+    const auto synth =
+        raveAbsorb.addNode(NodeType::pqmfSynthesis, {600.0f, 0.0f});
+    const auto outId =
+        raveAbsorb.addNode(NodeType::audioOutput, {720.0f, 0.0f});
+    raveAbsorb.setProperty(analysis, "n_band", 2);
+    raveAbsorb.setProperty(synth, "n_band", 2);
+    raveAbsorb.setProperty(conv, "channels", 4);
+    const auto *inNode = raveAbsorb.findNode(inId);
+    const auto *analysisNode = raveAbsorb.findNode(analysis);
+    const auto *convNode = raveAbsorb.findNode(conv);
+    const auto *mathNode = raveAbsorb.findNode(math);
+    const auto *mergeNode = raveAbsorb.findNode(merge);
+    const auto *synthNode = raveAbsorb.findNode(synth);
+    const auto *outNode = raveAbsorb.findNode(outId);
+    passed &= expect(
+        inNode != nullptr && analysisNode != nullptr && convNode != nullptr &&
+            mathNode != nullptr && mergeNode != nullptr &&
+            synthNode != nullptr && outNode != nullptr &&
+            raveAbsorb
+                .connect(inNode->outputs.front().id,
+                         analysisNode->inputs.front().id)
+                .accepted &&
+            raveAbsorb
+                .connect(analysisNode->outputs.front().id,
+                         convNode->inputs.front().id)
+                .accepted &&
+            raveAbsorb
+                .connect(convNode->outputs.front().id,
+                         mathNode->inputs.front().id)
+                .accepted &&
+            raveAbsorb
+                .connect(convNode->outputs.front().id, mergeNode->inputs[0].id)
+                .accepted &&
+            raveAbsorb
+                .connect(mathNode->outputs.front().id, mergeNode->inputs[1].id)
+                .accepted &&
+            raveAbsorb
+                .connect(mergeNode->outputs.front().id,
+                         synthNode->inputs.front().id)
+                .accepted &&
+            raveAbsorb
+                .connect(synthNode->outputs.front().id,
+                         outNode->inputs.front().id)
+                .accepted,
+        "RAVE absorb fixture must wire");
+    const auto raveNodesBefore =
+        static_cast<int>(raveAbsorb.getNodes().size());
+    const auto raveLinksBefore =
+        static_cast<int>(raveAbsorb.getLinks().size());
+    openyourbox::graph::TrainJobResult raveResult;
+    raveResult.artifactPath = "/tmp/openyourbox-test-trained-rave.pt";
+    raveResult.hasEncodeDecode = true;
+    const auto raveGold = raveAbsorb.absorbArmedChain(raveResult);
+    int leftoverPqmf = 0;
+    int leftoverMath = 0;
+    int leftoverMerge = 0;
+    int goldCount = 0;
+    bool goldWiredIn = false;
+    bool goldWiredOut = false;
+    if (raveGold.has_value()) {
+      const auto *gold = raveAbsorb.findNode(*raveGold);
+      if (gold != nullptr && gold->state == NodeState::frozenGold) {
+        ++goldCount;
+        const auto *hostIn = raveAbsorb.findNode(inId);
+        const auto *hostOut = raveAbsorb.findNode(outId);
+        for (const auto &link : raveAbsorb.getLinks()) {
+          if (hostIn != nullptr &&
+              link.sourcePinId == hostIn->outputs.front().id &&
+              link.destinationPinId == gold->inputs.front().id)
+            goldWiredIn = true;
+          if (hostOut != nullptr &&
+              link.sourcePinId == gold->outputs.front().id &&
+              link.destinationPinId == hostOut->inputs.front().id)
+            goldWiredOut = true;
+        }
+      }
+    }
+    for (const auto &node : raveAbsorb.getNodes()) {
+      if (node.type == NodeType::pqmfAnalysis ||
+          node.type == NodeType::pqmfSynthesis)
+        ++leftoverPqmf;
+      else if (node.type == NodeType::mathExpression)
+        ++leftoverMath;
+      else if (node.type == NodeType::merge)
+        ++leftoverMerge;
+    }
+    passed &= expect(raveGold.has_value() && goldCount == 1 && goldWiredIn &&
+                         goldWiredOut && leftoverPqmf == 0 && leftoverMath == 0 &&
+                         leftoverMerge == 0,
+                     "RAVE absorb must replace the full chain with one wired Gold");
+    passed &= expect(
+        raveGold.has_value() && raveAbsorb.unfreeze(*raveGold) &&
+            static_cast<int>(raveAbsorb.getNodes().size()) == raveNodesBefore &&
+            static_cast<int>(raveAbsorb.getLinks().size()) == raveLinksBefore,
+        "RAVE unfreeze must restore PQMF, math, and utility with cables");
+  }
+
+  {
+    using openyourbox::graph::NodeGraph;
+    using openyourbox::graph::NodeType;
+    NodeGraph grouped;
+    const auto inId = grouped.addNode(NodeType::audioInput, {0.0f, 0.0f});
+    const auto analysis =
+        grouped.addNode(NodeType::pqmfAnalysis, {120.0f, 0.0f});
+    const auto conv =
+        grouped.addNode(NodeType::convolution, {240.0f, 0.0f});
+    const auto synth =
+        grouped.addNode(NodeType::pqmfSynthesis, {360.0f, 0.0f});
+    const auto outId =
+        grouped.addNode(NodeType::audioOutput, {480.0f, 0.0f});
+    grouped.setProperty(analysis, "n_band", 2);
+    grouped.setProperty(synth, "n_band", 2);
+    grouped.setProperty(conv, "channels", 4);
+    passed &= expect(
+        grouped
+            .connect(grouped.findNode(inId)->outputs.front().id,
+                     grouped.findNode(analysis)->inputs.front().id)
+            .accepted &&
+            grouped
+                .connect(grouped.findNode(analysis)->outputs.front().id,
+                         grouped.findNode(conv)->inputs.front().id)
+                .accepted &&
+            grouped
+                .connect(grouped.findNode(conv)->outputs.front().id,
+                         grouped.findNode(synth)->inputs.front().id)
+                .accepted &&
+            grouped
+                .connect(grouped.findNode(synth)->outputs.front().id,
+                         grouped.findNode(outId)->inputs.front().id)
+                .accepted,
+        "grouped RAVE absorb fixture must wire");
+    const auto groupedBox =
+        grouped.createGroup({analysis, conv, synth});
+    passed &= expect(groupedBox.accepted, "RAVE processing must group");
+    openyourbox::graph::TrainJobResult groupedResult;
+    groupedResult.artifactPath = "/tmp/openyourbox-test-trained-rave-group.pt";
+    groupedResult.hasEncodeDecode = true;
+    const auto groupedGold = grouped.absorbArmedChain(groupedResult);
+    int leftoverPqmf = 0;
+    bool goldWiredIn = false;
+    bool goldWiredOut = false;
+    if (groupedGold.has_value()) {
+      const auto *gold = grouped.findNode(*groupedGold);
+      const auto *hostIn = grouped.findNode(inId);
+      const auto *hostOut = grouped.findNode(outId);
+      if (gold != nullptr &&
+          gold->state == openyourbox::graph::NodeState::frozenGold &&
+          hostIn != nullptr && hostOut != nullptr) {
+        for (const auto &link : grouped.getLinks()) {
+          if (link.sourcePinId == hostIn->outputs.front().id &&
+              link.destinationPinId == gold->inputs.front().id)
+            goldWiredIn = true;
+          if (link.sourcePinId == gold->outputs.front().id &&
+              link.destinationPinId == hostOut->inputs.front().id)
+            goldWiredOut = true;
+        }
+      }
+    }
+    for (const auto &node : grouped.getNodes()) {
+      if (node.type == NodeType::pqmfAnalysis ||
+          node.type == NodeType::pqmfSynthesis)
+        ++leftoverPqmf;
+    }
+    passed &= expect(groupedGold.has_value() && goldWiredIn && goldWiredOut &&
+                         leftoverPqmf == 0 && grouped.getGroups().empty(),
+                     "grouped RAVE absorb must replace the group with wired Gold");
+  }
+
   const auto weightsRoot = openyourbox::library::weightsDirectory();
   const auto samplesRoot = openyourbox::library::samplesDirectory();
   passed &= expect(weightsRoot.getFileName() == "Weights" &&
@@ -1837,6 +2021,36 @@ int main() {
   juce::String mixedRateMessage;
   passed &= expect(library.selectedSampleRatesMatch(mixedRateMessage),
                    "single selected pair must pass sample-rate gate");
+
+  constexpr int clipSamples = 100000;
+  juce::AudioBuffer<float> longTone(1, clipSamples);
+  for (int i = 0; i < clipSamples; ++i)
+    longTone.setSample(0, i, 0.05f);
+  const auto clipFile = tempRoot.getChildFile("clip.wav");
+  auto *clipStream = clipFile.createOutputStream().release();
+  std::unique_ptr<juce::AudioFormatWriter> clipWriter(
+      wav.createWriterFor(clipStream, 44100.0, 1, 32, {}, 0));
+  passed &= expect(clipWriter != nullptr && clipWriter->writeFromAudioSampleBuffer(
+                                                longTone, 0, clipSamples),
+                   "library clip fixture must write");
+  clipWriter.reset();
+  juce::String clipError;
+  const auto importedClip = library.importClip(clipFile, clipError);
+  passed &= expect(importedClip.has_value(), "library clip import must succeed");
+  passed &= expect(importedClip.has_value() &&
+                       std::abs(importedClip->durationSeconds -
+                                static_cast<double>(clipSamples) / 44100.0) <
+                           1.0e-6,
+                   "imported clip duration must match the source file length");
+  if (importedClip.has_value()) {
+    juce::AudioFormatManager formats;
+    formats.registerBasicFormats();
+    std::unique_ptr<juce::AudioFormatReader> stored(
+        formats.createReaderFor(juce::File(importedClip->xPath)));
+    passed &= expect(stored != nullptr && stored->lengthInSamples == clipSamples,
+                     "stored clip WAV must keep every source sample");
+  }
+
   library.selectNone();
   passed &= expect(!library.selectedSampleRatesMatch(mixedRateMessage),
                    "empty selection must block Train");
@@ -2468,6 +2682,286 @@ int main() {
                               : torch::Tensor{};
       passed &= expect(outA.defined() && outB.defined() && torch::equal(outA, outB),
                        "live bottleneck encode must be deterministic μ-only");
+    }
+  }
+
+  {
+    openyourbox::dsp::ConvTranspose1d conv(4, 8, 1);
+    auto weight = torch::randn({8, 16, 8}, torch::kFloat32);
+    auto input = torch::randn({1, 16, 4}, torch::kFloat32);
+    torch::Tensor leftover;
+    bool threw = false;
+    std::string message;
+    torch::Tensor streamed;
+    try {
+      streamed = conv.processStreaming(input, weight, leftover);
+      streamed = conv.processStreaming(input, weight, leftover);
+    } catch (const std::exception &exception) {
+      threw = true;
+      message = exception.what();
+    }
+    passed &= expect(!threw && streamed.defined() && streamed.size(1) == 8,
+                     threw ? message.c_str()
+                           : "stacked Tiny-RAVE ConvTranspose streaming must run");
+  }
+
+  {
+    using openyourbox::graph::NodeGraph;
+    using openyourbox::graph::NodeType;
+    NodeGraph tiny;
+    const auto inId = tiny.addNode(NodeType::audioInput, {0.0f, 0.0f});
+    const auto analysis =
+        tiny.addNode(NodeType::pqmfAnalysis, {100.0f, 0.0f});
+    const auto down1 =
+        tiny.addNode(NodeType::convolution, {180.0f, 0.0f});
+    const auto down2 =
+        tiny.addNode(NodeType::convolution, {240.0f, 0.0f});
+    const auto act = tiny.addNode(NodeType::activation, {300.0f, 0.0f});
+    const auto convT =
+        tiny.addNode(NodeType::convTranspose, {400.0f, 0.0f});
+    const auto synth =
+        tiny.addNode(NodeType::pqmfSynthesis, {500.0f, 0.0f});
+    const auto outId = tiny.addNode(NodeType::audioOutput, {600.0f, 0.0f});
+    tiny.setProperty(analysis, "n_band", 4);
+    tiny.setProperty(synth, "n_band", 4);
+    tiny.setProperty(down1, "channels", 16);
+    tiny.setProperty(down1, "stride", 4);
+    tiny.setProperty(down1, "kernel_size", 9);
+    tiny.setProperty(down2, "channels", 32);
+    tiny.setProperty(down2, "stride", 4);
+    tiny.setProperty(down2, "kernel_size", 9);
+    tiny.setProperty(convT, "channels", 16);
+    tiny.setProperty(convT, "stride", 4);
+    tiny.setProperty(convT, "kernel_size", 8);
+    auto requireConnect = [&](std::int32_t sourcePin, std::int32_t destPin,
+                              const char *label) {
+      const auto result = tiny.connect(sourcePin, destPin);
+      passed &= expect(result.accepted,
+                       result.accepted ? label : result.message.c_str());
+    };
+    requireConnect(tiny.findNode(inId)->outputs.front().id,
+                   tiny.findNode(analysis)->inputs.front().id,
+                   "Audio In to PQMF");
+    requireConnect(tiny.findNode(analysis)->outputs.front().id,
+                   tiny.findNode(down1)->inputs.front().id, "PQMF to down 1");
+    requireConnect(tiny.findNode(down1)->outputs.front().id,
+                   tiny.findNode(down2)->inputs.front().id, "down 1 to down 2");
+    requireConnect(tiny.findNode(act)->outputs.front().id,
+                   tiny.findNode(convT)->inputs.front().id,
+                   "Activation to ConvTranspose");
+    const auto grouped = tiny.createGroup({act, convT});
+    passed &= expect(grouped.accepted, "upsample group must be created");
+    auto findBoundary = [](const NodeGraph &graph, std::int32_t groupId,
+                           NodeType type) -> std::int32_t {
+      const auto *group = graph.findGroup(groupId);
+      if (group == nullptr)
+        return 0;
+      for (const auto memberId : group->memberIds) {
+        const auto *node = graph.findNode(memberId);
+        if (node != nullptr && node->type == type)
+          return node->id;
+      }
+      return 0;
+    };
+    const auto inputHub = tiny.findNode(
+        findBoundary(tiny, grouped.groupId, NodeType::groupInput));
+    const auto outputHub = tiny.findNode(
+        findBoundary(tiny, grouped.groupId, NodeType::groupOutput));
+    passed &= expect(inputHub != nullptr && outputHub != nullptr,
+                     "upsample group must have hubs");
+    if (inputHub != nullptr && outputHub != nullptr) {
+      requireConnect(inputHub->outputs.front().id,
+                     tiny.findNode(act)->inputs.front().id, "hub to Activation");
+      requireConnect(tiny.findNode(convT)->outputs.front().id,
+                     outputHub->inputs.front().id, "ConvTranspose to hub");
+      requireConnect(tiny.findNode(down2)->outputs.front().id,
+                     inputHub->inputs.front().id, "down 2 to upsample group");
+    }
+    const auto repeats = tiny.setGroupRepeats(grouped.groupId, 2);
+    passed &= expect(repeats.accepted,
+                     repeats.accepted ? "upsample group repeats=2"
+                                      : repeats.message.c_str());
+    passed &= expect(tiny.setPropertyRepeatValues(convT, "channels", {16, 8}),
+                     "ConvTranspose channels list 16, 8");
+    if (outputHub != nullptr) {
+      requireConnect(outputHub->outputs.front().id,
+                     tiny.findNode(synth)->inputs.front().id,
+                     "upsample group to PQMF synth");
+      requireConnect(tiny.findNode(synth)->outputs.front().id,
+                     tiny.findNode(outId)->inputs.front().id,
+                     "PQMF synth to Audio Out");
+    }
+    const auto expanded = tiny.withInvisibleRepeatsMaterialized();
+    const auto tinyCompiled = LiveGraphEngine::compile(expanded, options);
+    passed &= expect(tinyCompiled.succeeded(),
+                     tinyCompiled.succeeded()
+                         ? "Tiny-RAVE upsample graph must compile"
+                         : tinyCompiled.error.message.c_str());
+    if (tinyCompiled.succeeded()) {
+      for (const auto &stats : tinyCompiled.snapshot->getElementStatistics()) {
+        if (stats.type != openyourbox::graph::NodeType::convTranspose)
+          continue;
+        std::cerr << "ConvTranspose node " << stats.nodeId << " in="
+                  << stats.inputChannels << " out=" << stats.outputChannels
+                  << "\n";
+      }
+      LiveGraphCompileError prepareError;
+      const auto tinyRuntime =
+          LiveGraphEngine::prepare(tinyCompiled.snapshot, prepareError);
+      passed &= expect(tinyRuntime != nullptr, "Tiny-RAVE upsample must prepare");
+      if (tinyRuntime != nullptr) {
+        bool processed = false;
+        std::string processError;
+        try {
+          const auto output = tinyRuntime->processTensor(
+              torch::randn({1, 2, 256}, torch::kFloat32));
+          processed = output.defined() && output.size(2) == 256;
+        } catch (const std::exception &exception) {
+          processError = exception.what();
+        }
+        if (!processed && processError.empty() &&
+            tinyRuntime->getLastProcessingFailureNodeId() != 0)
+          processError =
+              "muted at node " +
+              std::to_string(tinyRuntime->getLastProcessingFailureNodeId());
+        passed &= expect(processed, processError.empty()
+                                        ? "Tiny-RAVE upsample must process live"
+                                        : processError.c_str());
+      }
+    }
+  }
+
+  {
+    const auto boxFile = juce::File(
+        "/Users/hugo/Library/Audio/Presets/Allendia/OpenYourBox/Boxes/entries/"
+        "c6b7b94b-52cc-497f-b5ee-b24f213ec1b9/box.xml");
+    if (boxFile.existsAsFile()) {
+      const auto xml = juce::XmlDocument::parse(boxFile);
+      passed &= expect(xml != nullptr, "Tiny-RAVE box.xml must parse");
+      if (xml != nullptr) {
+        using openyourbox::graph::NodeGraph;
+        using openyourbox::graph::NodeType;
+        NodeGraph libraryGraph;
+        const auto inId =
+            libraryGraph.addNode(NodeType::audioInput, {0.0f, 0.0f});
+        const auto outId =
+            libraryGraph.addNode(NodeType::audioOutput, {800.0f, 0.0f});
+        passed &= expect(libraryGraph.setProperty(inId, "channels", 0) &&
+                             libraryGraph.setProperty(outId, "channels", 0),
+                         "Tiny-RAVE host I/O must be mono");
+        juce::String boxImportError;
+        const auto snapshot = juce::ValueTree::fromXml(*xml);
+        const auto rootId = libraryGraph.importBox(snapshot, {200.0f, 0.0f},
+                                                   true, boxImportError);
+        passed &= expect(rootId.has_value(),
+                         boxImportError.isEmpty()
+                             ? "Tiny-RAVE library box must import"
+                             : boxImportError.toStdString().c_str());
+        if (rootId.has_value()) {
+          const auto *group = libraryGraph.findGroup(*rootId);
+          std::int32_t inputHubId = 0;
+          std::int32_t outputHubId = 0;
+          if (group != nullptr) {
+            for (const auto memberId : group->memberIds) {
+              const auto *node = libraryGraph.findNode(memberId);
+              if (node == nullptr)
+                continue;
+              if (node->type == NodeType::groupInput)
+                inputHubId = node->id;
+              else if (node->type == NodeType::groupOutput)
+                outputHubId = node->id;
+            }
+          }
+          const auto *inNode = libraryGraph.findNode(inId);
+          const auto *outNode = libraryGraph.findNode(outId);
+          const auto *inputHub = libraryGraph.findNode(inputHubId);
+          const auto *outputHub = libraryGraph.findNode(outputHubId);
+          passed &= expect(inNode != nullptr && outNode != nullptr &&
+                               inputHub != nullptr && outputHub != nullptr,
+                           "Tiny-RAVE library box must expose I/O hubs");
+          if (inNode != nullptr && outNode != nullptr && inputHub != nullptr &&
+              outputHub != nullptr) {
+            const auto inLink = libraryGraph.connect(inNode->outputs.front().id,
+                                                     inputHub->inputs.front().id);
+            const auto outLink = libraryGraph.connect(
+                outputHub->outputs.front().id, outNode->inputs.front().id);
+            passed &= expect(inLink.accepted,
+                             inLink.accepted ? "Audio In to Tiny-RAVE"
+                                             : inLink.message.c_str());
+            passed &= expect(outLink.accepted,
+                             outLink.accepted ? "Tiny-RAVE to Audio Out"
+                                              : outLink.message.c_str());
+          }
+          const auto expanded = libraryGraph.withInvisibleRepeatsMaterialized();
+          int expandedIn = 0;
+          int expandedOut = 0;
+          int expandedLinks = 0;
+          for (const auto &node : expanded.getNodes()) {
+            if (node.type == NodeType::audioInput)
+              expandedIn = node.id;
+            else if (node.type == NodeType::audioOutput)
+              expandedOut = node.id;
+          }
+          for (const auto &link : expanded.getLinks()) {
+            const auto source = expanded.findNodeForPin(link.sourcePinId);
+            if (source.has_value() && *source == expandedIn)
+              ++expandedLinks;
+          }
+          const auto compiled = LiveGraphEngine::compile(expanded, options);
+          std::string compileMessage = compiled.error.message;
+          if (!compiled.succeeded())
+            compileMessage +=
+                " (in=" + std::to_string(expandedIn) +
+                " out=" + std::to_string(expandedOut) +
+                " inLinks=" + std::to_string(expandedLinks) +
+                " errNode=" + std::to_string(compiled.error.nodeId) + ")";
+          passed &= expect(compiled.succeeded(),
+                           compiled.succeeded()
+                               ? "Tiny-RAVE library graph must compile"
+                               : compileMessage.c_str());
+          if (compiled.succeeded()) {
+            LiveGraphCompileError prepareError;
+            const auto runtime =
+                LiveGraphEngine::prepare(compiled.snapshot, prepareError);
+            passed &= expect(runtime != nullptr,
+                             "Tiny-RAVE library graph must prepare");
+            if (runtime != nullptr) {
+              bool processed = false;
+              std::string processError;
+              try {
+                for (const auto block : {32, 64, 128, 256, 512}) {
+                  if (block > options.maximumBlockSize)
+                    continue;
+                  const auto output = runtime->processTensor(
+                      torch::randn({1, 2, block}, torch::kFloat32));
+                  if (!output.defined() || output.size(2) != block) {
+                    processError = "block " + std::to_string(block) +
+                                   " returned time " +
+                                   std::to_string(output.defined()
+                                                      ? output.size(2)
+                                                      : -1);
+                    processed = false;
+                    break;
+                  }
+                  processed = true;
+                }
+              } catch (const std::exception &exception) {
+                processError = exception.what();
+                processed = false;
+              }
+              if (!processed && processError.empty() &&
+                  runtime->getLastProcessingFailureNodeId() != 0)
+                processError =
+                    "muted at node " +
+                    std::to_string(runtime->getLastProcessingFailureNodeId());
+              passed &=
+                  expect(processed, processError.empty()
+                                        ? "Tiny-RAVE from library must process"
+                                        : processError.c_str());
+            }
+          }
+        }
+      }
     }
   }
 
