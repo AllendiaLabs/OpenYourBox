@@ -8,6 +8,7 @@
   - [ ] **FilteredNoiseReverb** — IR synthesized via filtered noise; params: `magnitudes` `[time × filter_banks]`, `window_size`, `reverb_length`, `add_dry`
   - [ ] **FIRFilter** — linear time-varying (LTV-FIR) frequency-domain filter; params: `magnitudes` `[time × filter_banks]`, `window_size`
   - [ ] **ModDelay** — modulated delay for chorus/flanger/vibrato; params: `center_ms`, `depth_ms`, `gain`, `phase`, `add_dry`
+- [ ] add lstm and rnn
 - [ ] Find good compressor DDSP to add too.
 - [ ] Implement element set for RAVE.
 - [ ] Implement element set for MRT2.
@@ -49,4 +50,7 @@
 - [ ] only keep name and pins on boxes. the rest goes to property menu.
 - [ ] selecting or clicking on a box should open its property menu 
 
-- [x] deleting B in A->B->C should lead to A->C, not disconnected A C. B being a box, a selection of boxes, groups, etc. if connection cannot be made then do not connect (no need for warning in ui). make sure all edge cases are taken into account
+- [ ] fix rms levels not showing after groups and from group input, and after deletion of group between audio in->out
+- [ ] allow creating group of one
+- [ ] allow wrong connections and eg insertion of wrong element, cut sound and show warning to change shape parameter if necessary
+
