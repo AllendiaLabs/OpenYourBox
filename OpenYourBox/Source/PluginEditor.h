@@ -140,8 +140,17 @@ private:
   void focusLibraryTab();
   /** @brief Imports a file pair chosen via native file choosers. */
   void handleLibraryImport();
-  /** @brief Opens a file chooser for unpaired clip import. */
+  /**
+   * @brief Defers unpaired-clip file-chooser launch off the ImGui/OpenGL frame.
+   */
   void handleLibraryImportClip();
+  /** @brief Opens the unpaired-clip chooser on the message thread. */
+  void promptLibraryImportClip();
+  /**
+   * @brief Decodes and stores one imported unpaired clip off the UI/OpenGL threads.
+   * @param audioFile Selected clip file.
+   */
+  void importLibraryClip(const juce::File &audioFile);
   /** @brief Opens the clean-file chooser on the message thread. */
   void promptLibraryImportClean();
   /** @brief Opens the processed-file chooser on the message thread. */

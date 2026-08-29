@@ -1037,6 +1037,10 @@ void OpenYourBoxAudioProcessorEditor::handleLibraryImport() {
 }
 
 void OpenYourBoxAudioProcessorEditor::handleLibraryImportClip() {
+  juce::MessageManager::callAsync([this] { promptLibraryImportClip(); });
+}
+
+void OpenYourBoxAudioProcessorEditor::promptLibraryImportClip() {
   fileChooser = std::make_shared<juce::FileChooser>(
       "Import unpaired clip", openyourbox::library::samplesDirectory(),
       "*.wav;*.aiff;*.flac");
@@ -1047,11 +1051,27 @@ void OpenYourBoxAudioProcessorEditor::handleLibraryImportClip() {
                              fileChooser.reset();
                              if (!file.existsAsFile())
                                return;
-                             juce::String error;
-                             if (!audioProcessor.getTrainingLibrary().importClip(
-                                     file, error))
-                               showError(error);
+                             importLibraryClip(file);
                            });
+}
+
+void OpenYourBoxAudioProcessorEditor::importLibraryClip(
+    const juce::File &audioFile) {
+  auto *processor = &audioProcessor;
+  juce::Component::SafePointer<OpenYourBoxAudioProcessorEditor> safeThis(this);
+  juce::Thread::launch([processor, safeThis, audioFile] {
+    juce::String error;
+    const auto imported =
+        processor->getTrainingLibrary().importClip(audioFile, error);
+    juce::MessageManager::callAsync([safeThis, imported, error] {
+      if (safeThis == nullptr)
+        return;
+      if (!imported.has_value())
+        safeThis->showError(error);
+      else
+        safeThis->showGraphMessage("Imported clip into Training Library");
+    });
+  });
 }
 
 void OpenYourBoxAudioProcessorEditor::promptLibraryImportClean() {

@@ -54,3 +54,4 @@
 - [ ] allow creating group of one
 - [ ] allow wrong connections and eg insertion of wrong element, cut sound and show warning to change shape parameter if necessary
 
+- [ ] Big v1 rave: noise path should also do Math x1 - 5 → Sigmoid → Math 2 * x1^2.3 + 1e-7? 
