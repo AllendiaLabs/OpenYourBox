@@ -43,6 +43,20 @@ enum class NodeType {
    * rebuild rules; the authored `expression` string is the source of truth.
    */
   mathExpression,
+  /** @brief Convolutional FIR reverb with optional external IR input. */
+  reverb,
+  /** @brief Exponential-decay noise impulse-response reverb. */
+  expDecayReverb,
+  /** @brief Filtered-noise synthesizer impulse-response reverb. */
+  filteredNoiseReverb,
+  /** @brief Linear time-varying FIR frequency-domain filter. */
+  firFilter,
+  /** @brief Modulated delay (chorus / flanger / vibrato). */
+  modDelay,
+  /** @brief Single-layer LSTM with in-cell activation and gain. */
+  lstm,
+  /** @brief Single-layer vanilla RNN with in-cell activation and gain. */
+  rnn,
   /** Editor-only source hub declaring a group's external input lanes. */
   groupInput,
   /** Editor-only sink hub declaring a group's external output lanes. */
@@ -120,6 +134,46 @@ inline constexpr float leakyReluNegativeSlopeMinimum = 0.0f;
 inline constexpr float leakyReluNegativeSlopeMaximum = 1.0f;
 /** @brief Activation choice index for LeakyReLU. */
 inline constexpr int leakyReluActivationIndex = 3;
+/** @brief Activation choice index for Tanh (LSTM/RNN default). */
+inline constexpr int tanhActivationIndex = 2;
+/** @brief Default IR length in samples for newly placed reverb elements. */
+inline constexpr int defaultReverbLength = 4096;
+/** @brief Inclusive minimum IR / reverb length in samples. */
+inline constexpr int minimumReverbLength = 1;
+/** @brief Non-blocking live-safe IR length warning threshold in milliseconds. */
+inline constexpr float liveSafeIrLengthMilliseconds = 1000.0f;
+/** @brief Default magnitude-grid time steps for FIR / filtered-noise. */
+inline constexpr int defaultFilterFrames = 8;
+/** @brief Default magnitude-grid filter-bank count. */
+inline constexpr int defaultFilterBanks = 16;
+/** @brief Default LTV-FIR / filtered-noise window size (odd). */
+inline constexpr int defaultFirWindowSize = 257;
+/** @brief Default LSTM/RNN hidden size. */
+inline constexpr int defaultHiddenSize = 16;
+/** @brief Default leaky-integrator mix (`1` is a standard RNN/LSTM step). */
+inline constexpr float leakRateDefault = 1.0f;
+/** @brief Inclusive lower bound for recurrent leak rate. */
+inline constexpr float leakRateMinimum = 0.0f;
+/** @brief Inclusive upper bound for recurrent leak rate. */
+inline constexpr float leakRateMaximum = 1.0f;
+/** @brief Default scale applied to hidden-to-hidden recurrent weights. */
+inline constexpr float recurrentWeightScaleDefault = 1.0f;
+/** @brief Inclusive lower bound for recurrent weight scale. */
+inline constexpr float recurrentWeightScaleMinimum = 0.0f;
+/** @brief Inclusive upper bound for recurrent weight scale. */
+inline constexpr float recurrentWeightScaleMaximum = 10.0f;
+/** @brief Magenta ExpDecayReverb raw gain initializer. */
+inline constexpr float defaultExpDecayGain = 2.0f;
+/** @brief Magenta ExpDecayReverb raw decay initializer. */
+inline constexpr float defaultExpDecayDecay = 4.0f;
+/** @brief Magenta ModDelay center delay in milliseconds. */
+inline constexpr float defaultModDelayCenterMs = 15.0f;
+/** @brief Magenta ModDelay modulation depth in milliseconds. */
+inline constexpr float defaultModDelayDepthMs = 10.0f;
+/** @brief Default ModDelay phase (mid delay after sigmoid mapping). */
+inline constexpr float defaultModDelayPhase = 0.5f;
+/** @brief Pin label for Reverb's optional external impulse-response input. */
+inline constexpr const char *irPinLabel = "ir";
 /** @brief Reserved token binding a dim/channels/features field to its input. */
 inline constexpr const char *preserveInToken = "in";
 /** @brief Default repeats parameter N for a new group. */
@@ -220,7 +274,28 @@ inline bool isTrainableType(NodeType type) noexcept {
          type == NodeType::tcn || type == NodeType::activation ||
          type == NodeType::blackBox || type == NodeType::rateConv ||
          type == NodeType::variationalBottleneck ||
-         type == NodeType::convTranspose || type == NodeType::batchNorm;
+         type == NodeType::convTranspose || type == NodeType::batchNorm ||
+         type == NodeType::reverb || type == NodeType::filteredNoiseReverb ||
+         type == NodeType::firFilter || type == NodeType::lstm ||
+         type == NodeType::rnn;
+}
+
+/** @brief Returns true for Magenta DDSP-style effect elements. */
+inline bool isDdspEffectType(NodeType type) noexcept {
+  return type == NodeType::reverb || type == NodeType::expDecayReverb ||
+         type == NodeType::filteredNoiseReverb || type == NodeType::firFilter ||
+         type == NodeType::modDelay;
+}
+
+/** @brief Returns true for single-layer LSTM or RNN elements. */
+inline bool isRecurrentType(NodeType type) noexcept {
+  return type == NodeType::lstm || type == NodeType::rnn;
+}
+
+/** @brief Returns true for Activation/TCN/LSTM/RNN nonlinearity Gain. */
+inline bool isNonlinearityGainType(NodeType type) noexcept {
+  return type == NodeType::activation || type == NodeType::tcn ||
+         isRecurrentType(type);
 }
 
 /** @brief Returns true for RAVE-specific processing elements. */
@@ -242,7 +317,7 @@ inline bool isShapePassthroughType(NodeType type) noexcept {
   return type == NodeType::linear || type == NodeType::convolution ||
          type == NodeType::activation || type == NodeType::tcn ||
          type == NodeType::merge || type == NodeType::batchNorm ||
-         type == NodeType::mathExpression;
+         type == NodeType::mathExpression || isDdspEffectType(type);
 }
 
 /**
@@ -586,6 +661,8 @@ inline juce::Colour chromeColourForType(NodeType type,
   case NodeType::pqmfAnalysis:
   case NodeType::pqmfSynthesis:
   case NodeType::noiseSynthesizer:
+  case NodeType::expDecayReverb:
+  case NodeType::modDelay:
     return helperLayerColour;
   case NodeType::linear:
   case NodeType::convolution:
@@ -593,6 +670,11 @@ inline juce::Colour chromeColourForType(NodeType type,
   case NodeType::convTranspose:
   case NodeType::tcn:
   case NodeType::variationalBottleneck:
+  case NodeType::reverb:
+  case NodeType::filteredNoiseReverb:
+  case NodeType::firFilter:
+  case NodeType::lstm:
+  case NodeType::rnn:
     return liveBlueColour;
   case NodeType::blackBox:
     return frozenGoldColour;
@@ -1189,6 +1271,14 @@ inline bool isControlInputPin(const Pin &pin) noexcept {
 }
 
 /**
+ * @brief Returns true for Reverb's optional external impulse-response pin.
+ * @param pin Endpoint to inspect.
+ */
+inline bool isIrInputPin(const Pin &pin) noexcept {
+  return pin.kind == PinKind::input && pin.label == irPinLabel;
+}
+
+/**
  * @brief Returns true for Gold RAVE encode/decode latent endpoints.
  * @param pin Endpoint to inspect.
  */
@@ -1279,12 +1369,21 @@ struct NodeProperty {
 };
 
 /**
+ * @brief Returns true for 0/1 flag properties drawn as checkboxes.
+ * @param key Persisted property key.
+ */
+inline bool isBooleanPropertyKey(const std::string &key) noexcept {
+  return key == "residual" || key == "weight_norm" || key == "add_dry" ||
+         key == "bidirectional" || key == "bias";
+}
+
+/**
  * @brief Returns true when a property keeps fixed choice or boolean bounds.
  * @param property Node property to inspect.
  */
 inline bool propertyKeepsFixedBounds(const NodeProperty &property) noexcept {
-  return property.kind == PropertyKind::choice || property.key == "residual" ||
-         property.key == "weight_norm";
+  return property.kind == PropertyKind::choice ||
+         isBooleanPropertyKey(property.key);
 }
 
 /**
@@ -1805,9 +1904,8 @@ inline bool propertySupportsRepeatValueList(const NodeProperty &property) noexce
   if (property.kind != PropertyKind::integer &&
       property.kind != PropertyKind::real)
     return false;
-  return property.key != "residual" && property.key != "weight_norm" &&
-         property.key != "inputs" && property.key != "ports" &&
-         property.key != "expression";
+  return !isBooleanPropertyKey(property.key) && property.key != "inputs" &&
+         property.key != "ports" && property.key != "expression";
 }
 
 /**

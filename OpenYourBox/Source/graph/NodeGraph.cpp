@@ -756,7 +756,9 @@ void storeWorldPosition(openyourbox::graph::NodeGraph &graph,
 void normalizeGainProperty(openyourbox::graph::GraphNode &node) {
   using openyourbox::graph::NodeType;
   using openyourbox::graph::PropertyKind;
-  if (node.type != NodeType::activation && node.type != NodeType::tcn)
+  using openyourbox::graph::isRecurrentType;
+  if (node.type != NodeType::activation && node.type != NodeType::tcn &&
+      !isRecurrentType(node.type))
     return;
   for (auto &property : node.properties) {
     if (property.key != "gain")
@@ -787,7 +789,9 @@ void normalizeGainProperty(openyourbox::graph::GraphNode &node) {
 void normalizeNegativeSlopeProperty(openyourbox::graph::GraphNode &node) {
   using openyourbox::graph::NodeType;
   using openyourbox::graph::PropertyKind;
-  if (node.type != NodeType::activation && node.type != NodeType::tcn)
+  using openyourbox::graph::isRecurrentType;
+  if (node.type != NodeType::activation && node.type != NodeType::tcn &&
+      !isRecurrentType(node.type))
     return;
   for (auto &property : node.properties) {
     if (property.key != "negative_slope")
@@ -809,6 +813,52 @@ void normalizeNegativeSlopeProperty(openyourbox::graph::GraphNode &node) {
   slope.floatMinimum = openyourbox::graph::leakyReluNegativeSlopeMinimum;
   slope.floatMaximum = openyourbox::graph::leakyReluNegativeSlopeMaximum;
   node.properties.push_back(std::move(slope));
+}
+
+/**
+ * @brief Ensures LSTM/RNN leak rate and recurrent-weight scale exist.
+ * @param node Loaded or newly created processing node.
+ */
+void normalizeRecurrentProperties(openyourbox::graph::GraphNode &node) {
+  using openyourbox::graph::NodeProperty;
+  using openyourbox::graph::PropertyKind;
+  using openyourbox::graph::isRecurrentType;
+  using openyourbox::graph::leakRateDefault;
+  using openyourbox::graph::leakRateMaximum;
+  using openyourbox::graph::leakRateMinimum;
+  using openyourbox::graph::recurrentWeightScaleDefault;
+  using openyourbox::graph::recurrentWeightScaleMaximum;
+  using openyourbox::graph::recurrentWeightScaleMinimum;
+  if (!isRecurrentType(node.type))
+    return;
+  auto ensureReal = [&node](const char *key, const char *label, float value,
+                              float minimum, float maximum) {
+    for (auto &property : node.properties) {
+      if (property.key != key)
+        continue;
+      property.kind = PropertyKind::real;
+      property.label = label;
+      property.floatMinimum = minimum;
+      property.floatMaximum = maximum;
+      if (property.floatValue < minimum || property.floatValue > maximum)
+        property.floatValue = value;
+      property.setFloatValue(property.floatValue);
+      return;
+    }
+    NodeProperty property;
+    property.key = key;
+    property.label = label;
+    property.kind = PropertyKind::real;
+    property.floatValue = value;
+    property.floatMinimum = minimum;
+    property.floatMaximum = maximum;
+    node.properties.push_back(std::move(property));
+  };
+  ensureReal("leak_rate", "Leak Rate", leakRateDefault, leakRateMinimum,
+             leakRateMaximum);
+  ensureReal("recurrent_weight_scale", "Recurrent Weight Scale",
+             recurrentWeightScaleDefault, recurrentWeightScaleMinimum,
+             recurrentWeightScaleMaximum);
 }
 
 /**
@@ -1071,7 +1121,7 @@ int resolvePinChannels(const openyourbox::graph::NodeGraph &graph,
   using openyourbox::graph::PinKind;
   using openyourbox::graph::defaultLatentSize;
   using openyourbox::graph::defaultPqmfBands;
-  using openyourbox::graph::defaultLatentSize;
+  using openyourbox::graph::defaultHiddenSize;
   using openyourbox::graph::defaultNoiseBands;
   if (!visiting.insert(pinId).second)
     return 0;
@@ -1139,9 +1189,21 @@ int resolvePinChannels(const openyourbox::graph::NodeGraph &graph,
   case NodeType::tcn:
   case NodeType::batchNorm:
   case NodeType::audioOutput:
+  case NodeType::reverb:
+  case NodeType::expDecayReverb:
+  case NodeType::filteredNoiseReverb:
+  case NodeType::firFilter:
+  case NodeType::modDelay:
     if (node->inputs.empty())
       return 0;
     return resolvePinChannels(graph, node->inputs.front().id, visiting);
+  case NodeType::lstm:
+  case NodeType::rnn: {
+    const auto hidden =
+        std::max(1, readNodeProperty(*node, "hidden_size", defaultHiddenSize));
+    const auto bidirectional = readNodeProperty(*node, "bidirectional", 0) != 0;
+    return bidirectional ? hidden * 2 : hidden;
+  }
   case NodeType::knobInput:
   case NodeType::xyTrackpad:
     return 1;
@@ -1456,8 +1518,9 @@ firstConnectedTensorSource(const openyourbox::graph::NodeGraph &graph,
                            const openyourbox::graph::GraphNode &node) {
   using openyourbox::graph::flexibleTensorShape;
   using openyourbox::graph::isControlInputPin;
+  using openyourbox::graph::isIrInputPin;
   for (const auto &pin : node.inputs) {
-    if (isControlInputPin(pin))
+    if (isControlInputPin(pin) || isIrInputPin(pin))
       continue;
     if (const auto *source = findConnectedSourcePin(graph, pin.id))
       return outgoingShapeOf(graph, *source);
@@ -2151,6 +2214,7 @@ void applyNodePinShapes(openyourbox::graph::NodeGraph &graph,
   using openyourbox::graph::convolutionOutputTemporalRate;
   using openyourbox::graph::defaultLatentSize;
   using openyourbox::graph::defaultPqmfBands;
+  using openyourbox::graph::defaultHiddenSize;
   using openyourbox::graph::flexibleTensorShape;
   using openyourbox::graph::isControlInputPin;
   using openyourbox::graph::isConvolutionType;
@@ -2159,7 +2223,7 @@ void applyNodePinShapes(openyourbox::graph::NodeGraph &graph,
   const auto incoming = firstConnectedTensorSource(graph, node);
   auto inheritInputs = [&]() {
     for (auto &pin : node.inputs) {
-      if (isControlInputPin(pin))
+      if (isControlInputPin(pin) || openyourbox::graph::isIrInputPin(pin))
         continue;
       if (const auto *connected = findConnectedSourcePin(graph, pin.id))
         inheritTensorFields(pin, outgoingShapeOf(graph, *connected), true);
@@ -2243,6 +2307,19 @@ void applyNodePinShapes(openyourbox::graph::NodeGraph &graph,
     inheritInputs();
     {
       const auto outgoing = noiseSynthOutgoingShape(node, incoming);
+      for (auto &pin : node.outputs)
+        inheritTensorFields(pin, outgoing, true);
+    }
+    break;
+  case NodeType::lstm:
+  case NodeType::rnn:
+    inheritInputs();
+    {
+      auto outgoing = incoming;
+      const auto hidden =
+          std::max(1, readNodeProperty(node, "hidden_size", defaultHiddenSize));
+      const auto bidirectional = readNodeProperty(node, "bidirectional", 0) != 0;
+      outgoing.channels = bidirectional ? hidden * 2 : hidden;
       for (auto &pin : node.outputs)
         inheritTensorFields(pin, outgoing, true);
     }
@@ -2433,6 +2510,20 @@ const char *nodeTypeName(openyourbox::graph::NodeType type) noexcept {
     return "batch_norm";
   case NodeType::mathExpression:
     return "math_expression";
+  case NodeType::reverb:
+    return "reverb";
+  case NodeType::expDecayReverb:
+    return "exp_decay_reverb";
+  case NodeType::filteredNoiseReverb:
+    return "filtered_noise_reverb";
+  case NodeType::firFilter:
+    return "fir_filter";
+  case NodeType::modDelay:
+    return "mod_delay";
+  case NodeType::lstm:
+    return "lstm";
+  case NodeType::rnn:
+    return "rnn";
   case NodeType::groupInput:
     return "group_input";
   case NodeType::groupOutput:
@@ -2476,6 +2567,20 @@ openyourbox::graph::NodeType nodeTypeFromName(const juce::String &name) {
     return NodeType::noiseSynthesizer;
   if (name == "math_expression")
     return NodeType::mathExpression;
+  if (name == "reverb")
+    return NodeType::reverb;
+  if (name == "exp_decay_reverb")
+    return NodeType::expDecayReverb;
+  if (name == "filtered_noise_reverb")
+    return NodeType::filteredNoiseReverb;
+  if (name == "fir_filter")
+    return NodeType::firFilter;
+  if (name == "mod_delay")
+    return NodeType::modDelay;
+  if (name == "lstm")
+    return NodeType::lstm;
+  if (name == "rnn")
+    return NodeType::rnn;
   if (name == "group_input")
     return NodeType::groupInput;
   if (name == "group_output")
@@ -2488,7 +2593,7 @@ openyourbox::graph::NodeType nodeTypeFromName(const juce::String &name) {
  * @param name ValueTree `type` token.
  */
 bool isKnownPersistedNodeType(const juce::String &name) {
-  static const std::array<const char *, 24> known{
+  static const std::array<const char *, 31> known{
       "audio_input",
       "audio_output",
       "linear",
@@ -2510,6 +2615,13 @@ bool isKnownPersistedNodeType(const juce::String &name) {
       "variational_bottleneck",
       "noise_synthesizer",
       "math_expression",
+      "reverb",
+      "exp_decay_reverb",
+      "filtered_noise_reverb",
+      "fir_filter",
+      "mod_delay",
+      "lstm",
+      "rnn",
       "group_input",
       "group_output",
       "tcn"};
@@ -2838,6 +2950,7 @@ openyourbox::graph::GraphNode nodeFromTree(const juce::ValueTree &tree) {
   normalizeMergeNodeProperties(node);
   normalizeGainProperty(node);
   normalizeNegativeSlopeProperty(node);
+  normalizeRecurrentProperties(node);
   normalizeConditioningPins(node);
   normalizePhase3Node(node);
   normalizeConvolutionProperties(node);
@@ -3296,6 +3409,7 @@ void simulateNodeRepeatShapes(
   using openyourbox::graph::convolutionOutputTemporalRate;
   using openyourbox::graph::defaultLatentSize;
   using openyourbox::graph::defaultPqmfBands;
+  using openyourbox::graph::defaultHiddenSize;
   using openyourbox::graph::flexibleTensorShape;
   using openyourbox::graph::integerValueForRepeat;
   using openyourbox::graph::isControlInputPin;
@@ -3304,7 +3418,7 @@ void simulateNodeRepeatShapes(
   using openyourbox::graph::isShapePassthroughType;
   auto incoming = flexibleTensorShape();
   for (const auto &pin : node.inputs) {
-    if (isControlInputPin(pin))
+    if (isControlInputPin(pin) || openyourbox::graph::isIrInputPin(pin))
       continue;
     if (const auto *source = findConnectedSourcePin(graph, pin.id)) {
       incoming = simulatedPinShape(graph, source->id, pinShapes);
@@ -3371,6 +3485,21 @@ void simulateNodeRepeatShapes(
   case NodeType::noiseSynthesizer:
     writeOutputs(noiseSynthOutgoingShape(node, incoming));
     return;
+  case NodeType::lstm:
+  case NodeType::rnn: {
+    auto outgoing = incoming;
+    int hidden = defaultHiddenSize;
+    int bidirectional = 0;
+    for (const auto &property : node.properties) {
+      if (property.key == "hidden_size")
+        hidden = std::max(1, integerValueForRepeat(property, leafSlot));
+      if (property.key == "bidirectional")
+        bidirectional = integerValueForRepeat(property, leafSlot);
+    }
+    outgoing.channels = bidirectional != 0 ? hidden * 2 : hidden;
+    writeOutputs(outgoing);
+    return;
+  }
   default:
     break;
   }
@@ -4088,6 +4217,43 @@ std::vector<std::string> NodeGraph::collectGraphWarnings() const {
     if (status.active || status.message.empty() || status.requestedRepeats <= 1)
       continue;
     warnings.push_back(group.name + ": " + status.message);
+  }
+  for (const auto &node : nodes) {
+    if (!isDdspEffectType(node.type))
+      continue;
+    int reverbLength = 0;
+    for (const auto &property : node.properties) {
+      if (property.key == "reverb_length")
+        reverbLength = property.value;
+    }
+    if (reverbLength < 1)
+      continue;
+    const auto milliseconds =
+        static_cast<double>(reverbLength) * 1000.0 / 48000.0;
+    if (milliseconds > liveSafeIrLengthMilliseconds)
+      warnings.push_back(node.label +
+                         ": reverb length exceeds the live-safe threshold and "
+                         "may be expensive for real-time playback.");
+    if (node.type == NodeType::reverb) {
+      bool irConnected = false;
+      bool irEmpty = true;
+      for (const auto &pin : node.inputs) {
+        if (!isIrInputPin(pin))
+          continue;
+        for (const auto &link : links) {
+          if (link.destinationPinId != pin.id)
+            continue;
+          irConnected = true;
+          const auto *source = findPin(link.sourcePinId);
+          irEmpty = source == nullptr ||
+                    (source->shape.channels == 0 && pin.shape.channels == 0);
+        }
+      }
+      if (irConnected && irEmpty)
+        warnings.push_back(
+            node.label +
+            ": external IR is connected but empty; using the internal IR.");
+    }
   }
   return warnings;
 }
@@ -5375,6 +5541,20 @@ bool NodeGraph::setProperty(std::int32_t nodeId, const std::string &key,
     refreshPropagatedPinShapes(*this);
     return true;
   }
+  if ((key == "n_frames" || key == "n_filter_banks") &&
+      (node->type == NodeType::firFilter ||
+       node->type == NodeType::filteredNoiseReverb) &&
+      value < 1) {
+    lastPropertyError = "Magnitude-grid dimensions must be at least 1";
+    return false;
+  }
+  if (key == "window_size" &&
+      (node->type == NodeType::firFilter ||
+       node->type == NodeType::filteredNoiseReverb) &&
+      value < 1) {
+    lastPropertyError = "Window size must be at least 1";
+    return false;
+  }
   property->setValue(value);
 
   const auto syncRepeatValues = [&]() {
@@ -5503,17 +5683,66 @@ bool NodeGraph::setProperty(std::int32_t nodeId, const std::string &key,
       updateConv1dDetail(*node);
     else
       updateConvTransposeDetail(*node);
+  } else if (key == "hidden_size" && isRecurrentType(node->type)) {
+    property->value = std::max(1, property->value);
+    const auto bidirectional = readNodeProperty(*node, "bidirectional", 0) != 0;
+    for (auto &pin : node->outputs)
+      pin.shape.channels =
+          bidirectional ? property->value * 2 : property->value;
+  } else if (key == "bidirectional" && isRecurrentType(node->type)) {
+    const auto hidden =
+        std::max(1, readNodeProperty(*node, "hidden_size", defaultHiddenSize));
+    for (auto &pin : node->outputs)
+      pin.shape.channels = property->value != 0 ? hidden * 2 : hidden;
+  } else if (key == "window_size" &&
+             (node->type == NodeType::firFilter ||
+              node->type == NodeType::filteredNoiseReverb)) {
+    if (property->value < 1) {
+      property->setValue(previousValue);
+      restoreRepeatValues();
+      lastPropertyError = "Window size must be at least 1";
+      return false;
+    }
+    if ((property->value % 2) == 0)
+      property->value += 1;
+  } else if ((key == "n_frames" || key == "n_filter_banks") &&
+             (node->type == NodeType::firFilter ||
+              node->type == NodeType::filteredNoiseReverb)) {
+    if (property->value < 1) {
+      property->setValue(previousValue);
+      restoreRepeatValues();
+      lastPropertyError = "Magnitude-grid dimensions must be at least 1";
+      return false;
+    }
+  } else if (key == "reverb_length" && isDdspEffectType(node->type)) {
+    property->value = std::max(minimumReverbLength, property->value);
   }
   refreshPropagatedPinShapes(*this);
-  const auto incompatible = firstIncompatibleLinkMessage(*this);
-  if (!incompatible.empty()) {
+  auto rollbackProperty = [&]() {
     property->setValue(previousValue);
     restoreRepeatValues();
     if (isConvolutionType(node->type))
       updateConv1dDetail(*node);
     else if (isConvTransposeType(node->type))
       updateConvTransposeDetail(*node);
+    if (key == "mode" && node->type == NodeType::merge)
+      updateMergeOutputShape(*this, *node);
     refreshPropagatedPinShapes(*this);
+  };
+  for (const auto &candidate : nodes) {
+    if (!isMixerType(candidate.type) && !isMathExpressionType(candidate.type))
+      continue;
+    if (const auto message =
+            utilityInputsIncompatibilityMessage(*this, candidate);
+        !message.empty()) {
+      rollbackProperty();
+      lastPropertyError = message;
+      return false;
+    }
+  }
+  const auto incompatible = firstIncompatibleLinkMessage(*this);
+  if (!incompatible.empty()) {
+    rollbackProperty();
     return false;
   }
   syncRepeatValues();
@@ -5536,9 +5765,30 @@ bool NodeGraph::setFloatProperty(std::int32_t nodeId, const std::string &key,
   if (property == node->properties.end() ||
       property->kind != PropertyKind::real)
     return false;
-  if (key == "negative_slope") {
+  if (key == "negative_slope" || key == "leak_rate" ||
+      key == "recurrent_weight_scale") {
     if (value < property->floatMinimum || value > property->floatMaximum)
       return false;
+  }
+  if (node->type == NodeType::modDelay &&
+      (key == "center_ms" || key == "depth_ms")) {
+    float center = defaultModDelayCenterMs;
+    float depth = defaultModDelayDepthMs;
+    for (const auto &candidate : node->properties) {
+      if (candidate.key == "center_ms")
+        center = candidate.floatValue;
+      if (candidate.key == "depth_ms")
+        depth = candidate.floatValue;
+    }
+    if (key == "center_ms")
+      center = value;
+    else
+      depth = value;
+    if (center - depth < 0.0f) {
+      lastPropertyError =
+          "ModDelay depth cannot exceed center delay (negative delay)";
+      return false;
+    }
   }
   property->setFloatValue(value);
   if (key == "fidelity")
@@ -6934,6 +7184,213 @@ GraphNode NodeGraph::makeNode(NodeType type, juce::Point<float> position) {
     }
     setMixerInputCount(node, 1, true);
     break;
+  case NodeType::reverb: {
+    node.label = "Reverb";
+    node.detail = "Convolutional IR";
+    node.hasWeights = true;
+    node.armedForTraining = true;
+    addInput();
+    addInput(irPinLabel);
+    addOutput();
+    node.inputs.front().shape = flexibleTensorShape();
+    node.inputs.back().shape = flexibleTensorShape();
+    node.outputs.front().shape = flexibleTensorShape();
+    node.properties.push_back(property("reverb_length", "Reverb Length",
+                                       defaultReverbLength, minimumReverbLength,
+                                       unlimitedPropertyMaximum));
+    node.properties.push_back(property("add_dry", "Add Dry", 1, 0, 1));
+    {
+      NodeProperty blend;
+      blend.key = "ir_blend";
+      blend.label = "IR Blend";
+      blend.kind = PropertyKind::real;
+      blend.floatValue = 0.0f;
+      blend.floatMinimum = 0.0f;
+      blend.floatMaximum = 1.0f;
+      node.properties.push_back(std::move(blend));
+    }
+    break;
+  }
+  case NodeType::expDecayReverb: {
+    node.label = "ExpDecayReverb";
+    node.detail = "Exponential decay IR";
+    addInput();
+    addOutput();
+    node.inputs.front().shape = flexibleTensorShape();
+    node.outputs.front().shape = flexibleTensorShape();
+    {
+      NodeProperty gain;
+      gain.key = "gain";
+      gain.label = "IR Gain";
+      gain.kind = PropertyKind::real;
+      gain.floatValue = defaultExpDecayGain;
+      gain.floatMinimum = -10.0f;
+      gain.floatMaximum = 10.0f;
+      node.properties.push_back(std::move(gain));
+    }
+    {
+      NodeProperty decay;
+      decay.key = "decay";
+      decay.label = "Decay";
+      decay.kind = PropertyKind::real;
+      decay.floatValue = defaultExpDecayDecay;
+      decay.floatMinimum = -10.0f;
+      decay.floatMaximum = 10.0f;
+      node.properties.push_back(std::move(decay));
+    }
+    node.properties.push_back(property("reverb_length", "Reverb Length",
+                                       defaultReverbLength, minimumReverbLength,
+                                       unlimitedPropertyMaximum));
+    node.properties.push_back(property("add_dry", "Add Dry", 1, 0, 1));
+    break;
+  }
+  case NodeType::filteredNoiseReverb: {
+    node.label = "FilteredNoiseReverb";
+    node.detail = "Filtered-noise IR";
+    node.hasWeights = true;
+    node.armedForTraining = true;
+    addInput();
+    addOutput();
+    node.inputs.front().shape = flexibleTensorShape();
+    node.outputs.front().shape = flexibleTensorShape();
+    node.properties.push_back(property("n_frames", "Time Steps",
+                                       defaultFilterFrames, minimumPositiveProperty,
+                                       unlimitedPropertyMaximum));
+    node.properties.push_back(property("n_filter_banks", "Filter Banks",
+                                       defaultFilterBanks, minimumPositiveProperty,
+                                       unlimitedPropertyMaximum));
+    node.properties.push_back(property("window_size", "Window Size",
+                                       defaultFirWindowSize, minimumPositiveProperty,
+                                       unlimitedPropertyMaximum));
+    node.properties.push_back(property("reverb_length", "Reverb Length",
+                                       defaultReverbLength, minimumReverbLength,
+                                       unlimitedPropertyMaximum));
+    node.properties.push_back(property("add_dry", "Add Dry", 1, 0, 1));
+    break;
+  }
+  case NodeType::firFilter: {
+    node.label = "FIRFilter";
+    node.detail = "LTV-FIR";
+    node.hasWeights = true;
+    node.armedForTraining = true;
+    addInput();
+    addOutput();
+    node.inputs.front().shape = flexibleTensorShape();
+    node.outputs.front().shape = flexibleTensorShape();
+    node.properties.push_back(property("n_frames", "Time Steps",
+                                       defaultFilterFrames, minimumPositiveProperty,
+                                       unlimitedPropertyMaximum));
+    node.properties.push_back(property("n_filter_banks", "Filter Banks",
+                                       defaultFilterBanks, minimumPositiveProperty,
+                                       unlimitedPropertyMaximum));
+    node.properties.push_back(property("window_size", "Window Size",
+                                       defaultFirWindowSize, minimumPositiveProperty,
+                                       unlimitedPropertyMaximum));
+    break;
+  }
+  case NodeType::modDelay: {
+    node.label = "ModDelay";
+    node.detail = "Modulated delay";
+    addInput();
+    addOutput();
+    node.inputs.front().shape = flexibleTensorShape();
+    node.outputs.front().shape = flexibleTensorShape();
+    {
+      NodeProperty center;
+      center.key = "center_ms";
+      center.label = "Center (ms)";
+      center.kind = PropertyKind::real;
+      center.floatValue = defaultModDelayCenterMs;
+      center.floatMinimum = 0.0f;
+      center.floatMaximum = 1000.0f;
+      node.properties.push_back(std::move(center));
+    }
+    {
+      NodeProperty depth;
+      depth.key = "depth_ms";
+      depth.label = "Depth (ms)";
+      depth.kind = PropertyKind::real;
+      depth.floatValue = defaultModDelayDepthMs;
+      depth.floatMinimum = 0.0f;
+      depth.floatMaximum = 1000.0f;
+      node.properties.push_back(std::move(depth));
+    }
+    {
+      NodeProperty gain;
+      gain.key = "gain";
+      gain.label = "Wet Gain";
+      gain.kind = PropertyKind::real;
+      gain.floatValue = defaultExpDecayGain;
+      gain.floatMinimum = -10.0f;
+      gain.floatMaximum = 10.0f;
+      node.properties.push_back(std::move(gain));
+    }
+    {
+      NodeProperty phase;
+      phase.key = "phase";
+      phase.label = "Phase";
+      phase.kind = PropertyKind::real;
+      phase.floatValue = defaultModDelayPhase;
+      phase.floatMinimum = 0.0f;
+      phase.floatMaximum = 1.0f;
+      node.properties.push_back(std::move(phase));
+    }
+    node.properties.push_back(property("add_dry", "Add Dry", 1, 0, 1));
+    break;
+  }
+  case NodeType::lstm:
+  case NodeType::rnn: {
+    node.label = type == NodeType::lstm ? "LSTM" : "RNN";
+    node.detail = "Single recurrent layer";
+    node.hasWeights = true;
+    node.armedForTraining = true;
+    addInput();
+    addOutput();
+    node.inputs.front().shape = flexibleTensorShape();
+    node.outputs.front().shape = flexibleTensorShape();
+    node.outputs.front().shape.channels = defaultHiddenSize;
+    node.properties.push_back(property("hidden_size", "Hidden Size",
+                                       defaultHiddenSize, minimumPositiveProperty,
+                                       unlimitedPropertyMaximum));
+    node.properties.push_back(property("bidirectional", "Bidirectional", 0, 0, 1));
+    node.properties.push_back(property("bias", "Bias", 1, 0, 1));
+    node.properties.push_back(
+        property("activation", "Activation", tanhActivationIndex, 0, 4,
+                 PropertyKind::choice,
+                 {"ReLU", "Sigmoid", "Tanh", "LeakyReLU", "PReLU"}));
+    node.properties.push_back(gainProperty());
+    {
+      NodeProperty slope;
+      slope.key = "negative_slope";
+      slope.label = "Negative slope";
+      slope.kind = PropertyKind::real;
+      slope.floatValue = leakyReluNegativeSlopeDefault;
+      slope.floatMinimum = leakyReluNegativeSlopeMinimum;
+      slope.floatMaximum = leakyReluNegativeSlopeMaximum;
+      node.properties.push_back(std::move(slope));
+    }
+    {
+      NodeProperty leak;
+      leak.key = "leak_rate";
+      leak.label = "Leak Rate";
+      leak.kind = PropertyKind::real;
+      leak.floatValue = leakRateDefault;
+      leak.floatMinimum = leakRateMinimum;
+      leak.floatMaximum = leakRateMaximum;
+      node.properties.push_back(std::move(leak));
+    }
+    {
+      NodeProperty scale;
+      scale.key = "recurrent_weight_scale";
+      scale.label = "Recurrent Weight Scale";
+      scale.kind = PropertyKind::real;
+      scale.floatValue = recurrentWeightScaleDefault;
+      scale.floatMinimum = recurrentWeightScaleMinimum;
+      scale.floatMaximum = recurrentWeightScaleMaximum;
+      node.properties.push_back(std::move(scale));
+    }
+    break;
+  }
   }
   return node;
 }

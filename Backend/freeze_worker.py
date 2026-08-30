@@ -514,10 +514,15 @@ def build_module(
             raise ValueError(
                 "mixer elements cannot be frozen by the linear freeze worker"
             )
-        elif element_type in _RAVE_TYPES:
-            return _load_train_worker().build_rave_graph_module(
-                fragment, input_channels, cond_dim
+        else:
+            train_worker = _load_train_worker()
+            built = train_worker.make_ddsp_or_recurrent(
+                element_type, properties, channels, seed
             )
+            if built is None:
+                raise ValueError(f"unsupported freeze element type: {element_type}")
+            module, channels = built
+            modules.append(module)
 
     if not modules:
         return nn.Identity()

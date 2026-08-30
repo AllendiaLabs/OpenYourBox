@@ -241,6 +241,125 @@ class FreezeWorkerTests(unittest.TestCase):
         self.assertEqual(tuple(out_zero.shape), (1, 2, 32))
         self.assertFalse(torch.allclose(out_zero, out_one, atol=1.0e-5))
 
+    def _effect_fragment(self, element_type: str, properties: list[dict]) -> dict:
+        return {
+            "elements": [
+                {"id": 1, "type": "audio_input", "seed": 1, "properties": []},
+                {"id": 2, "type": element_type, "seed": 7, "properties": properties},
+                {"id": 3, "type": "audio_output", "seed": 1, "properties": []},
+            ],
+            "connections": [
+                {"source_element_id": 1, "destination_element_id": 2},
+                {"source_element_id": 2, "destination_element_id": 3},
+            ],
+        }
+
+    def test_freezes_exp_decay_reverb(self) -> None:
+        """ExpDecayReverb must script to a callable stereo artifact."""
+        module = freeze_worker.build_module(
+            self._effect_fragment(
+                "exp_decay_reverb",
+                [
+                    {"key": "gain", "float_value": 2.0},
+                    {"key": "decay", "float_value": 4.0},
+                    {"key": "reverb_length", "value": 32},
+                    {"key": "add_dry", "value": 1},
+                ],
+            ),
+            2,
+        )
+        audio = torch.randn(1, 2, 48)
+        output = module(audio)
+        self.assertEqual(tuple(output.shape), (1, 2, 48))
+
+    def test_freezes_fir_filter_and_mod_delay(self) -> None:
+        """FIRFilter and ModDelay must preserve channel/time shape."""
+        fir = freeze_worker.build_module(
+            self._effect_fragment(
+                "fir_filter",
+                [
+                    {"key": "n_frames", "value": 4},
+                    {"key": "n_filter_banks", "value": 8},
+                    {"key": "window_size", "value": 17},
+                ],
+            ),
+            2,
+        )
+        delay = freeze_worker.build_module(
+            self._effect_fragment(
+                "mod_delay",
+                [
+                    {"key": "center_ms", "float_value": 5.0},
+                    {"key": "depth_ms", "float_value": 1.0},
+                    {"key": "gain", "float_value": 2.0},
+                    {"key": "phase", "float_value": 0.5},
+                    {"key": "add_dry", "value": 1},
+                ],
+            ),
+            2,
+        )
+        audio = torch.randn(1, 2, 32)
+        self.assertEqual(tuple(fir(audio).shape), (1, 2, 32))
+        self.assertEqual(tuple(delay(audio).shape), (1, 2, 32))
+
+    def test_freezes_lstm_full_sequence(self) -> None:
+        """LSTM emits full-sequence hidden states with inferred input size."""
+        fragment = self._effect_fragment(
+            "lstm",
+            [
+                {"key": "hidden_size", "value": 4},
+                {"key": "bidirectional", "value": 1},
+                {"key": "bias", "value": 1},
+                {"key": "activation", "value": 2},
+                {"key": "gain", "float_value": 1.0},
+                {"key": "leak_rate", "float_value": 0.5},
+                {"key": "recurrent_weight_scale", "float_value": 2.0},
+            ],
+        )
+        module = freeze_worker.build_module(fragment, 2)
+        output = module(torch.randn(1, 2, 16))
+        self.assertEqual(tuple(output.shape), (1, 8, 16))
+
+    def test_freezes_mixed_exp_decay_and_lstm(self) -> None:
+        """A legal ExpDecayReverb then LSTM stack must freeze to a callable module."""
+        fragment = {
+            "elements": [
+                {"id": 1, "type": "audio_input", "seed": 1, "properties": []},
+                {
+                    "id": 2,
+                    "type": "exp_decay_reverb",
+                    "seed": 7,
+                    "properties": [
+                        {"key": "gain", "float_value": 2.0},
+                        {"key": "decay", "float_value": 4.0},
+                        {"key": "reverb_length", "value": 32},
+                        {"key": "add_dry", "value": 1},
+                    ],
+                },
+                {
+                    "id": 3,
+                    "type": "lstm",
+                    "seed": 3,
+                    "properties": [
+                        {"key": "hidden_size", "value": 4},
+                        {"key": "bidirectional", "value": 0},
+                        {"key": "bias", "value": 1},
+                        {"key": "activation", "value": 2},
+                        {"key": "gain", "float_value": 1.0},
+                    ],
+                },
+                {"id": 4, "type": "audio_output", "seed": 1, "properties": []},
+            ],
+            "connections": [
+                {"source_element_id": 1, "destination_element_id": 2},
+                {"source_element_id": 2, "destination_element_id": 3},
+                {"source_element_id": 3, "destination_element_id": 4},
+            ],
+        }
+        module = freeze_worker.build_module(fragment, 2)
+        output = module(torch.randn(1, 2, 48))
+        self.assertEqual(tuple(output.shape), (1, 4, 48))
+
 
 if __name__ == "__main__":
     unittest.main()

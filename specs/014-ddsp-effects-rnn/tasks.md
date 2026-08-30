@@ -34,13 +34,13 @@ description: "Task list for DDSP Effects & Recurrent Layers"
 
 **Purpose**: Confirm design artifacts and inventory registration / live / worker touch-points before code changes.
 
-- [ ] T001 Verify design artifact cross-links (spec clarifications → contracts → plan → data-model) in `specs/014-ddsp-effects-rnn/plan.md`
-- [ ] T002 [P] Inventory `NodeType`, chrome helpers, and `isTrainableType` / `isShapePassthroughType` in `OpenYourBox/Source/graph/GraphTypes.h`
-- [ ] T003 [P] Inventory `nodeTypeName` / `nodeTypeFromName` / `isKnownPersistedNodeType` / `makeNode` in `OpenYourBox/Source/graph/NodeGraph.cpp`
-- [ ] T004 [P] Inventory Factory `paletteItems` and property-row patterns in `OpenYourBox/Source/graph/NodeRenderer.cpp`
-- [ ] T005 [P] Inventory `LiveGraphEngine` compile/process/`histories` reset and `NoiseSynthesizer` FFT helpers in `OpenYourBox/Source/dsp/LiveGraphEngine.cpp` and `OpenYourBox/Source/dsp/NoiseSynthesizer.h`
-- [ ] T006 [P] Inventory freeze/train `build_module` type branches in `Backend/freeze_worker.py` and `Backend/train_worker.py`
-- [ ] T007 [P] Add Magenta/DDSP Apache 2.0 behavioral-reimplementation attribution block in `NOTICE`
+- [X] T001 Verify design artifact cross-links (spec clarifications → contracts → plan → data-model) in `specs/014-ddsp-effects-rnn/plan.md`
+- [X] T002 [P] Inventory `NodeType`, chrome helpers, and `isTrainableType` / `isShapePassthroughType` in `OpenYourBox/Source/graph/GraphTypes.h`
+- [X] T003 [P] Inventory `nodeTypeName` / `nodeTypeFromName` / `isKnownPersistedNodeType` / `makeNode` in `OpenYourBox/Source/graph/NodeGraph.cpp`
+- [X] T004 [P] Inventory Factory `paletteItems` and property-row patterns in `OpenYourBox/Source/graph/NodeRenderer.cpp`
+- [X] T005 [P] Inventory `LiveGraphEngine` compile/process/`histories` reset and `NoiseSynthesizer` FFT helpers in `OpenYourBox/Source/dsp/LiveGraphEngine.cpp` and `OpenYourBox/Source/dsp/NoiseSynthesizer.h`
+- [X] T006 [P] Inventory freeze/train `build_module` type branches in `Backend/freeze_worker.py` and `Backend/train_worker.py`
+- [X] T007 [P] Add Magenta/DDSP Apache 2.0 behavioral-reimplementation attribution block in `NOTICE`
 
 ---
 
@@ -50,14 +50,14 @@ description: "Task list for DDSP Effects & Recurrent Layers"
 
 **⚠️ CRITICAL**: No user story work can begin until this phase is complete.
 
-- [ ] T008 Add `NodeType` values for `reverb`, `expDecayReverb`, `filteredNoiseReverb`, `firFilter`, `modDelay`, `lstm`, `rnn` plus chrome/`isTrainableType`/`isShapePassthroughType` (and related predicates) in `OpenYourBox/Source/graph/GraphTypes.h`
-- [ ] T009 Wire `nodeTypeName` / `nodeTypeFromName` / `isKnownPersistedNodeType` persist strings (`reverb`, `exp_decay_reverb`, `filtered_noise_reverb`, `fir_filter`, `mod_delay`, `lstm`, `rnn`) in `OpenYourBox/Source/graph/NodeGraph.cpp`
-- [ ] T010 Implement categorized Factory palette sections (Effects, Neural / Sequence, existing groups) per `specs/014-ddsp-effects-rnn/contracts/element-palette-categories-contract.md` in `OpenYourBox/Source/graph/NodeRenderer.cpp`
-- [ ] T011 Add `makeNode` stubs with labels, default ports, and empty/minimal `properties` for all seven types in `OpenYourBox/Source/graph/NodeGraph.cpp`
-- [ ] T012 Create `OpenYourBox/Source/dsp/DdspEffects.h` and `OpenYourBox/Source/dsp/DdspEffects.cpp` shells (IR helpers, convolve entry points) and register sources in the OpenYourBox CMake/target lists
-- [ ] T013 Create `OpenYourBox/Source/dsp/RecurrentLayers.h` and `OpenYourBox/Source/dsp/RecurrentLayers.cpp` shells (RNN/LSTM cell API) and register sources in the OpenYourBox CMake/target lists
-- [ ] T014 Add live-safe IR-length threshold constant and non-blocking warning hook (InfoPanel and/or property affordance) per `specs/014-ddsp-effects-rnn/contracts/ddsp-effects-contract.md` in `OpenYourBox/Source/ui/InfoPanel.cpp` and `OpenYourBox/Source/graph/NodeRenderer.cpp`
-- [ ] T015 Extend `LiveGraphEngine` compile switch stubs / `CompiledElement` handling so unknown new types do not crash compile (refuse or no-op with clear path) in `OpenYourBox/Source/dsp/LiveGraphEngine.cpp` and `OpenYourBox/Source/dsp/LiveGraphEngine.h`
+- [X] T008 Add `NodeType` values for `reverb`, `expDecayReverb`, `filteredNoiseReverb`, `firFilter`, `modDelay`, `lstm`, `rnn` plus chrome/`isTrainableType`/`isShapePassthroughType` (and related predicates) in `OpenYourBox/Source/graph/GraphTypes.h`
+- [X] T009 Wire `nodeTypeName` / `nodeTypeFromName` / `isKnownPersistedNodeType` persist strings (`reverb`, `exp_decay_reverb`, `filtered_noise_reverb`, `fir_filter`, `mod_delay`, `lstm`, `rnn`) in `OpenYourBox/Source/graph/NodeGraph.cpp`
+- [X] T010 Implement categorized Factory palette sections (Effects, Neural / Sequence, existing groups) per `specs/014-ddsp-effects-rnn/contracts/element-palette-categories-contract.md` in `OpenYourBox/Source/graph/NodeRenderer.cpp`
+- [X] T011 Add `makeNode` stubs with labels, default ports, and empty/minimal `properties` for all seven types in `OpenYourBox/Source/graph/NodeGraph.cpp`
+- [X] T012 Create `OpenYourBox/Source/dsp/DdspEffects.h` and `OpenYourBox/Source/dsp/DdspEffects.cpp` shells (IR helpers, convolve entry points) and register sources in the OpenYourBox CMake/target lists
+- [X] T013 Create `OpenYourBox/Source/dsp/RecurrentLayers.h` and `OpenYourBox/Source/dsp/RecurrentLayers.cpp` shells (RNN/LSTM cell API) and register sources in the OpenYourBox CMake/target lists
+- [X] T014 Add live-safe IR-length threshold constant and non-blocking warning hook (InfoPanel and/or property affordance) per `specs/014-ddsp-effects-rnn/contracts/ddsp-effects-contract.md` in `OpenYourBox/Source/ui/InfoPanel.cpp` and `OpenYourBox/Source/graph/NodeRenderer.cpp`
+- [X] T015 Extend `LiveGraphEngine` compile switch stubs / `CompiledElement` handling so unknown new types do not crash compile (refuse or no-op with clear path) in `OpenYourBox/Source/dsp/LiveGraphEngine.cpp` and `OpenYourBox/Source/dsp/LiveGraphEngine.h`
 
 **Checkpoint**: Foundation ready — seven types persist and appear in categorized palette; DSP shells and warning plumbing exist; live engine tolerates new types safely.
 
@@ -71,15 +71,15 @@ description: "Task list for DDSP Effects & Recurrent Layers"
 
 ### Implementation for User Story 1
 
-- [ ] T016 [US1] Complete ExpDecayReverb `makeNode` defaults and property schema (`gain`, `decay`, `reverb_length`, `add_dry`) in `OpenYourBox/Source/graph/NodeGraph.cpp`
-- [ ] T017 [US1] Implement Magenta-style exponential-decay IR builder and FFT convolve wet path in `OpenYourBox/Source/dsp/DdspEffects.cpp` and `OpenYourBox/Source/dsp/DdspEffects.h`
-- [ ] T018 [US1] Compile and process ExpDecayReverb in the live engine (preallocate IR/history on message thread; dry-add; soft warn on long `reverb_length`) in `OpenYourBox/Source/dsp/LiveGraphEngine.cpp`
-- [ ] T019 [US1] Expose ExpDecayReverb (and Effects list entries) property rows in Parameters/panel patterns in `OpenYourBox/Source/graph/NodeRenderer.cpp`
-- [ ] T020 [US1] Ensure Effects category lists Reverb, ExpDecayReverb, FilteredNoiseReverb, FIRFilter, ModDelay as insertable items in `OpenYourBox/Source/graph/NodeRenderer.cpp`
-- [ ] T021 [US1] Add ExpDecayReverb branch to freeze `build_module` in `Backend/freeze_worker.py`
-- [ ] T022 [US1] Add ExpDecayReverb branch to train `build_module` in `Backend/train_worker.py`
-- [ ] T023 [P] [US1] Add live ExpDecayReverb decay/`add_dry` coverage in `Tests/LiveGraphEngineTests.cpp`
-- [ ] T024 [P] [US1] Add freeze/train ExpDecayReverb smoke coverage in `Tests/test_freeze_worker.py` and `Tests/test_train_worker.py`
+- [X] T016 [US1] Complete ExpDecayReverb `makeNode` defaults and property schema (`gain`, `decay`, `reverb_length`, `add_dry`) in `OpenYourBox/Source/graph/NodeGraph.cpp`
+- [X] T017 [US1] Implement Magenta-style exponential-decay IR builder and FFT convolve wet path in `OpenYourBox/Source/dsp/DdspEffects.cpp` and `OpenYourBox/Source/dsp/DdspEffects.h`
+- [X] T018 [US1] Compile and process ExpDecayReverb in the live engine (preallocate IR/history on message thread; dry-add; soft warn on long `reverb_length`) in `OpenYourBox/Source/dsp/LiveGraphEngine.cpp`
+- [X] T019 [US1] Expose ExpDecayReverb (and Effects list entries) property rows in Parameters/panel patterns in `OpenYourBox/Source/graph/NodeRenderer.cpp`
+- [X] T020 [US1] Ensure Effects category lists Reverb, ExpDecayReverb, FilteredNoiseReverb, FIRFilter, ModDelay as insertable items in `OpenYourBox/Source/graph/NodeRenderer.cpp`
+- [X] T021 [US1] Add ExpDecayReverb branch to freeze `build_module` in `Backend/freeze_worker.py`
+- [X] T022 [US1] Add ExpDecayReverb branch to train `build_module` in `Backend/train_worker.py`
+- [X] T023 [P] [US1] Add live ExpDecayReverb decay/`add_dry` coverage in `Tests/LiveGraphEngineTests.cpp`
+- [X] T024 [P] [US1] Add freeze/train ExpDecayReverb smoke coverage in `Tests/test_freeze_worker.py` and `Tests/test_train_worker.py`
 
 **Checkpoint**: US1 complete — Effects menu populated; ExpDecayReverb audible and freeze/train-eligible; other effect types placeable as stubs until later stories.
 
@@ -93,15 +93,15 @@ description: "Task list for DDSP Effects & Recurrent Layers"
 
 ### Implementation for User Story 2
 
-- [ ] T025 [US2] Complete FIRFilter and FilteredNoiseReverb `makeNode` properties (`n_frames`, `n_filter_banks`, `window_size`, plus FilteredNoise `reverb_length`/`add_dry`) and trainable magnitude ownership in `OpenYourBox/Source/graph/NodeGraph.cpp`
-- [ ] T026 [US2] Implement FilteredNoise IR synth and LTV-FIR / frequency-filter helpers in `OpenYourBox/Source/dsp/DdspEffects.cpp` and `OpenYourBox/Source/dsp/DdspEffects.h`
-- [ ] T027 [US2] Compile/process FIRFilter and FilteredNoiseReverb with magnitude tensors and dimension validation in `OpenYourBox/Source/dsp/LiveGraphEngine.cpp`
-- [ ] T028 [US2] Property UI: dimension editors + init/randomize for magnitudes (no cell painter) in `OpenYourBox/Source/graph/NodeRenderer.cpp`
-- [ ] T029 [US2] Refuse illegal magnitude dimensions / shape-breaking connections with Shape Integrity messaging in `OpenYourBox/Source/graph/NodeGraph.cpp` and `OpenYourBox/Source/graph/NodeRenderer.cpp`
-- [ ] T030 [US2] Add FIRFilter and FilteredNoiseReverb freeze modules in `Backend/freeze_worker.py`
-- [ ] T031 [US2] Add FIRFilter and FilteredNoiseReverb train modules (trainable magnitudes) in `Backend/train_worker.py`
-- [ ] T032 [P] [US2] Add live FIRFilter / FilteredNoiseReverb coverage in `Tests/LiveGraphEngineTests.cpp`
-- [ ] T033 [P] [US2] Add freeze/train coverage for FIRFilter and FilteredNoiseReverb in `Tests/test_freeze_worker.py` and `Tests/test_train_worker.py`
+- [X] T025 [US2] Complete FIRFilter and FilteredNoiseReverb `makeNode` properties (`n_frames`, `n_filter_banks`, `window_size`, plus FilteredNoise `reverb_length`/`add_dry`) and trainable magnitude ownership in `OpenYourBox/Source/graph/NodeGraph.cpp`
+- [X] T026 [US2] Implement FilteredNoise IR synth and LTV-FIR / frequency-filter helpers in `OpenYourBox/Source/dsp/DdspEffects.cpp` and `OpenYourBox/Source/dsp/DdspEffects.h`
+- [X] T027 [US2] Compile/process FIRFilter and FilteredNoiseReverb with magnitude tensors and dimension validation in `OpenYourBox/Source/dsp/LiveGraphEngine.cpp`
+- [X] T028 [US2] Property UI: dimension editors + init/randomize for magnitudes (no cell painter) in `OpenYourBox/Source/graph/NodeRenderer.cpp`
+- [X] T029 [US2] Refuse illegal magnitude dimensions / shape-breaking connections with Shape Integrity messaging in `OpenYourBox/Source/graph/NodeGraph.cpp` and `OpenYourBox/Source/graph/NodeRenderer.cpp`
+- [X] T030 [US2] Add FIRFilter and FilteredNoiseReverb freeze modules in `Backend/freeze_worker.py`
+- [X] T031 [US2] Add FIRFilter and FilteredNoiseReverb train modules (trainable magnitudes) in `Backend/train_worker.py`
+- [X] T032 [P] [US2] Add live FIRFilter / FilteredNoiseReverb coverage in `Tests/LiveGraphEngineTests.cpp`
+- [X] T033 [P] [US2] Add freeze/train coverage for FIRFilter and FilteredNoiseReverb in `Tests/test_freeze_worker.py` and `Tests/test_train_worker.py`
 
 **Checkpoint**: US2 complete — spectral effect nodes editable via dims + randomize/train; illegal shapes refused.
 
@@ -115,14 +115,14 @@ description: "Task list for DDSP Effects & Recurrent Layers"
 
 ### Implementation for User Story 3
 
-- [ ] T034 [US3] Complete ModDelay `makeNode` property schema and validation (`center_ms - depth_ms` clamp/refuse) in `OpenYourBox/Source/graph/NodeGraph.cpp`
-- [ ] T035 [US3] Implement variable-length modulated delay in `OpenYourBox/Source/dsp/DdspEffects.cpp` and `OpenYourBox/Source/dsp/DdspEffects.h`
-- [ ] T036 [US3] Compile/process ModDelay with preallocated delay line sized for `center_ms + depth_ms` in `OpenYourBox/Source/dsp/LiveGraphEngine.cpp`
-- [ ] T037 [US3] Expose ModDelay properties in Parameters UI in `OpenYourBox/Source/graph/NodeRenderer.cpp`
-- [ ] T038 [US3] Add ModDelay freeze module in `Backend/freeze_worker.py`
-- [ ] T039 [US3] Add ModDelay train module in `Backend/train_worker.py`
-- [ ] T040 [P] [US3] Add live ModDelay modulation coverage in `Tests/LiveGraphEngineTests.cpp`
-- [ ] T041 [P] [US3] Add freeze/train ModDelay smoke coverage in `Tests/test_freeze_worker.py` and `Tests/test_train_worker.py`
+- [X] T034 [US3] Complete ModDelay `makeNode` property schema and validation (`center_ms - depth_ms` clamp/refuse) in `OpenYourBox/Source/graph/NodeGraph.cpp`
+- [X] T035 [US3] Implement variable-length modulated delay in `OpenYourBox/Source/dsp/DdspEffects.cpp` and `OpenYourBox/Source/dsp/DdspEffects.h`
+- [X] T036 [US3] Compile/process ModDelay with preallocated delay line sized for `center_ms + depth_ms` in `OpenYourBox/Source/dsp/LiveGraphEngine.cpp`
+- [X] T037 [US3] Expose ModDelay properties in Parameters UI in `OpenYourBox/Source/graph/NodeRenderer.cpp`
+- [X] T038 [US3] Add ModDelay freeze module in `Backend/freeze_worker.py`
+- [X] T039 [US3] Add ModDelay train module in `Backend/train_worker.py`
+- [X] T040 [P] [US3] Add live ModDelay modulation coverage in `Tests/LiveGraphEngineTests.cpp`
+- [X] T041 [P] [US3] Add freeze/train ModDelay smoke coverage in `Tests/test_freeze_worker.py` and `Tests/test_train_worker.py`
 
 **Checkpoint**: US3 complete — ModDelay audible and freeze/train-eligible.
 
@@ -136,14 +136,14 @@ description: "Task list for DDSP Effects & Recurrent Layers"
 
 ### Implementation for User Story 4
 
-- [ ] T042 [US4] Complete Reverb `makeNode` with audio + optional `ir` ports, `reverb_length`, `add_dry`, `ir_blend`, trainable internal IR in `OpenYourBox/Source/graph/NodeGraph.cpp`
-- [ ] T043 [US4] Implement IR dry-mask, internal/external blend, and FFT convolve helpers in `OpenYourBox/Source/dsp/DdspEffects.cpp` and `OpenYourBox/Source/dsp/DdspEffects.h`
-- [ ] T044 [US4] Compile/process Reverb dual-input path, empty-IR fallback warning, and live-safe length warning in `OpenYourBox/Source/dsp/LiveGraphEngine.cpp`
-- [ ] T045 [US4] Surface Reverb properties, blend control, and recoverable empty-IR / performance warnings in `OpenYourBox/Source/graph/NodeRenderer.cpp` and `OpenYourBox/Source/ui/InfoPanel.cpp`
-- [ ] T046 [US4] Add Reverb freeze path including optional IR input / blend in `Backend/freeze_worker.py`
-- [ ] T047 [US4] Add Reverb train path (trainable IR + multi-input DAG as needed) in `Backend/train_worker.py`
-- [ ] T048 [P] [US4] Add live Reverb blend / empty-IR / length-warn coverage in `Tests/LiveGraphEngineTests.cpp`
-- [ ] T049 [P] [US4] Add freeze/train Reverb coverage in `Tests/test_freeze_worker.py` and `Tests/test_train_worker.py`
+- [X] T042 [US4] Complete Reverb `makeNode` with audio + optional `ir` ports, `reverb_length`, `add_dry`, `ir_blend`, trainable internal IR in `OpenYourBox/Source/graph/NodeGraph.cpp`
+- [X] T043 [US4] Implement IR dry-mask, internal/external blend, and FFT convolve helpers in `OpenYourBox/Source/dsp/DdspEffects.cpp` and `OpenYourBox/Source/dsp/DdspEffects.h`
+- [X] T044 [US4] Compile/process Reverb dual-input path, empty-IR fallback warning, and live-safe length warning in `OpenYourBox/Source/dsp/LiveGraphEngine.cpp`
+- [X] T045 [US4] Surface Reverb properties, blend control, and recoverable empty-IR / performance warnings in `OpenYourBox/Source/graph/NodeRenderer.cpp` and `OpenYourBox/Source/ui/InfoPanel.cpp`
+- [X] T046 [US4] Add Reverb freeze path including optional IR input / blend in `Backend/freeze_worker.py`
+- [X] T047 [US4] Add Reverb train path (trainable IR + multi-input DAG as needed) in `Backend/train_worker.py`
+- [X] T048 [P] [US4] Add live Reverb blend / empty-IR / length-warn coverage in `Tests/LiveGraphEngineTests.cpp`
+- [X] T049 [P] [US4] Add freeze/train Reverb coverage in `Tests/test_freeze_worker.py` and `Tests/test_train_worker.py`
 
 **Checkpoint**: US4 complete — convolutional Reverb matches clarified IR blend/fallback/warn contracts.
 
@@ -157,16 +157,16 @@ description: "Task list for DDSP Effects & Recurrent Layers"
 
 ### Implementation for User Story 5
 
-- [ ] T050 [US5] Complete LSTM/RNN `makeNode` properties (`hidden_size`, `bidirectional`, `bias`, `activation`, `negative_slope`, `gain`; no `num_layers`/`input_size`) and output shape rules in `OpenYourBox/Source/graph/NodeGraph.cpp`
-- [ ] T051 [US5] Implement custom single-layer RNN and LSTM cells with in-cell activation + gain in `OpenYourBox/Source/dsp/RecurrentLayers.cpp` and `OpenYourBox/Source/dsp/RecurrentLayers.h`
-- [ ] T052 [US5] Allocate/carry/reset hidden (and LSTM cell) state in `LiveGraphRuntime` on prepare/rebuild/reconnect/freeze-swap/randomize in `OpenYourBox/Source/dsp/LiveGraphEngine.cpp` and `OpenYourBox/Source/dsp/LiveGraphEngine.h`
-- [ ] T053 [US5] Compile/process LSTM/RNN full-sequence I/O (uni: `hidden_size` ch; bi: `2 * hidden_size`) with inferred input size in `OpenYourBox/Source/dsp/LiveGraphEngine.cpp`
-- [ ] T054 [US5] List LSTM/RNN under Neural / Sequence and expose property rows (activation/gain/slope/bias/bidirectional) in `OpenYourBox/Source/graph/NodeRenderer.cpp`
-- [ ] T055 [US5] Refuse illegal recurrent connections with Shape Integrity tooltips in `OpenYourBox/Source/graph/NodeGraph.cpp` and `OpenYourBox/Source/graph/NodeRenderer.cpp`
-- [ ] T056 [US5] Add custom LSTM/RNN freeze modules (bake gain for Gold parity) in `Backend/freeze_worker.py`
-- [ ] T057 [US5] Add custom LSTM/RNN train modules in `Backend/train_worker.py`
-- [ ] T058 [P] [US5] Add live LSTM/RNN shape, bidirectional channels, and hidden-state carry/reset coverage in `Tests/LiveGraphEngineTests.cpp`
-- [ ] T059 [P] [US5] Add freeze/train LSTM/RNN shape and parameter coverage in `Tests/test_freeze_worker.py` and `Tests/test_train_worker.py`
+- [X] T050 [US5] Complete LSTM/RNN `makeNode` properties (`hidden_size`, `bidirectional`, `bias`, `activation`, `negative_slope`, `gain`; no `num_layers`/`input_size`) and output shape rules in `OpenYourBox/Source/graph/NodeGraph.cpp`
+- [X] T051 [US5] Implement custom single-layer RNN and LSTM cells with in-cell activation + gain in `OpenYourBox/Source/dsp/RecurrentLayers.cpp` and `OpenYourBox/Source/dsp/RecurrentLayers.h`
+- [X] T052 [US5] Allocate/carry/reset hidden (and LSTM cell) state in `LiveGraphRuntime` on prepare/rebuild/reconnect/freeze-swap/randomize in `OpenYourBox/Source/dsp/LiveGraphEngine.cpp` and `OpenYourBox/Source/dsp/LiveGraphEngine.h`
+- [X] T053 [US5] Compile/process LSTM/RNN full-sequence I/O (uni: `hidden_size` ch; bi: `2 * hidden_size`) with inferred input size in `OpenYourBox/Source/dsp/LiveGraphEngine.cpp`
+- [X] T054 [US5] List LSTM/RNN under Neural / Sequence and expose property rows (activation/gain/slope/bias/bidirectional) in `OpenYourBox/Source/graph/NodeRenderer.cpp`
+- [X] T055 [US5] Refuse illegal recurrent connections with Shape Integrity tooltips in `OpenYourBox/Source/graph/NodeGraph.cpp` and `OpenYourBox/Source/graph/NodeRenderer.cpp`
+- [X] T056 [US5] Add custom LSTM/RNN freeze modules (bake gain for Gold parity) in `Backend/freeze_worker.py`
+- [X] T057 [US5] Add custom LSTM/RNN train modules in `Backend/train_worker.py`
+- [X] T058 [P] [US5] Add live LSTM/RNN shape, bidirectional channels, and hidden-state carry/reset coverage in `Tests/LiveGraphEngineTests.cpp`
+- [X] T059 [P] [US5] Add freeze/train LSTM/RNN shape and parameter coverage in `Tests/test_freeze_worker.py` and `Tests/test_train_worker.py`
 
 **Checkpoint**: US5 complete — recurrent layers usable live and in freeze/train; state lifecycle matches FR-011a.
 
@@ -176,12 +176,12 @@ description: "Task list for DDSP Effects & Recurrent Layers"
 
 **Purpose**: Persist, randomize, mixed freeze, NOTICE, and quickstart validation across all seven types.
 
-- [ ] T060 Verify save/reload restores all seven types, connections, and properties (SC-006) via graph persist paths in `OpenYourBox/Source/graph/NodeGraph.cpp`
-- [ ] T061 Confirm weight randomization / seed behavior for IR, magnitudes, and recurrent weights in `OpenYourBox/Source/dsp/WeightRandomizer.cpp` and `OpenYourBox/Source/graph/NodeGraph.cpp`
-- [ ] T062 [P] Add mixed effects+recurrent legal freeze coverage in `Tests/LiveGraphEngineTests.cpp` and/or `Tests/test_freeze_worker.py`
-- [ ] T063 [P] Confirm Magenta/DDSP NOTICE block completeness in `NOTICE`
-- [ ] T064 Run `specs/014-ddsp-effects-rnn/quickstart.md` Scenarios A–G and fix residual gaps in touched OpenYourBox/Backend files
-- [ ] T065 Mark completed DDSP effects + LSTM/RNN TODO items in `TODO.md`
+- [X] T060 Verify save/reload restores all seven types, connections, and properties (SC-006) via graph persist paths in `OpenYourBox/Source/graph/NodeGraph.cpp`
+- [X] T061 Confirm weight randomization / seed behavior for IR, magnitudes, and recurrent weights in `OpenYourBox/Source/dsp/WeightRandomizer.cpp` and `OpenYourBox/Source/graph/NodeGraph.cpp`
+- [X] T062 [P] Add mixed effects+recurrent legal freeze coverage in `Tests/LiveGraphEngineTests.cpp` and/or `Tests/test_freeze_worker.py`
+- [X] T063 [P] Confirm Magenta/DDSP NOTICE block completeness in `NOTICE`
+- [X] T064 Run `specs/014-ddsp-effects-rnn/quickstart.md` Scenarios A–G and fix residual gaps in touched OpenYourBox/Backend files
+- [X] T065 Mark completed DDSP effects + LSTM/RNN TODO items in `TODO.md`
 
 ---
 

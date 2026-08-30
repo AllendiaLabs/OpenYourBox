@@ -2,13 +2,13 @@
 
 ## Future Features
 
-- [ ] Add DDSP effects from [magenta/ddsp/effects.py](https://github.com/magenta/ddsp/blob/main/ddsp/effects.py) as graph editor elements:
-  - [ ] **Reverb** — convolutional (FIR) reverb; FFT convolve dry audio with impulse response; params: `reverb_length`, `add_dry`, optional external/trainable IR input
-  - [ ] **ExpDecayReverb** — IR parameterized as exponential decay of white noise; params: `gain`, `decay`, `reverb_length`, `add_dry`
-  - [ ] **FilteredNoiseReverb** — IR synthesized via filtered noise; params: `magnitudes` `[time × filter_banks]`, `window_size`, `reverb_length`, `add_dry`
-  - [ ] **FIRFilter** — linear time-varying (LTV-FIR) frequency-domain filter; params: `magnitudes` `[time × filter_banks]`, `window_size`
-  - [ ] **ModDelay** — modulated delay for chorus/flanger/vibrato; params: `center_ms`, `depth_ms`, `gain`, `phase`, `add_dry`
-- [ ] add lstm and rnn
+- [x] Add DDSP effects from [magenta/ddsp/effects.py](https://github.com/magenta/ddsp/blob/main/ddsp/effects.py) as graph editor elements:
+  - [x] **Reverb** — convolutional (FIR) reverb; FFT convolve dry audio with impulse response; params: `reverb_length`, `add_dry`, optional external/trainable IR input
+  - [x] **ExpDecayReverb** — IR parameterized as exponential decay of white noise; params: `gain`, `decay`, `reverb_length`, `add_dry`
+  - [x] **FilteredNoiseReverb** — IR synthesized via filtered noise; params: `magnitudes` `[time × filter_banks]`, `window_size`, `reverb_length`, `add_dry`
+  - [x] **FIRFilter** — linear time-varying (LTV-FIR) frequency-domain filter; params: `magnitudes` `[time × filter_banks]`, `window_size`
+  - [x] **ModDelay** — modulated delay for chorus/flanger/vibrato; params: `center_ms`, `depth_ms`, `gain`, `phase`, `add_dry`
+- [x] add lstm and rnn
 - [ ] Find good compressor DDSP to add too.
 - [ ] Implement element set for RAVE.
 - [ ] Implement element set for MRT2.
@@ -25,6 +25,7 @@
 2) if in a group, right click on them should allow the user to create a macro and assign to it (adds control to group box), or all similar parameters/controls in the group (not subgroups), or assign to existing macro
 3) when assigned to macro, disable it so that users cannot desync values
 4) add necessary parameters to group box, including trackpad and knobs, to control values from the group box
+5) macros of an element should be saved with it in user library
 
 
 - [ ] check rf same as in rave paper
@@ -58,3 +59,9 @@
 - [ ] add bias option to elements
 - [ ] compactness not ready
 - [ ] input to latent or pca?
+- [ ] load last checkpoint of rave: https://github.com/acids-ircam/RAVE/discussions/82
+
+- [ ] trained boxes should store a list of checkpoints to select from, with "best" one too. 
+
+- [ ] Remove TCN because was reproduced as a group (but macros needed for convenience)
+- [ ] remove linear because it's conv1d with stride=kernel=dilation=1

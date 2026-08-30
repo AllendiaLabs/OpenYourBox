@@ -8,6 +8,7 @@
 #include <array>
 #include <charconv>
 #include <cmath>
+#include <cstddef>
 #include <cstdio>
 #include <cstring>
 #include <functional>
@@ -26,14 +27,31 @@ struct PaletteItem {
   openyourbox::graph::NodeType type;
 };
 
-/** @brief Factory palette rows, listed alphabetically by display label. */
-constexpr std::array<PaletteItem, 14> paletteItems{{
+struct PaletteCategory {
+  const char *label;
+  const PaletteItem *items;
+  std::size_t count;
+};
+
+constexpr PaletteItem effectsPaletteItems[] = {
+    {"ExpDecayReverb", openyourbox::graph::NodeType::expDecayReverb},
+    {"FilteredNoiseReverb", openyourbox::graph::NodeType::filteredNoiseReverb},
+    {"FIRFilter", openyourbox::graph::NodeType::firFilter},
+    {"ModDelay", openyourbox::graph::NodeType::modDelay},
+    {"Reverb", openyourbox::graph::NodeType::reverb},
+};
+
+constexpr PaletteItem neuralPaletteItems[] = {
+    {"LSTM", openyourbox::graph::NodeType::lstm},
+    {"RNN", openyourbox::graph::NodeType::rnn},
+};
+
+constexpr PaletteItem layerPaletteItems[] = {
     {"Activation", openyourbox::graph::NodeType::activation},
     {"BatchNorm1d", openyourbox::graph::NodeType::batchNorm},
     {"Bottleneck", openyourbox::graph::NodeType::variationalBottleneck},
     {"Conv1D", openyourbox::graph::NodeType::convolution},
     {"ConvTranspose1d", openyourbox::graph::NodeType::convTranspose},
-    {"Knob Input", openyourbox::graph::NodeType::knobInput},
     {"Linear", openyourbox::graph::NodeType::linear},
     {"Math Expression", openyourbox::graph::NodeType::mathExpression},
     {"Noise Synth", openyourbox::graph::NodeType::noiseSynthesizer},
@@ -41,8 +59,30 @@ constexpr std::array<PaletteItem, 14> paletteItems{{
     {"PQMF Synthesis", openyourbox::graph::NodeType::pqmfSynthesis},
     {"TCN", openyourbox::graph::NodeType::tcn},
     {"Utility", openyourbox::graph::NodeType::merge},
+};
+
+constexpr PaletteItem sourcePaletteItems[] = {
+    {"Knob Input", openyourbox::graph::NodeType::knobInput},
     {"XY Trackpad", openyourbox::graph::NodeType::xyTrackpad},
-}};
+};
+
+constexpr PaletteCategory paletteCategories[] = {
+    {"Effects", effectsPaletteItems, std::size(effectsPaletteItems)},
+    {"Neural / Sequence", neuralPaletteItems, std::size(neuralPaletteItems)},
+    {"Layers", layerPaletteItems, std::size(layerPaletteItems)},
+    {"Sources", sourcePaletteItems, std::size(sourcePaletteItems)},
+};
+
+/**
+ * @brief Invokes @p visitor for every Factory palette item.
+ * @tparam Visitor Callable `(const PaletteItem &)`.
+ */
+template <typename Visitor> void forEachPaletteItem(Visitor &&visitor) {
+  for (const auto &category : paletteCategories) {
+    for (std::size_t index = 0; index < category.count; ++index)
+      visitor(category.items[index]);
+  }
+}
 
 constexpr float nodeBodyWidth = 188.0f;
 /** @brief Width reserved for right-aligned property value controls. */
@@ -1095,7 +1135,7 @@ void NodeRenderer::renderPalette(NodeGraph &graph,
     ImGui::EndPopup();
   }
   if (factoryOpen) {
-    for (const auto &item : paletteItems) {
+    const auto renderPaletteSelectable = [&](const PaletteItem &item) {
       ImGui::PushID(item.label);
       ImGui::Selectable(item.label, false);
       if (ImGui::IsItemClicked(ImGuiMouseButton_Left)) {
@@ -1126,6 +1166,13 @@ void NodeRenderer::renderPalette(NodeGraph &graph,
         }
       }
       ImGui::PopID();
+    };
+    for (const auto &category : paletteCategories) {
+      if (ImGui::TreeNodeEx(category.label, ImGuiTreeNodeFlags_DefaultOpen)) {
+        for (std::size_t index = 0; index < category.count; ++index)
+          renderPaletteSelectable(category.items[index]);
+        ImGui::TreePop();
+      }
     }
     ImGui::TreePop();
   }
@@ -1657,9 +1704,9 @@ void NodeRenderer::handleContextMenus(NodeGraph &graph,
   if (ImGui::BeginPopup("Link Context")) {
     if (ImGui::BeginMenu("Insert")) {
       const auto *link = graph.findLink(contextLinkId);
-      for (const auto &item : paletteItems) {
+      forEachPaletteItem([&](const PaletteItem &item) {
         if (!canInsertOnLink(item.type))
-          continue;
+          return;
         if (ImGui::MenuItem(item.label)) {
           juce::Point<float> position{250.0f, 140.0f};
           if (link != nullptr) {
@@ -1681,7 +1728,7 @@ void NodeRenderer::handleContextMenus(NodeGraph &graph,
           pendingLinkInsert.pending = true;
           ImGui::CloseCurrentPopup();
         }
-      }
+      });
       ImGui::EndMenu();
     }
     if (ImGui::MenuItem("Delete")) {
@@ -1698,7 +1745,7 @@ void NodeRenderer::handleContextMenus(NodeGraph &graph,
       const auto ownerId = graph.findNodeForPin(contextPinId);
       const auto *owner =
           ownerId.has_value() ? graph.findNode(*ownerId) : nullptr;
-      for (const auto &item : paletteItems) {
+      forEachPaletteItem([&](const PaletteItem &item) {
         if (ImGui::MenuItem(item.label)) {
           juce::Point<float> position{lastCanvasCentre.x, lastCanvasCentre.y};
           if (!isCollapsedGroupPin(contextPinId) && owner != nullptr &&
@@ -1712,7 +1759,7 @@ void NodeRenderer::handleContextMenus(NodeGraph &graph,
           pendingPinAttach.pending = true;
           ImGui::CloseCurrentPopup();
         }
-      }
+      });
       ImGui::EndMenu();
     }
     ImGui::EndPopup();
@@ -3035,6 +3082,16 @@ void NodeRenderer::renderNodeParameterEditors(
         ImGui::BeginDisabled();
       continue;
     }
+    if (property.key == "reverb_length" && isDdspEffectType(node.type)) {
+      const auto milliseconds =
+          static_cast<double>(property.value) * 1000.0 / 48000.0;
+      if (milliseconds > liveSafeIrLengthMilliseconds) {
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.65f, 0.2f, 1.0f));
+        ImGui::TextWrapped("Live-safe warning: this IR length exceeds one "
+                           "second at 48 kHz.");
+        ImGui::PopStyleColor();
+      }
+    }
     ImGui::PushID(property.key.c_str());
     if (const auto hint = graph.groupRepeatPropertyHint(node.id, property.key);
         hint.has_value()) {
@@ -3050,7 +3107,7 @@ void NodeRenderer::renderNodeParameterEditors(
     auto value = property.value;
     bool changed = false;
     int dragSteps = 0;
-    if (property.key == "residual" || property.key == "weight_norm") {
+    if (isBooleanPropertyKey(property.key)) {
       beginPropertyRow(property.label.c_str());
       bool enabled = property.value != 0;
       if (ImGui::Checkbox("##flag", &enabled) && !readOnly) {

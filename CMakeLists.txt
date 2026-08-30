@@ -128,12 +128,14 @@ target_sources(OpenYourBox PRIVATE
     OpenYourBox/Source/PluginProcessor.cpp
     OpenYourBox/Source/capture/CapturePairing.cpp
     OpenYourBox/Source/capture/CaptureRecorder.cpp
+    OpenYourBox/Source/dsp/DdspEffects.cpp
     OpenYourBox/Source/dsp/LiveGraphEngine.cpp
     OpenYourBox/Source/dsp/LiveGraphPublisher.cpp
     OpenYourBox/Source/dsp/LookbackBuffer.cpp
     OpenYourBox/Source/dsp/NoiseSynthesizer.cpp
     OpenYourBox/Source/dsp/PqmfBank.cpp
     OpenYourBox/Source/dsp/RateConv.cpp
+    OpenYourBox/Source/dsp/RecurrentLayers.cpp
     OpenYourBox/Source/dsp/TCNModel.cpp
     OpenYourBox/Source/dsp/TorchScriptBlackBox.cpp
     OpenYourBox/Source/dsp/VariationalBottleneck.cpp

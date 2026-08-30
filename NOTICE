@@ -101,3 +101,13 @@ published causal PQMF, rate-change, variational, filtered-noise IR, and two-stag
 behaviour; it does not vendor the acids-rave Python package.
 See https://creativecommons.org/licenses/by-nc/4.0/
 
+This product reimplements Magenta DDSP effect semantics (convolutional
+reverb, exponential-decay reverb, filtered-noise reverb, LTV-FIR, and
+modulated delay) from `ddsp/effects.py` as LibTorch / PyTorch graph
+elements. It does not embed TensorFlow or the Magenta DDSP package.
+
+Copyright 2026 The DDSP Authors.
+Licensed under the Apache License, Version 2.0.
+See https://github.com/magenta/ddsp
+and http://www.apache.org/licenses/LICENSE-2.0
+

@@ -2,6 +2,7 @@
 #include "dsp/PqmfBank.h"
 #include "dsp/RateConv.h"
 #include "library/TrainingLibrary.h"
+#include "library/UserBoxLibrary.h"
 #include "library/UserDataPaths.h"
 
 #include <torch/torch.h>
@@ -25,6 +26,122 @@ bool expect(bool condition, const char *message) {
   if (!condition)
     std::cerr << "FAIL: " << message << '\n';
   return condition;
+}
+
+/**
+ * @brief Imports a mono user-library RAVE group and processes live audio.
+ * @param name Catalog display name.
+ * @param options Live compile options (host width is forced to mono).
+ * @return True when the named box is absent, or when import/compile/process pass.
+ */
+bool testUserLibraryRaveBox(
+    const char *name, const openyourbox::dsp::LiveGraphCompileOptions &options) {
+  using openyourbox::dsp::LiveGraphCompileError;
+  using openyourbox::dsp::LiveGraphEngine;
+  using openyourbox::graph::NodeGraph;
+  using openyourbox::graph::NodeType;
+  using openyourbox::library::UserBoxLibrary;
+  UserBoxLibrary library;
+  const auto *entry = library.findEntryByName(name);
+  if (entry == nullptr)
+    return true;
+  const auto label = std::string(name);
+  juce::String snapshotError;
+  const auto snapshot = library.loadEntrySnapshot(entry->id, snapshotError);
+  const auto snapshotMessage = snapshotError.isEmpty()
+                                    ? label + " snapshot must load"
+                                    : snapshotError.toStdString();
+  if (!expect(snapshot.isValid(), snapshotMessage.c_str()))
+    return false;
+  NodeGraph graph;
+  const auto inId = graph.addNode(NodeType::audioInput, {0.0f, 0.0f});
+  const auto outId = graph.addNode(NodeType::audioOutput, {800.0f, 0.0f});
+  const auto monoMessage = label + " host I/O must be mono";
+  if (!expect(graph.setProperty(inId, "channels", 0) &&
+                  graph.setProperty(outId, "channels", 0),
+              monoMessage.c_str()))
+    return false;
+  juce::String importError;
+  const auto rootId = graph.importBox(snapshot, {200.0f, 0.0f}, true, importError);
+  const auto importMessage = importError.isEmpty()
+                                 ? label + " library box must import"
+                                 : importError.toStdString();
+  if (!expect(rootId.has_value(), importMessage.c_str()))
+    return false;
+  const auto *group = graph.findGroup(*rootId);
+  std::int32_t inputHubId = 0;
+  std::int32_t outputHubId = 0;
+  if (group != nullptr) {
+    for (const auto memberId : group->memberIds) {
+      const auto *node = graph.findNode(memberId);
+      if (node == nullptr)
+        continue;
+      if (node->type == NodeType::groupInput)
+        inputHubId = node->id;
+      else if (node->type == NodeType::groupOutput)
+        outputHubId = node->id;
+    }
+  }
+  const auto *inNode = graph.findNode(inId);
+  const auto *outNode = graph.findNode(outId);
+  const auto *inputHub = graph.findNode(inputHubId);
+  const auto *outputHub = graph.findNode(outputHubId);
+  if (!expect(inNode != nullptr && outNode != nullptr && inputHub != nullptr &&
+                  outputHub != nullptr,
+              (label + " library box must expose I/O hubs").c_str()))
+    return false;
+  const auto inLink =
+      graph.connect(inNode->outputs.front().id, inputHub->inputs.front().id);
+  const auto outLink =
+      graph.connect(outputHub->outputs.front().id, outNode->inputs.front().id);
+  const auto inLinkMessage = "Audio In to " + label;
+  if (!expect(inLink.accepted,
+              inLink.accepted ? inLinkMessage.c_str() : inLink.message.c_str()))
+    return false;
+  const auto outLinkMessage = label + " to Audio Out";
+  if (!expect(outLink.accepted,
+              outLink.accepted ? outLinkMessage.c_str() : outLink.message.c_str()))
+    return false;
+  const auto expanded = graph.withInvisibleRepeatsMaterialized();
+  const auto compiled = LiveGraphEngine::compile(expanded, options);
+  const auto compileMessage = compiled.succeeded()
+                                  ? label + " library graph must compile"
+                                  : compiled.error.message;
+  if (!expect(compiled.succeeded(), compileMessage.c_str()))
+    return false;
+  LiveGraphCompileError prepareError;
+  const auto runtime = LiveGraphEngine::prepare(compiled.snapshot, prepareError);
+  const auto prepareMessage = label + " library graph must prepare";
+  if (!expect(runtime != nullptr, prepareMessage.c_str()))
+    return false;
+  bool processed = false;
+  std::string processError;
+  try {
+    for (const auto block : {32, 64, 128, 256, 512}) {
+      if (block > options.maximumBlockSize)
+        continue;
+      const auto output =
+          runtime->processTensor(torch::randn({1, 2, block}, torch::kFloat32));
+      if (!output.defined() || output.size(2) != block) {
+        processError = "block " + std::to_string(block) + " returned time " +
+                        std::to_string(output.defined() ? output.size(2) : -1);
+        processed = false;
+        break;
+      }
+      processed = true;
+    }
+  } catch (const std::exception &exception) {
+    processError = exception.what();
+    processed = false;
+  }
+  if (!processed && processError.empty() &&
+      runtime->getLastProcessingFailureNodeId() != 0)
+    processError = "muted at node " +
+                   std::to_string(runtime->getLastProcessingFailureNodeId());
+  const auto processMessage = processError.empty()
+                                  ? label + " from library must process"
+                                  : processError;
+  return expect(processed, processMessage.c_str());
 }
 
 /**
@@ -2963,6 +3080,325 @@ int main() {
         }
       }
     }
+  }
+
+  passed &= testUserLibraryRaveBox("Small-RAVE", options);
+
+  {
+    using openyourbox::graph::NodeType;
+    openyourbox::graph::NodeGraph decayGraph;
+    const auto audioIn = decayGraph.addNode(NodeType::audioInput, {0.0f, 0.0f});
+    const auto effect =
+        decayGraph.addNode(NodeType::expDecayReverb, {180.0f, 0.0f});
+    const auto audioOut =
+        decayGraph.addNode(NodeType::audioOutput, {360.0f, 0.0f});
+    passed &= expect(decayGraph.setProperty(effect, "reverb_length", 64),
+                     "ExpDecayReverb length is editable");
+    passed &= expect(decayGraph.setProperty(effect, "add_dry", 0),
+                     "ExpDecayReverb add_dry is editable");
+    const auto *inNode = decayGraph.findNode(audioIn);
+    const auto *fxNode = decayGraph.findNode(effect);
+    const auto *outNode = decayGraph.findNode(audioOut);
+    passed &= expect(inNode != nullptr && fxNode != nullptr && outNode != nullptr &&
+                         decayGraph
+                             .connect(inNode->outputs.front().id,
+                                      fxNode->inputs.front().id)
+                             .accepted &&
+                         decayGraph
+                             .connect(fxNode->outputs.front().id,
+                                      outNode->inputs.front().id)
+                             .accepted,
+                     "ExpDecayReverb chain connects");
+    const auto compiled = LiveGraphEngine::compile(decayGraph, options);
+    if (!compiled.succeeded())
+      std::cerr << "ExpDecayReverb compile: " << compiled.error.message << '\n';
+    passed &= expect(compiled.succeeded(), "ExpDecayReverb compiles");
+    if (compiled.succeeded()) {
+      LiveGraphCompileError prepareError;
+      const auto runtime =
+          LiveGraphEngine::prepare(compiled.snapshot, prepareError);
+      passed &= expect(runtime != nullptr, "ExpDecayReverb prepares");
+      if (runtime != nullptr) {
+        const auto wet = runtime->processTensor(
+            torch::ones({1, 2, 32}, torch::kFloat32));
+        passed &= expect(wet.defined() && wet.size(1) == 2 && wet.size(2) == 32,
+                         "ExpDecayReverb emits stereo audio");
+        passed &= expect(wet.abs().sum().item<float>() > 0.0f,
+                         "ExpDecayReverb is audible");
+      }
+    }
+    decayGraph.setFloatProperty(effect, "decay", 6.0f);
+    const auto longer = LiveGraphEngine::compile(decayGraph, options);
+    passed &= expect(longer.succeeded(), "ExpDecayReverb recompiles after decay");
+  }
+
+  {
+    using openyourbox::graph::NodeType;
+    openyourbox::graph::NodeGraph firGraph;
+    const auto audioIn = firGraph.addNode(NodeType::audioInput, {0.0f, 0.0f});
+    const auto fir = firGraph.addNode(NodeType::firFilter, {180.0f, 0.0f});
+    const auto audioOut = firGraph.addNode(NodeType::audioOutput, {360.0f, 0.0f});
+    passed &= expect(firGraph.setProperty(fir, "n_frames", 4),
+                     "FIRFilter frames editable");
+    passed &= expect(!firGraph.setProperty(fir, "n_filter_banks", 0),
+                     "FIRFilter refuses zero filter banks");
+    const auto *inNode = firGraph.findNode(audioIn);
+    const auto *firNode = firGraph.findNode(fir);
+    const auto *outNode = firGraph.findNode(audioOut);
+    passed &= expect(inNode != nullptr && firNode != nullptr && outNode != nullptr &&
+                         firGraph
+                             .connect(inNode->outputs.front().id,
+                                      firNode->inputs.front().id)
+                             .accepted &&
+                         firGraph
+                             .connect(firNode->outputs.front().id,
+                                      outNode->inputs.front().id)
+                             .accepted,
+                     "FIRFilter chain connects");
+    const auto compiled = LiveGraphEngine::compile(firGraph, options);
+    if (!compiled.succeeded())
+      std::cerr << "FIRFilter compile: " << compiled.error.message << '\n';
+    passed &= expect(compiled.succeeded(), "FIRFilter compiles");
+    if (compiled.succeeded()) {
+      LiveGraphCompileError prepareError;
+      const auto runtime =
+          LiveGraphEngine::prepare(compiled.snapshot, prepareError);
+      if (runtime != nullptr) {
+        const auto out = runtime->processTensor(
+            torch::randn({1, 2, 32}, torch::kFloat32));
+        passed &= expect(out.defined() && out.size(2) == 32,
+                         "FIRFilter preserves time");
+      }
+    }
+    const auto noise =
+        firGraph.addNode(NodeType::filteredNoiseReverb, {260.0f, 40.0f});
+    passed &= expect(firGraph.setProperty(noise, "reverb_length", 128),
+                     "FilteredNoiseReverb length editable");
+  }
+
+  {
+    using openyourbox::graph::NodeType;
+    openyourbox::graph::NodeGraph delayGraph;
+    const auto audioIn = delayGraph.addNode(NodeType::audioInput, {0.0f, 0.0f});
+    const auto delay = delayGraph.addNode(NodeType::modDelay, {180.0f, 0.0f});
+    const auto audioOut =
+        delayGraph.addNode(NodeType::audioOutput, {360.0f, 0.0f});
+    passed &= expect(!delayGraph.setFloatProperty(delay, "depth_ms", 40.0f),
+                     "ModDelay refuses depth greater than center");
+    passed &= expect(delayGraph.setFloatProperty(delay, "depth_ms", 5.0f),
+                     "ModDelay accepts legal depth");
+    const auto *inNode = delayGraph.findNode(audioIn);
+    const auto *delayNode = delayGraph.findNode(delay);
+    const auto *outNode = delayGraph.findNode(audioOut);
+    passed &= expect(inNode != nullptr && delayNode != nullptr &&
+                         outNode != nullptr &&
+                         delayGraph
+                             .connect(inNode->outputs.front().id,
+                                      delayNode->inputs.front().id)
+                             .accepted &&
+                         delayGraph
+                             .connect(delayNode->outputs.front().id,
+                                      outNode->inputs.front().id)
+                             .accepted,
+                     "ModDelay chain connects");
+    const auto compiled = LiveGraphEngine::compile(delayGraph, options);
+    if (!compiled.succeeded())
+      std::cerr << "ModDelay compile: " << compiled.error.message << '\n';
+    passed &= expect(compiled.succeeded(), "ModDelay compiles");
+    if (compiled.succeeded()) {
+      LiveGraphCompileError prepareError;
+      const auto runtime =
+          LiveGraphEngine::prepare(compiled.snapshot, prepareError);
+      if (runtime != nullptr) {
+        const auto impulse = torch::zeros({1, 2, 64}, torch::kFloat32);
+        impulse[0][0][0] = 1.0f;
+        const auto out = runtime->processTensor(impulse);
+        passed &= expect(out.abs().sum().item<float>() > 0.0f,
+                         "ModDelay produces output");
+      }
+    }
+  }
+
+  {
+    using openyourbox::graph::NodeType;
+    openyourbox::graph::NodeGraph reverbGraph;
+    const auto audioIn = reverbGraph.addNode(NodeType::audioInput, {0.0f, 0.0f});
+    const auto reverb = reverbGraph.addNode(NodeType::reverb, {180.0f, 0.0f});
+    const auto audioOut =
+        reverbGraph.addNode(NodeType::audioOutput, {360.0f, 0.0f});
+    passed &= expect(reverbGraph.setProperty(reverb, "reverb_length", 48),
+                     "Reverb length editable");
+    const auto *inNode = reverbGraph.findNode(audioIn);
+    const auto *revNode = reverbGraph.findNode(reverb);
+    const auto *outNode = reverbGraph.findNode(audioOut);
+    passed &= expect(revNode != nullptr && revNode->inputs.size() == 2,
+                     "Reverb has optional IR pin");
+    passed &= expect(inNode != nullptr && revNode != nullptr && outNode != nullptr &&
+                         reverbGraph
+                             .connect(inNode->outputs.front().id,
+                                      revNode->inputs.front().id)
+                             .accepted &&
+                         reverbGraph
+                             .connect(revNode->outputs.front().id,
+                                      outNode->inputs.front().id)
+                             .accepted,
+                     "Reverb chain connects");
+    const auto compiled = LiveGraphEngine::compile(reverbGraph, options);
+    if (!compiled.succeeded())
+      std::cerr << "Reverb compile: " << compiled.error.message << '\n';
+    passed &= expect(compiled.succeeded(), "Reverb compiles");
+    reverbGraph.setProperty(reverb, "reverb_length", 96000);
+    const auto warning = reverbGraph.graphWarningMessage();
+    passed &= expect(warning.find("live-safe") != std::string::npos,
+                     "Long reverb length warns without clamping");
+  }
+
+  {
+    using openyourbox::graph::NodeType;
+    openyourbox::graph::NodeGraph rnnGraph;
+    const auto audioIn = rnnGraph.addNode(NodeType::audioInput, {0.0f, 0.0f});
+    const auto rnn = rnnGraph.addNode(NodeType::rnn, {180.0f, 0.0f});
+    const auto lstm = rnnGraph.addNode(NodeType::lstm, {300.0f, 0.0f});
+    const auto linear = rnnGraph.addNode(NodeType::linear, {390.0f, 0.0f});
+    const auto audioOut = rnnGraph.addNode(NodeType::audioOutput, {480.0f, 0.0f});
+    passed &= expect(rnnGraph.setProperty(rnn, "hidden_size", 4),
+                     "RNN hidden size editable");
+    passed &= expect(rnnGraph.setProperty(lstm, "hidden_size", 4),
+                     "LSTM hidden size editable");
+    passed &= expect(rnnGraph.setProperty(lstm, "bidirectional", 1),
+                     "LSTM bidirectional editable");
+    passed &= expect(rnnGraph.setProperty(lstm, "bias", 0),
+                     "LSTM bias is a 0/1 flag");
+    passed &= expect(rnnGraph.setFloatProperty(rnn, "leak_rate", 0.5f),
+                     "RNN leak rate editable");
+    passed &= expect(!rnnGraph.setFloatProperty(rnn, "leak_rate", 1.5f),
+                     "RNN leak rate refuses out of range");
+    passed &= expect(rnnGraph.setFloatProperty(lstm, "recurrent_weight_scale",
+                                              2.0f),
+                     "LSTM recurrent weight scale editable");
+    passed &= expect(!rnnGraph.setFloatProperty(lstm, "recurrent_weight_scale",
+                                               11.0f),
+                     "LSTM recurrent weight scale refuses out of range");
+    passed &= expect(rnnGraph.setProperty(linear, "features", 2),
+                     "Linear maps recurrent channels to host stereo");
+    const auto *inNode = rnnGraph.findNode(audioIn);
+    const auto *rnnNode = rnnGraph.findNode(rnn);
+    const auto *lstmNode = rnnGraph.findNode(lstm);
+    const auto *linearNode = rnnGraph.findNode(linear);
+    const auto *outNode = rnnGraph.findNode(audioOut);
+    passed &= expect(inNode != nullptr && rnnNode != nullptr &&
+                         lstmNode != nullptr && linearNode != nullptr &&
+                         outNode != nullptr &&
+                         rnnGraph
+                             .connect(inNode->outputs.front().id,
+                                      rnnNode->inputs.front().id)
+                             .accepted &&
+                         rnnGraph
+                             .connect(rnnNode->outputs.front().id,
+                                      lstmNode->inputs.front().id)
+                             .accepted &&
+                         rnnGraph
+                             .connect(lstmNode->outputs.front().id,
+                                      linearNode->inputs.front().id)
+                             .accepted &&
+                         rnnGraph
+                             .connect(linearNode->outputs.front().id,
+                                      outNode->inputs.front().id)
+                             .accepted,
+                     "RNN then LSTM chain connects");
+    passed &= expect(lstmNode->outputs.front().shape.channels == 8,
+                     "Bidirectional LSTM doubles hidden channels");
+    const auto compiled = LiveGraphEngine::compile(rnnGraph, options);
+    if (!compiled.succeeded())
+      std::cerr << "RNN/LSTM compile: " << compiled.error.message << '\n';
+    passed &= expect(compiled.succeeded(), "RNN/LSTM compiles");
+    if (compiled.succeeded()) {
+      LiveGraphCompileError prepareError;
+      const auto runtime =
+          LiveGraphEngine::prepare(compiled.snapshot, prepareError);
+      passed &= expect(runtime != nullptr, "RNN/LSTM prepares");
+      if (runtime != nullptr) {
+        const auto first = runtime->processTensor(
+            torch::ones({1, 2, 16}, torch::kFloat32));
+        const auto second = runtime->processTensor(
+            torch::ones({1, 2, 16}, torch::kFloat32));
+        passed &= expect(first.defined() && first.size(1) == 2,
+                         "Stacked recurrent output matches host");
+        runtime->reset();
+        const auto afterReset = runtime->processTensor(
+            torch::ones({1, 2, 16}, torch::kFloat32));
+        passed &= expect(afterReset.defined(),
+                         "Recurrent state resets without stopping");
+        (void)second;
+      }
+    }
+  }
+
+  {
+    using openyourbox::graph::NodeType;
+    openyourbox::graph::NodeGraph original;
+    const auto reverb = original.addNode(NodeType::reverb, {0.0f, 0.0f});
+    const auto decay = original.addNode(NodeType::expDecayReverb, {80.0f, 0.0f});
+    const auto noise =
+        original.addNode(NodeType::filteredNoiseReverb, {160.0f, 0.0f});
+    const auto fir = original.addNode(NodeType::firFilter, {240.0f, 0.0f});
+    const auto delay = original.addNode(NodeType::modDelay, {320.0f, 0.0f});
+    const auto lstm = original.addNode(NodeType::lstm, {400.0f, 0.0f});
+    const auto rnn = original.addNode(NodeType::rnn, {480.0f, 0.0f});
+    passed &= expect(original.setProperty(reverb, "reverb_length", 64),
+                     "persist Reverb length");
+    passed &= expect(original.setProperty(lstm, "hidden_size", 5),
+                     "persist LSTM hidden size");
+    passed &= expect(original.setProperty(lstm, "bidirectional", 1),
+                     "persist LSTM bidirectional");
+    passed &= expect(original.setFloatProperty(lstm, "leak_rate", 0.25f),
+                     "persist LSTM leak rate");
+    passed &= expect(original.setFloatProperty(rnn, "recurrent_weight_scale",
+                                               3.0f),
+                     "persist RNN recurrent weight scale");
+    const auto tree = original.toValueTree();
+    openyourbox::graph::NodeGraph restored;
+    passed &= expect(restored.restoreFromValueTree(tree),
+                     "DDSP and recurrent types restore from ValueTree");
+    const auto *restoredReverb = restored.findNode(reverb);
+    const auto *restoredDecay = restored.findNode(decay);
+    const auto *restoredNoise = restored.findNode(noise);
+    const auto *restoredFir = restored.findNode(fir);
+    const auto *restoredDelay = restored.findNode(delay);
+    const auto *restoredLstm = restored.findNode(lstm);
+    const auto *restoredRnn = restored.findNode(rnn);
+    passed &= expect(restoredReverb != nullptr &&
+                         restoredReverb->type == NodeType::reverb &&
+                         restoredDecay != nullptr &&
+                         restoredDecay->type == NodeType::expDecayReverb &&
+                         restoredNoise != nullptr &&
+                         restoredNoise->type == NodeType::filteredNoiseReverb &&
+                         restoredFir != nullptr &&
+                         restoredFir->type == NodeType::firFilter &&
+                         restoredDelay != nullptr &&
+                         restoredDelay->type == NodeType::modDelay &&
+                         restoredLstm != nullptr &&
+                         restoredLstm->type == NodeType::lstm &&
+                         restoredRnn != nullptr &&
+                         restoredRnn->type == NodeType::rnn,
+                     "save/reload restores all seven DDSP and recurrent types");
+    passed &= expect(restoredLstm != nullptr &&
+                         restoredLstm->outputs.front().shape.channels == 10,
+                     "restored bidirectional LSTM keeps doubled channels");
+    auto hasFloat = [](const openyourbox::graph::GraphNode *node,
+                       const char *key, float expected) {
+      if (node == nullptr)
+        return false;
+      for (const auto &property : node->properties) {
+        if (property.key == key)
+          return std::abs(property.floatValue - expected) < 1.0e-5f;
+      }
+      return false;
+    };
+    passed &= expect(hasFloat(restoredLstm, "leak_rate", 0.25f),
+                     "restored LSTM keeps leak rate");
+    passed &= expect(hasFloat(restoredRnn, "recurrent_weight_scale", 3.0f),
+                     "restored RNN keeps recurrent weight scale");
   }
 
   if (passed)

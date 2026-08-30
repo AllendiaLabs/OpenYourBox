@@ -1470,6 +1470,57 @@ class VariationalBottleneckParityTests(unittest.TestCase):
         mu = layer.encode_mean(samples)
         self.assertFalse(torch.allclose(sampled, mu))
 
+    def test_trains_filtered_noise_and_lstm(self) -> None:
+        """Trainable magnitudes and recurrent weights must appear in the module."""
+        noise = train_worker.build_module(
+            {
+                "elements": [
+                    {
+                        "id": 1,
+                        "type": "filtered_noise_reverb",
+                        "seed": 3,
+                        "properties": [
+                            {"key": "n_frames", "value": 4},
+                            {"key": "n_filter_banks", "value": 8},
+                            {"key": "window_size", "value": 17},
+                            {"key": "reverb_length", "value": 32},
+                            {"key": "add_dry", "value": 1},
+                        ],
+                    }
+                ],
+                "connections": [],
+            },
+            2,
+        )
+        self.assertTrue(any(parameter.requires_grad for parameter in noise.parameters()))
+        lstm = train_worker.build_module(
+            {
+                "elements": [
+                    {
+                        "id": 1,
+                        "type": "lstm",
+                        "seed": 3,
+                        "properties": [
+                            {"key": "hidden_size", "value": 4},
+                            {"key": "bidirectional", "value": 0},
+                            {"key": "bias", "value": 1},
+                            {"key": "activation", "value": 2},
+                            {"key": "gain", "float_value": 1.0},
+                            {"key": "leak_rate", "float_value": 1.0},
+                            {"key": "recurrent_weight_scale", "float_value": 1.0},
+                        ],
+                    }
+                ],
+                "connections": [],
+            },
+            2,
+        )
+        output = lstm(torch.randn(1, 2, 16), torch.zeros(1, 2, 16))
+        self.assertEqual(tuple(output.shape), (1, 4, 16))
+        zero_leak = train_worker.RecurrentLayer(2, 3, False, True, 2, 1.0, 0.01, False, 0.0, 1.0)
+        silent = zero_leak(torch.randn(1, 2, 8))
+        self.assertTrue(torch.allclose(silent, torch.zeros_like(silent)))
+
 
 if __name__ == "__main__":
     unittest.main()

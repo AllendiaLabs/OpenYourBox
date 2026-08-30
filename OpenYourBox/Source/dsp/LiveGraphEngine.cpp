@@ -1,8 +1,9 @@
+#include "DdspEffects.h"
 #include "LiveGraphEngine.h"
-
 #include "NoiseSynthesizer.h"
 #include "PqmfBank.h"
 #include "RateConv.h"
+#include "RecurrentLayers.h"
 #include "TCNModel.h"
 #include "VariationalBottleneck.h"
 
@@ -15,6 +16,7 @@
 #include <cmath>
 #include <cstring>
 #include <limits>
+#include <numeric>
 #include <optional>
 #include <queue>
 #include <stdexcept>
@@ -134,6 +136,40 @@ struct CompiledElement {
   int noiseBands = openyourbox::graph::defaultNoiseBands;
   /** @brief IR / hop length in samples (Noise Synth). */
   int windowSize = openyourbox::graph::defaultNoiseWindowSize;
+  /** @brief Impulse-response length in samples for DDSP reverbs. */
+  int reverbLength = openyourbox::graph::defaultReverbLength;
+  /** @brief Internal/external IR blend in `[0, 1]`. */
+  float irBlend = 0.0f;
+  /** @brief When true, mix dry with the wet effect path. */
+  bool addDry = true;
+  /** @brief Magenta ExpDecay/ModDelay raw gain (pre exp_sigmoid). */
+  float effectGain = openyourbox::graph::defaultExpDecayGain;
+  /** @brief Magenta ExpDecay decay control. */
+  float decay = openyourbox::graph::defaultExpDecayDecay;
+  /** @brief ModDelay center delay in milliseconds. */
+  float centerMs = openyourbox::graph::defaultModDelayCenterMs;
+  /** @brief ModDelay depth in milliseconds. */
+  float depthMs = openyourbox::graph::defaultModDelayDepthMs;
+  /** @brief ModDelay normalized phase in `[0, 1]`. */
+  float phase = openyourbox::graph::defaultModDelayPhase;
+  /** @brief Magnitude-grid time steps. */
+  int nFrames = openyourbox::graph::defaultFilterFrames;
+  /** @brief Magnitude-grid filter banks. */
+  int nFilterBanks = openyourbox::graph::defaultFilterBanks;
+  /** @brief Compiled index of Reverb's optional IR input, or -1. */
+  std::int64_t irInputIndex = -1;
+  /** @brief LSTM/RNN hidden size. */
+  int hiddenSize = openyourbox::graph::defaultHiddenSize;
+  /** @brief When true, concatenate forward and backward recurrent states. */
+  bool bidirectional = false;
+  /** @brief When true, recurrent cells include bias tensors. */
+  bool useBias = true;
+  /** @brief True for LSTM; false for vanilla RNN. */
+  bool lstmCell = false;
+  /** @brief Leaky-integrator mix in `[0, 1]` (`1` = no leak). */
+  float leakRate = openyourbox::graph::leakRateDefault;
+  /** @brief Scale applied to hidden-to-hidden recurrent weights. */
+  float recurrentWeightScale = openyourbox::graph::recurrentWeightScaleDefault;
 };
 
 /**
@@ -378,6 +414,42 @@ void randomizeElementWeights(CompiledElement &element, std::int32_t seed) {
         makeWeight(2 * latent, groupedIn, kernel, state));
     break;
   }
+  case openyourbox::graph::NodeType::reverb: {
+    const auto length = std::max(1, element.reverbLength);
+    auto ir = torch::empty({length}, torch::kFloat32);
+    auto *data = ir.data_ptr<float>();
+    for (int index = 0; index < length; ++index)
+      data[index] = uniformSigned(state) * 1.0e-6f;
+    element.weights.push_back(ir);
+    break;
+  }
+  case openyourbox::graph::NodeType::filteredNoiseReverb:
+  case openyourbox::graph::NodeType::firFilter: {
+    const auto frames = std::max(1, element.nFrames);
+    const auto banks = std::max(1, element.nFilterBanks);
+    auto magnitudes = torch::empty({frames, banks}, torch::kFloat32);
+    auto *data = magnitudes.data_ptr<float>();
+    for (int index = 0; index < frames * banks; ++index)
+      data[index] = uniformSigned(state) * 1.0e-2f;
+    element.weights.push_back(magnitudes);
+    break;
+  }
+  case openyourbox::graph::NodeType::lstm:
+  case openyourbox::graph::NodeType::rnn: {
+    const auto hidden = std::max(1, element.hiddenSize);
+    const auto input = std::max(1, element.inputChannels);
+    const auto gate = element.lstmCell ? hidden * 4 : hidden;
+    const auto directions = element.bidirectional ? 2 : 1;
+    for (int direction = 0; direction < directions; ++direction) {
+      element.weights.push_back(makeLinearWeight(gate, input, state));
+      element.weights.push_back(makeLinearWeight(gate, hidden, state));
+      if (element.useBias) {
+        element.weights.push_back(makeBias(gate, state));
+        element.weights.push_back(makeBias(gate, state));
+      }
+    }
+    break;
+  }
   default:
     throw std::invalid_argument("Element does not own randomizable weights");
   }
@@ -500,6 +572,8 @@ bool hasValidPortLayout(const openyourbox::graph::GraphNode &node) noexcept {
            node.outputs.size() == 1;
   if (node.type == NodeType::blackBox)
     return node.inputs.size() >= 1 && node.outputs.size() >= 1;
+  if (node.type == NodeType::reverb)
+    return node.inputs.size() == 2 && node.outputs.size() == 1;
   if (node.type == NodeType::pqmfAnalysis ||
       node.type == NodeType::pqmfSynthesis ||
       node.type == NodeType::rateConv ||
@@ -825,6 +899,12 @@ struct LiveGraphRuntime::Impl {
   std::vector<torch::Tensor> histories;
   /** @brief Per-element FiLM control histories, same length as the audio RF. */
   std::vector<torch::Tensor> conditioningHistories;
+  /** @brief Per-element recurrent hidden state (LSTM/RNN). */
+  std::vector<torch::Tensor> recurrentHidden;
+  /** @brief Per-element LSTM cell state. */
+  std::vector<torch::Tensor> recurrentCell;
+  /** @brief Circular delay-line write heads for ModDelay. */
+  std::vector<int> delayWriteHeads;
   /** @brief Per-element frozen kernels created outside the audio callback. */
   std::vector<std::unique_ptr<FrozenBlackBoxKernel>> blackBoxKernels;
   /** @brief Optional Gold encode taps, parallel to `outputs`. */
@@ -1488,6 +1568,69 @@ void LiveGraphRuntime::executeElement(std::size_t index,
     output = NoiseSynthesizer::process(upstream, element.noiseBands,
                                        element.windowSize);
     break;
+  case openyourbox::graph::NodeType::expDecayReverb:
+  case openyourbox::graph::NodeType::reverb:
+  case openyourbox::graph::NodeType::filteredNoiseReverb: {
+    torch::Tensor ir =
+        element.weights.empty() ? torch::zeros({1}) : element.weights.front();
+    if (element.type == openyourbox::graph::NodeType::filteredNoiseReverb &&
+        !element.weights.empty())
+      ir = DdspEffects::filteredNoiseImpulseResponse(
+          element.weights.front(), element.windowSize, element.reverbLength,
+          static_cast<std::int32_t>(element.nodeId));
+    if (element.type == openyourbox::graph::NodeType::reverb &&
+        element.irInputIndex >= 0) {
+      const auto irSlot = static_cast<std::size_t>(element.irInputIndex);
+      torch::Tensor external;
+      if (irSlot < runtime.outputs.size())
+        external = runtime.outputs[irSlot];
+      if (!external.defined() || external.numel() < 1) {
+        // Empty external IR: keep internal only (warning is graph-level).
+      } else {
+        ir = DdspEffects::blendImpulseResponses(ir, external, element.irBlend);
+      }
+    }
+    ir = DdspEffects::maskDryIr(ir);
+    auto wet = DdspEffects::streamingFir(upstream, ir, runtime.histories[index]);
+    output = element.addDry ? wet + upstream : wet;
+    break;
+  }
+  case openyourbox::graph::NodeType::firFilter: {
+    torch::Tensor magnitudes =
+        element.weights.empty() ? torch::zeros({1, 1}) : element.weights.front();
+    output = DdspEffects::frequencyFilter(upstream, magnitudes,
+                                          element.windowSize,
+                                          runtime.histories[index]);
+    break;
+  }
+  case openyourbox::graph::NodeType::modDelay:
+    output = DdspEffects::modDelay(
+        upstream, element.centerMs, element.depthMs, element.effectGain,
+        element.phase, runtime.snapshot->implementation->sampleRate,
+        element.addDry, runtime.histories[index],
+        runtime.delayWriteHeads[index]);
+    break;
+  case openyourbox::graph::NodeType::lstm:
+  case openyourbox::graph::NodeType::rnn: {
+    RecurrentConfig config;
+    config.inputSize = element.inputChannels;
+    config.hiddenSize = element.hiddenSize;
+    config.bidirectional = element.bidirectional;
+    config.bias = element.useBias;
+    config.activation = element.activation;
+    config.gain = resolveGain(element, controls);
+    config.negativeSlope = element.negativeSlope;
+    config.lstm = element.lstmCell;
+    config.leakRate = element.leakRate;
+    config.recurrentWeightScale = element.recurrentWeightScale;
+    auto &smoother = runtime.gainSmoothers[index];
+    smoother.setTargetValue(config.gain);
+    config.gain = smoother.getCurrentValue();
+    output = RecurrentLayers::process(upstream, element.weights, config,
+                                      runtime.recurrentHidden[index],
+                                      runtime.recurrentCell[index]);
+    break;
+  }
   case openyourbox::graph::NodeType::audioInput:
   case openyourbox::graph::NodeType::knobInput:
   case openyourbox::graph::NodeType::xyTrackpad:
@@ -1667,6 +1810,16 @@ void LiveGraphRuntime::reset() noexcept {
       if (history.defined())
         history.zero_();
     }
+    for (auto &hidden : implementation->recurrentHidden) {
+      if (hidden.defined())
+        hidden.zero_();
+    }
+    for (auto &cell : implementation->recurrentCell) {
+      if (cell.defined())
+        cell.zero_();
+    }
+    std::fill(implementation->delayWriteHeads.begin(),
+              implementation->delayWriteHeads.end(), 0);
     for (auto &history : implementation->conditioningHistories)
       history = torch::Tensor();
     const auto elementCount =
@@ -2541,6 +2694,139 @@ LiveGraphEngine::compile(const graph::NodeGraph &graphDocument,
             std::max(1, element.inputChannels / noiseBands);
         break;
       }
+      case NodeType::reverb:
+      case NodeType::expDecayReverb:
+      case NodeType::filteredNoiseReverb:
+      case NodeType::firFilter:
+      case NodeType::modDelay: {
+        element.outputChannels = std::max(1, element.inputChannels);
+        int reverbLength = graph::defaultReverbLength;
+        int addDry = 1;
+        int nFrames = graph::defaultFilterFrames;
+        int nBanks = graph::defaultFilterBanks;
+        int windowSize = graph::defaultFirWindowSize;
+        readProperty(node, "reverb_length", reverbLength);
+        readProperty(node, "add_dry", addDry);
+        readProperty(node, "n_frames", nFrames);
+        readProperty(node, "n_filter_banks", nBanks);
+        readProperty(node, "window_size", windowSize);
+        element.reverbLength = std::max(1, reverbLength);
+        element.addDry = addDry != 0;
+        element.nFrames = std::max(1, nFrames);
+        element.nFilterBanks = std::max(1, nBanks);
+        element.windowSize = std::max(1, windowSize | 1);
+        readFloatProperty(node, "ir_blend", element.irBlend);
+        readFloatProperty(node, "gain", element.effectGain);
+        readFloatProperty(node, "decay", element.decay);
+        readFloatProperty(node, "center_ms", element.centerMs);
+        readFloatProperty(node, "depth_ms", element.depthMs);
+        readFloatProperty(node, "phase", element.phase);
+        element.irBlend = std::clamp(element.irBlend, 0.0f, 1.0f);
+        element.phase = std::clamp(element.phase, 0.0f, 1.0f);
+        if (element.centerMs - element.depthMs < 0.0f)
+          element.depthMs = element.centerMs;
+        element.irInputIndex = -1;
+        for (std::size_t index = 0; index < node.inputs.size(); ++index) {
+          if (!graph::isIrInputPin(node.inputs[index]))
+            continue;
+          const auto source =
+              sourceNodeByDestinationPin.find(node.inputs[index].id);
+          if (source == sourceNodeByDestinationPin.end())
+            continue;
+          const auto compiledSource = compiledIndex.find(source->second);
+          if (compiledSource != compiledIndex.end())
+            element.irInputIndex =
+                static_cast<std::int64_t>(compiledSource->second);
+        }
+        if (node.type == NodeType::modDelay) {
+          element.receptiveField = static_cast<std::uint64_t>(
+              DdspEffects::delayLineLength(element.centerMs, element.depthMs,
+                                           options.sampleRate));
+        } else if (node.type == NodeType::firFilter) {
+          element.receptiveField =
+              static_cast<std::uint64_t>(std::max(1, element.windowSize));
+        } else {
+          element.receptiveField =
+              static_cast<std::uint64_t>(std::max(1, element.reverbLength));
+        }
+        if (element.receptiveField - 1 > options.maximumHistorySamples)
+          return failure(LiveGraphErrorCode::invalidGraph, node.id,
+                         "Effect history exceeds the live history cap");
+        if (node.type == NodeType::expDecayReverb) {
+          element.weights.push_back(DdspEffects::expDecayImpulseResponse(
+              element.effectGain, element.decay, element.reverbLength,
+              node.seed));
+        } else if (node.type == NodeType::reverb ||
+                   node.type == NodeType::filteredNoiseReverb ||
+                   node.type == NodeType::firFilter) {
+          element.randomizable = true;
+          if (node.type == NodeType::reverb)
+            element.parameterCount =
+                static_cast<std::uint64_t>(element.reverbLength);
+          else
+            element.parameterCount = static_cast<std::uint64_t>(
+                element.nFrames * element.nFilterBanks);
+          randomizeElementWeights(element, node.seed);
+        }
+        break;
+      }
+      case NodeType::lstm:
+      case NodeType::rnn: {
+        int hidden = graph::defaultHiddenSize;
+        int bidirectional = 0;
+        int bias = 1;
+        int activation = graph::tanhActivationIndex;
+        if (!readProperty(node, "hidden_size", hidden) || hidden < 1)
+          return failure(LiveGraphErrorCode::invalidProperty, node.id,
+                         "Recurrent hidden size is invalid");
+        readProperty(node, "bidirectional", bidirectional);
+        readProperty(node, "bias", bias);
+        readProperty(node, "activation", activation);
+        if (element.inputChannels < 1)
+          return failure(LiveGraphErrorCode::invalidGraph, node.id,
+                         "Recurrent input size could not be inferred");
+        if (activation < 0 ||
+            activation > openyourbox::dsp::maximumActivationIndex)
+          return failure(LiveGraphErrorCode::invalidProperty, node.id,
+                         "Recurrent activation selection is invalid");
+        element.hiddenSize = hidden;
+        element.bidirectional = bidirectional != 0;
+        element.useBias = bias != 0;
+        element.lstmCell = node.type == NodeType::lstm;
+        element.activation = static_cast<ActivationType>(activation);
+        float gain = graph::gainDefault;
+        readFloatProperty(node, "gain", gain);
+        element.gain = graph::clampGain(gain);
+        float negativeSlope = graph::leakyReluNegativeSlopeDefault;
+        readFloatProperty(node, "negative_slope", negativeSlope);
+        element.negativeSlope = std::clamp(
+            negativeSlope, graph::leakyReluNegativeSlopeMinimum,
+            graph::leakyReluNegativeSlopeMaximum);
+        float leakRate = graph::leakRateDefault;
+        readFloatProperty(node, "leak_rate", leakRate);
+        element.leakRate =
+            std::clamp(leakRate, graph::leakRateMinimum, graph::leakRateMaximum);
+        float recurrentWeightScale = graph::recurrentWeightScaleDefault;
+        readFloatProperty(node, "recurrent_weight_scale", recurrentWeightScale);
+        element.recurrentWeightScale = std::clamp(
+            recurrentWeightScale, graph::recurrentWeightScaleMinimum,
+            graph::recurrentWeightScaleMaximum);
+        element.outputChannels = RecurrentLayers::outputChannels(
+            RecurrentConfig{element.inputChannels, element.hiddenSize,
+                            element.bidirectional, element.useBias,
+                            element.activation, element.gain,
+                            element.negativeSlope, element.lstmCell});
+        element.randomizable = true;
+        const auto gate = element.lstmCell ? element.hiddenSize * 4
+                                           : element.hiddenSize;
+        const auto directions = element.bidirectional ? 2 : 1;
+        element.parameterCount = static_cast<std::uint64_t>(
+            directions *
+            (gate * element.inputChannels + gate * element.hiddenSize +
+             (element.useBias ? 2 * gate : 0)));
+        randomizeElementWeights(element, node.seed);
+        break;
+      }
       case NodeType::groupInput:
       case NodeType::groupOutput:
         return failure(
@@ -2605,6 +2891,9 @@ LiveGraphEngine::prepare(std::shared_ptr<const LiveGraphSnapshot> snapshot,
     runtime->latentOutputs.resize(compiled.elements.size());
     runtime->histories.resize(compiled.elements.size());
     runtime->conditioningHistories.resize(compiled.elements.size());
+    runtime->recurrentHidden.resize(compiled.elements.size());
+    runtime->recurrentCell.resize(compiled.elements.size());
+    runtime->delayWriteHeads.assign(compiled.elements.size(), 0);
     runtime->blackBoxKernels.resize(compiled.elements.size());
     runtime->inferenceMilliseconds =
         std::make_unique<std::atomic<double>[]>(compiled.elements.size());
@@ -2649,12 +2938,27 @@ LiveGraphEngine::prepare(std::shared_ptr<const LiveGraphSnapshot> snapshot,
            element.type == graph::NodeType::rateConv ||
            element.type == graph::NodeType::pqmfAnalysis ||
            element.type == graph::NodeType::pqmfSynthesis ||
-           element.type == graph::NodeType::variationalBottleneck) &&
+           element.type == graph::NodeType::variationalBottleneck ||
+           graph::isDdspEffectType(element.type)) &&
           element.receptiveField > 1) {
+        const auto historySamples =
+            element.type == graph::NodeType::modDelay
+                ? static_cast<std::int64_t>(element.receptiveField)
+                : static_cast<std::int64_t>(element.receptiveField - 1);
         runtime->histories[index] = torch::zeros(
-            {1, element.inputChannels,
-             static_cast<std::int64_t>(element.receptiveField - 1)},
+            {1, std::max(1, element.inputChannels), historySamples},
             torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCPU));
+      }
+      if (graph::isRecurrentType(element.type)) {
+        const auto stateWidth =
+            element.bidirectional ? element.hiddenSize * 2 : element.hiddenSize;
+        runtime->recurrentHidden[index] = torch::zeros(
+            {1, std::max(1, stateWidth)},
+            torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCPU));
+        if (element.lstmCell)
+          runtime->recurrentCell[index] = torch::zeros(
+              {1, std::max(1, stateWidth)},
+              torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCPU));
       }
       if (element.type == graph::NodeType::blackBox) {
         runtime->blackBoxKernels[index] =
@@ -2682,7 +2986,8 @@ collectRuntimeControlState(const graph::NodeGraph &graphDocument) {
   RuntimeControlState controls;
   for (const auto &node : graphDocument.getNodes()) {
     if (node.type == graph::NodeType::activation ||
-        node.type == graph::NodeType::tcn) {
+        node.type == graph::NodeType::tcn ||
+        graph::isRecurrentType(node.type)) {
       float gain = graph::gainDefault;
       for (const auto &property : node.properties) {
         if (property.key == "gain") {

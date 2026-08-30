@@ -860,6 +860,278 @@ def _topological_elements(fragment: dict[str, Any]) -> list[dict[str, Any]]:
     return ordered
 
 
+
+def _exp_sigmoid(value: torch.Tensor) -> torch.Tensor:
+    """Magenta ``core.exp_sigmoid`` used by DDSP effects."""
+    return 2.0 * torch.sigmoid(value).pow(math.log(10.0)) + 1.0e-7
+
+
+def _mask_dry_ir(ir: torch.Tensor) -> torch.Tensor:
+    """Zero the first IR sample so dry energy is not double-counted."""
+    masked = ir.reshape(-1).clone()
+    if masked.numel() > 0:
+        masked[0] = 0.0
+    return masked
+
+
+class ExpDecayReverb(nn.Module):
+    """Exponential-decay noise IR followed by causal FIR convolution."""
+
+    def __init__(self, gain, decay, reverb_length, add_dry, seed=42):
+        super().__init__()
+        self.reverb_length = max(1, int(reverb_length))
+        self.add_dry = bool(add_dry)
+        generator = torch.Generator().manual_seed(int(seed) & 0xFFFFFFFF)
+        time = torch.linspace(0.0, 1.0, self.reverb_length)
+        noise = torch.rand(self.reverb_length, generator=generator) * 2.0 - 1.0
+        scaled = float(_exp_sigmoid(torch.tensor(float(gain))))
+        decay_exponent = 2.0 + math.exp(float(decay))
+        ir = scaled * torch.exp(-decay_exponent * time) * noise
+        self.register_buffer("ir", ir)
+
+    def forward(self, audio):
+        """Convolve each channel with the baked impulse response."""
+        ir = _mask_dry_ir(self.ir)
+        channels = audio.shape[1]
+        weight = ir.flip(0).view(1, 1, -1).repeat(channels, 1, 1)
+        padded = functional.pad(audio, (ir.numel() - 1, 0))
+        wet = functional.conv1d(padded, weight, groups=channels)
+        return wet + audio if self.add_dry else wet
+
+
+class MagnitudeFir(nn.Module):
+    """Trainable magnitude-grid FIR or filtered-noise reverb."""
+
+    def __init__(self, n_frames, n_filter_banks, window_size, reverb_length, add_dry, filtered_noise, seed=42):
+        super().__init__()
+        self.n_frames = max(1, int(n_frames))
+        self.n_filter_banks = max(1, int(n_filter_banks))
+        self.window_size = max(1, int(window_size) | 1)
+        self.reverb_length = max(1, int(reverb_length))
+        self.add_dry = bool(add_dry)
+        self.filtered_noise = bool(filtered_noise)
+        generator = torch.Generator().manual_seed(int(seed) & 0xFFFFFFFF)
+        self.magnitudes = nn.Parameter(
+            torch.randn(self.n_frames, self.n_filter_banks, generator=generator) * 0.01
+        )
+
+    def _impulse(self):
+        grid = _exp_sigmoid(self.magnitudes)
+        n_bins = self.window_size // 2 + 1
+        spec = torch.zeros(self.n_frames, n_bins, device=grid.device, dtype=grid.dtype)
+        copy = min(self.n_filter_banks, n_bins)
+        spec[:, :copy] = grid[:, :copy]
+        ir_frames = torch.fft.irfft(spec.to(torch.complex64), n=self.window_size, dim=-1)
+        window = torch.hann_window(self.window_size, periodic=False, device=grid.device)
+        ir_frames = ir_frames * window
+        if self.filtered_noise:
+            mean = ir_frames.abs().mean(-1)
+            length = self.reverb_length
+            envelope = torch.zeros(length, device=grid.device, dtype=grid.dtype)
+            hop = max(1, length // self.n_frames)
+            for frame in range(self.n_frames):
+                start = min(length - 1, frame * hop)
+                end = length if frame + 1 == self.n_frames else min(length, (frame + 1) * hop)
+                envelope[start:end] = mean[frame]
+            noise = torch.rand(length, device=grid.device) * 2 - 1
+            return noise * envelope
+        ir = ir_frames.mean(0)
+        return torch.roll(ir, self.window_size // 2, 0)
+
+    def forward(self, audio):
+        """Apply the magnitude-derived FIR to every channel."""
+        ir = self._impulse()
+        if self.filtered_noise:
+            ir = _mask_dry_ir(ir)
+        channels = audio.shape[1]
+        weight = ir.flip(0).view(1, 1, -1).repeat(channels, 1, 1)
+        padded = functional.pad(audio, (ir.numel() - 1, 0))
+        wet = functional.conv1d(padded, weight, groups=channels)
+        if self.filtered_noise and self.add_dry:
+            return wet + audio
+        return wet
+
+
+class ConvolutionalReverb(nn.Module):
+    """Trainable internal IR with optional external IR blend."""
+
+    def __init__(self, reverb_length, add_dry, ir_blend, seed=42):
+        super().__init__()
+        self.reverb_length = max(1, int(reverb_length))
+        self.add_dry = bool(add_dry)
+        self.ir_blend = float(ir_blend)
+        generator = torch.Generator().manual_seed(int(seed) & 0xFFFFFFFF)
+        self.ir = nn.Parameter(torch.randn(self.reverb_length, generator=generator) * 1.0e-6)
+
+    def forward(self, audio, external_ir=None):
+        """Convolve audio with the blended impulse response."""
+        ir = self.ir
+        if external_ir is not None and external_ir.numel() > 0:
+            flat = external_ir.reshape(-1)[: self.reverb_length]
+            if flat.numel() < self.reverb_length:
+                flat = functional.pad(flat, (0, self.reverb_length - flat.numel()))
+            ir = (1.0 - self.ir_blend) * ir + self.ir_blend * flat
+        ir = _mask_dry_ir(ir)
+        channels = audio.shape[1]
+        weight = ir.flip(0).view(1, 1, -1).repeat(channels, 1, 1)
+        padded = functional.pad(audio, (ir.numel() - 1, 0))
+        wet = functional.conv1d(padded, weight, groups=channels)
+        return wet + audio if self.add_dry else wet
+
+
+class ModDelay(nn.Module):
+    """Constant-phase Magenta modulated delay (scalar controls)."""
+
+    def __init__(self, center_ms, depth_ms, gain, phase, add_dry, sample_rate=48000.0):
+        super().__init__()
+        self.center_ms = float(center_ms)
+        self.depth_ms = float(depth_ms)
+        self.gain = float(gain)
+        self.phase = float(phase)
+        self.add_dry = bool(add_dry)
+        self.sample_rate = float(sample_rate)
+
+    def forward(self, audio):
+        """Apply a static delay at the Magenta-mapped phase position."""
+        max_delay_ms = max(0.0, self.center_ms) + max(0.0, self.depth_ms)
+        max_samples = max(1, int(self.sample_rate / 1000.0 * max_delay_ms))
+        depth_phase = 0.0 if max_delay_ms <= 0 else self.depth_ms / max_delay_ms
+        center_phase = 0.0 if max_delay_ms <= 0 else self.center_ms / max_delay_ms
+        mapped = max(0.0, min(1.0, self.phase)) * depth_phase + center_phase
+        delay = int(round(mapped * max_samples))
+        wet_gain = float(_exp_sigmoid(torch.tensor(self.gain)))
+        wet = functional.pad(audio, (delay, 0))[..., : audio.shape[-1]] * wet_gain
+        return wet + audio if self.add_dry else wet
+
+
+def _cell_activation(value, index, gain, negative_slope):
+    """In-cell nonlinearity matching Activation/TCN choices."""
+    if abs(gain - 1.0) > 1.0e-6:
+        value = value * gain
+    if index == 0:
+        return functional.relu(value)
+    if index == 1:
+        return torch.where(value == 0, torch.zeros_like(value), torch.sigmoid(value))
+    if index == 3:
+        return functional.leaky_relu(value, negative_slope)
+    if index == 4:
+        return functional.prelu(value, torch.tensor(0.25, device=value.device, dtype=value.dtype))
+    return torch.tanh(value)
+
+
+class RecurrentLayer(nn.Module):
+    """Single-layer custom RNN or LSTM with in-cell activation and gain.
+
+    ``leak_rate`` mixes the previous hidden state after each step
+    (``1`` is a standard cell). ``recurrent_weight_scale`` multiplies
+    hidden-to-hidden weights only.
+    """
+
+    def __init__(self, input_size, hidden_size, bidirectional, bias, activation, gain,
+                 negative_slope, lstm, leak_rate=1.0, recurrent_weight_scale=1.0):
+        super().__init__()
+        self.input_size = max(1, int(input_size))
+        self.hidden_size = max(1, int(hidden_size))
+        self.bidirectional = bool(bidirectional)
+        self.use_bias = bool(bias)
+        self.activation = int(activation)
+        self.gain = float(gain)
+        self.negative_slope = float(negative_slope)
+        self.lstm = bool(lstm)
+        self.leak_rate = float(leak_rate)
+        self.recurrent_weight_scale = float(recurrent_weight_scale)
+        gate = self.hidden_size * 4 if self.lstm else self.hidden_size
+        directions = 2 if self.bidirectional else 1
+        for direction in range(directions):
+            suffix = "" if direction == 0 else "_reverse"
+            setattr(self, f"weight_ih{suffix}", nn.Parameter(torch.empty(gate, self.input_size)))
+            setattr(self, f"weight_hh{suffix}", nn.Parameter(torch.empty(gate, self.hidden_size)))
+            if self.use_bias:
+                setattr(self, f"bias_ih{suffix}", nn.Parameter(torch.zeros(gate)))
+                setattr(self, f"bias_hh{suffix}", nn.Parameter(torch.zeros(gate)))
+            nn.init.xavier_uniform_(getattr(self, f"weight_ih{suffix}"))
+            nn.init.xavier_uniform_(getattr(self, f"weight_hh{suffix}"))
+
+    def _step(self, sample, hidden, cell, weight_ih, weight_hh, bias_ih, bias_hh):
+        prev_hidden = hidden
+        recurrent_weight = weight_hh * self.recurrent_weight_scale
+        gate = functional.linear(sample, weight_ih, bias_ih) + functional.linear(
+            hidden, recurrent_weight, bias_hh)
+        if self.lstm:
+            chunks = gate.chunk(4, dim=-1)
+            input_gate = torch.sigmoid(chunks[0])
+            forget = torch.sigmoid(chunks[1])
+            candidate = _cell_activation(chunks[2], self.activation, self.gain, self.negative_slope)
+            output_gate = torch.sigmoid(chunks[3])
+            cell = forget * cell + input_gate * candidate
+            hidden = output_gate * _cell_activation(cell, self.activation, self.gain, self.negative_slope)
+        else:
+            hidden = _cell_activation(gate, self.activation, self.gain, self.negative_slope)
+        leak = min(1.0, max(0.0, self.leak_rate))
+        if abs(leak - 1.0) > 1.0e-6:
+            hidden = prev_hidden * (1.0 - leak) + hidden * leak
+        return hidden, cell
+
+    def _run_direction(self, audio, reverse, weight_ih, weight_hh, bias_ih, bias_hh):
+        batch, _, time = audio.shape
+        hidden = torch.zeros(batch, self.hidden_size, device=audio.device, dtype=audio.dtype)
+        cell = torch.zeros(batch, self.hidden_size, device=audio.device, dtype=audio.dtype)
+        outputs = []
+        indices = range(time - 1, -1, -1) if reverse else range(time)
+        for index in indices:
+            hidden, cell = self._step(audio[:, :, index], hidden, cell, weight_ih, weight_hh, bias_ih, bias_hh)
+            outputs.append(hidden)
+        if reverse:
+            outputs.reverse()
+        return torch.stack(outputs, dim=2)
+
+    def forward(self, audio):
+        """Process a full sequence and emit hidden states at every time step."""
+        bias_ih = getattr(self, "bias_ih", None) if self.use_bias else None
+        bias_hh = getattr(self, "bias_hh", None) if self.use_bias else None
+        forward = self._run_direction(audio, False, self.weight_ih, self.weight_hh, bias_ih, bias_hh)
+        if not self.bidirectional:
+            return forward
+        reverse = self._run_direction(
+            audio, True, self.weight_ih_reverse, self.weight_hh_reverse,
+            getattr(self, "bias_ih_reverse", None) if self.use_bias else None,
+            getattr(self, "bias_hh_reverse", None) if self.use_bias else None,
+        )
+        return torch.cat([forward, reverse], dim=1)
+
+
+def make_ddsp_or_recurrent(element_type, properties, input_channels, seed=42):
+    """Build a DDSP effect or recurrent layer, or return None for other types."""
+    if element_type == "exp_decay_reverb":
+        return ExpDecayReverb(float(properties.get("gain", 2.0)), float(properties.get("decay", 4.0)),
+                              int(properties.get("reverb_length", 4096)), bool(int(properties.get("add_dry", 1))), seed), input_channels
+    if element_type == "filtered_noise_reverb":
+        return MagnitudeFir(int(properties.get("n_frames", 8)), int(properties.get("n_filter_banks", 16)),
+                            int(properties.get("window_size", 257)), int(properties.get("reverb_length", 4096)),
+                            bool(int(properties.get("add_dry", 1))), True, seed), input_channels
+    if element_type == "fir_filter":
+        return MagnitudeFir(int(properties.get("n_frames", 8)), int(properties.get("n_filter_banks", 16)),
+                            int(properties.get("window_size", 257)), int(properties.get("window_size", 257)),
+                            False, False, seed), input_channels
+    if element_type == "reverb":
+        return ConvolutionalReverb(int(properties.get("reverb_length", 4096)), bool(int(properties.get("add_dry", 1))),
+                                   float(properties.get("ir_blend", 0.0)), seed), input_channels
+    if element_type == "mod_delay":
+        return ModDelay(float(properties.get("center_ms", 15.0)), float(properties.get("depth_ms", 10.0)),
+                        float(properties.get("gain", 2.0)), float(properties.get("phase", 0.5)),
+                        bool(int(properties.get("add_dry", 1)))), input_channels
+    if element_type in {"lstm", "rnn"}:
+        hidden = max(1, int(properties.get("hidden_size", 16)))
+        bidirectional = bool(int(properties.get("bidirectional", 0)))
+        layer = RecurrentLayer(input_channels, hidden, bidirectional, bool(int(properties.get("bias", 1))),
+                               int(properties.get("activation", 2)), float(properties.get("gain", 1.0)),
+                               float(properties.get("negative_slope", 0.01)), element_type == "lstm",
+                               float(properties.get("leak_rate", 1.0)),
+                               float(properties.get("recurrent_weight_scale", 1.0)))
+        return layer, hidden * (2 if bidirectional else 1)
+    return None
+
+
 def build_module(
     fragment: dict[str, Any], input_channels: int = 1, cond_dim: int = 2
 ) -> nn.Module:
@@ -934,6 +1206,13 @@ def build_module(
             )
         elif element_type in {"utility", "merge", "sum", "multiply"}:
             raise ValueError("mixer elements cannot be trained by this worker")
+        else:
+            built = make_ddsp_or_recurrent(element_type, properties, channels,
+                                           int(element.get("seed", 42)))
+            if built is None:
+                continue
+            module, channels = built
+            modules.append(module)
 
     return ConditionedSequential(modules, cond_dim) if modules else nn.Identity()
 
@@ -1521,7 +1800,15 @@ def build_rave_graph_module(
             else:
                 channels_by_id[node_id] = max(1, max(widths))
         else:
-            channels_by_id[node_id] = in_ch
+            built = make_ddsp_or_recurrent(
+                element_type, properties, in_ch, int(element.get("seed", 42))
+            )
+            if built is None:
+                channels_by_id[node_id] = in_ch
+            else:
+                layer, out_ch = built
+                layers[node_id] = layer
+                channels_by_id[node_id] = out_ch
     return RaveGraphModule(
         layers,
         [int(element["id"]) for element in elements],
