@@ -164,6 +164,11 @@ private:
   /** @brief Opens a native chooser to load compatible weights. */
   void handleBrowseWeights(std::int32_t nodeId);
   /**
+   * @brief Opens a native chooser to load an external TorchScript checkpoint.
+   * @param nodeId TorchScript Load node identifier.
+   */
+  void handleBrowseExternalCheckpoint(std::int32_t nodeId);
+  /**
    * @brief Displays transient non-error graph feedback.
    * @param message Human-readable status or validation text.
    */

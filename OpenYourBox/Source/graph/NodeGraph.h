@@ -37,6 +37,91 @@ public:
                        std::optional<std::int32_t> parentGroupId = std::nullopt);
 
   /**
+   * @brief Places a Gold TorchScript Load node with audio in/out only.
+   * @param position Canvas position in the destination group or root.
+   * @param parentGroupId Group that owns the new node, or empty for the root.
+   * @return Stable identifier of the new node.
+   */
+  std::int32_t addExternalTorchScriptLoadNode(
+      juce::Point<float> position,
+      std::optional<std::int32_t> parentGroupId = std::nullopt);
+
+  /**
+   * @brief Marks an external-load node as loading a newly chosen path.
+   * @param nodeId Target TorchScript Load node.
+   * @param path Absolute checkpoint path being prepared.
+   * @return True when the node is an external-load BlackBox.
+   *
+   * Retains `runtimeArtifactPath` so a prior model keeps running.
+   */
+  bool beginExternalCheckpointLoad(std::int32_t nodeId, const std::string &path);
+
+  /**
+   * @brief Applies a successful prepare to an external-load node.
+   * @param nodeId Target TorchScript Load node.
+   * @param path Canonical artifact path published in the registry.
+   * @param inferredIn Probe input channels.
+   * @param inferredOut Probe output channels.
+   * @param inferredLatent Encode width, or 0.
+   * @param hasEncodeDecode True when latent pins should appear.
+   * @param acceptsConditioning True when a Control pin should appear.
+   * @param compactnessReady True when fidelity PCA buffers are present.
+   * @param latentMean Compactness mean copied from the artifact.
+   * @param latentPca Compactness PCA copied from the artifact.
+   * @param cumulativeVariance Compactness cumulative ratios.
+   * @param rateWarning Best-effort sample-rate notice, or empty.
+   * @return True when the node was updated.
+   */
+  bool applyExternalCheckpointReady(
+      std::int32_t nodeId, const std::string &path, int inferredIn,
+      int inferredOut, int inferredLatent, bool hasEncodeDecode,
+      bool acceptsConditioning, bool compactnessReady,
+      std::vector<float> latentMean, std::vector<float> latentPca,
+      std::vector<float> cumulativeVariance, const std::string &rateWarning);
+
+  /**
+   * @brief Records a recoverable load failure on an external-load node.
+   * @param nodeId Target TorchScript Load node.
+   * @param message User-facing error text.
+   * @return True when the node was updated.
+   *
+   * Leaves a retained `runtimeArtifactPath` untouched so the prior factory
+   * keeps running until clear or a later success.
+   */
+  bool applyExternalCheckpointError(std::int32_t nodeId,
+                                    const std::string &message);
+
+  /**
+   * @brief Clears path, optional pins, and status back to empty passthrough.
+   * @param nodeId Target TorchScript Load node.
+   * @return True when the node was an external-load BlackBox.
+   */
+  bool clearExternalCheckpoint(std::int32_t nodeId);
+
+  /**
+   * @brief Sets one channel override used for shape checking.
+   * @param nodeId Target TorchScript Load node.
+   * @param which One of `input`, `output`, or `latent`.
+   * @param value Positive channel count, or −1 to clear that override.
+   * @return True when applied; false when the value would make a cable illegal.
+   */
+  bool setExternalChannelOverride(std::int32_t nodeId, const char *which,
+                                  int value);
+
+  /**
+   * @brief Restores effective channels to the last inferred values.
+   * @param nodeId Target TorchScript Load node.
+   * @return True when overrides were cleared.
+   */
+  bool resetExternalChannelOverrides(std::int32_t nodeId);
+
+  /**
+   * @brief Returns whether Unfreeze into modular Blue is available.
+   * @param nodeId Frozen Gold node.
+   */
+  [[nodiscard]] bool canUnfreeze(std::int32_t nodeId) const noexcept;
+
+  /**
    * @brief Ensures the graph has exactly one undeletable host input and output.
    *
    * Channel mode is Mono, Mirrored, or Stereo from each node's Mode property
@@ -803,6 +888,24 @@ public:
 private:
   /** @brief Creates a fully initialized node without inserting it. */
   GraphNode makeNode(NodeType type, juce::Point<float> position);
+  /**
+   * @brief Creates an empty Gold TorchScript Load node without inserting it.
+   * @param position Initial canvas position.
+   */
+  GraphNode makeExternalTorchScriptLoadNode(juce::Point<float> position);
+  /**
+   * @brief Morphs optional latent/Control pins and applies effective channels.
+   * @param node External-load node to update.
+   */
+  void applyExternalLoadSurface(GraphNode &node);
+  /**
+   * @brief Inserts a constructed node and attaches it to an optional parent.
+   * @param node Node with a unique id already assigned.
+   * @param parentGroupId Destination group, or empty for the root canvas.
+   * @return The node's identifier.
+   */
+  std::int32_t insertConstructedNode(GraphNode node,
+                                     std::optional<std::int32_t> parentGroupId);
   /**
    * @brief Rebuilds Utility or Math Expression input ports to match Inputs.
    * @param node Node to update.

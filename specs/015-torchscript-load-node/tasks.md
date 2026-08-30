@@ -33,13 +33,13 @@ description: "Task list for TorchScript Checkpoint Loader Node"
 
 **Purpose**: Confirm design artifacts and inventory BlackBox / registry / palette touch-points before code changes.
 
-- [ ] T001 Verify design artifact cross-links (spec clarifications → contracts → plan → data-model) in `specs/015-torchscript-load-node/plan.md`
-- [ ] T002 [P] Inventory `BlackBoxOrigin`, `NodeType::blackBox`, fidelity / compactness fields on `GraphNode` in `OpenYourBox/Source/graph/GraphTypes.h`
-- [ ] T003 [P] Inventory `makeNode(blackBox)`, `absorbArmedChain`, `setWeightsPath`, `copyCompactnessFromArtifact`, Unfreeze gates in `OpenYourBox/Source/graph/NodeGraph.cpp`
-- [ ] T004 [P] Inventory Factory palette categories and BlackBox / weights / fidelity property rows in `OpenYourBox/Source/graph/NodeRenderer.cpp`
-- [ ] T005 [P] Inventory `TorchScriptBlackBoxFactory::load`, encode/decode / conditioning probe in `OpenYourBox/Source/dsp/TorchScriptBlackBox.cpp`
-- [ ] T006 [P] Inventory `prepareFrozenArtifact` / `prepareTrainedArtifact` / `resolveFrozenBlackBox` / `publishedFrozenArtifacts` in `OpenYourBox/Source/PluginProcessor.cpp`
-- [ ] T007 [P] Inventory `handleBrowseWeights` and restore/`applyPatchSnapshot` path checks in `OpenYourBox/Source/PluginEditor.cpp` and `OpenYourBox/Source/graph/NodeGraph.cpp`
+- [x] T001 Verify design artifact cross-links (spec clarifications → contracts → plan → data-model) in `specs/015-torchscript-load-node/plan.md`
+- [x] T002 [P] Inventory `BlackBoxOrigin`, `NodeType::blackBox`, fidelity / compactness fields on `GraphNode` in `OpenYourBox/Source/graph/GraphTypes.h`
+- [x] T003 [P] Inventory `makeNode(blackBox)`, `absorbArmedChain`, `setWeightsPath`, `copyCompactnessFromArtifact`, Unfreeze gates in `OpenYourBox/Source/graph/NodeGraph.cpp`
+- [x] T004 [P] Inventory Factory palette categories and BlackBox / weights / fidelity property rows in `OpenYourBox/Source/graph/NodeRenderer.cpp`
+- [x] T005 [P] Inventory `TorchScriptBlackBoxFactory::load`, encode/decode / conditioning probe in `OpenYourBox/Source/dsp/TorchScriptBlackBox.cpp`
+- [x] T006 [P] Inventory `prepareFrozenArtifact` / `prepareTrainedArtifact` / `resolveFrozenBlackBox` / `publishedFrozenArtifacts` in `OpenYourBox/Source/PluginProcessor.cpp`
+- [x] T007 [P] Inventory `handleBrowseWeights` and restore/`applyPatchSnapshot` path checks in `OpenYourBox/Source/PluginEditor.cpp` and `OpenYourBox/Source/graph/NodeGraph.cpp`
 
 ---
 
@@ -49,13 +49,13 @@ description: "Task list for TorchScript Checkpoint Loader Node"
 
 **⚠️ CRITICAL**: No user story work can begin until this phase is complete.
 
-- [ ] T008 Add `BlackBoxOrigin::externalLoad` (+ persist string `external_load`) and document load-status / channel-override fields on `GraphNode` in `OpenYourBox/Source/graph/GraphTypes.h`
-- [ ] T009 Serialize/deserialize `blackBoxOrigin == external_load` and stub override/inferred channel properties in `OpenYourBox/Source/graph/NodeGraph.cpp` (`nodeToTree` / `nodeFromTree`)
-- [ ] T010 Add Factory palette entry **TorchScript Load** per `specs/015-torchscript-load-node/contracts/factory-palette-torchscript-load-contract.md` that creates `NodeType::blackBox` with `externalLoad`, empty path, audio in/out only in `OpenYourBox/Source/graph/NodeRenderer.cpp` and `OpenYourBox/Source/graph/NodeGraph.cpp`
-- [ ] T011 Implement `makeExternalTorchScriptLoadNode` (or `makeNode` branch) defaults: Gold presentation, no Control/latent pins, empty status, choose-file prompt properties in `OpenYourBox/Source/graph/NodeGraph.cpp`
-- [ ] T012 Add `prepareExternalArtifact` API (off-audio-thread `TorchScriptBlackBoxFactory::load`, silence-preservation off, publish to `publishedFrozenArtifacts`) in `OpenYourBox/Source/PluginProcessor.h` and `OpenYourBox/Source/PluginProcessor.cpp`
-- [ ] T013 Wire LiveGraphEngine empty `externalLoad` path: dry passthrough when status empty/never loaded; silence when error with no prior factory; keep prior factory during loading in `OpenYourBox/Source/dsp/LiveGraphEngine.cpp`
-- [ ] T014 Disable Unfreeze for `BlackBoxOrigin::externalLoad` with user-visible explanation in `OpenYourBox/Source/graph/NodeGraph.cpp` and/or `OpenYourBox/Source/graph/NodeRenderer.cpp`
+- [x] T008 Add `BlackBoxOrigin::externalLoad` (+ persist string `external_load`) and document load-status / channel-override fields on `GraphNode` in `OpenYourBox/Source/graph/GraphTypes.h`
+- [x] T009 Serialize/deserialize `blackBoxOrigin == external_load` and stub override/inferred channel properties in `OpenYourBox/Source/graph/NodeGraph.cpp` (`nodeToTree` / `nodeFromTree`)
+- [x] T010 Add Factory palette entry **TorchScript Load** per `specs/015-torchscript-load-node/contracts/factory-palette-torchscript-load-contract.md` that creates `NodeType::blackBox` with `externalLoad`, empty path, audio in/out only in `OpenYourBox/Source/graph/NodeRenderer.cpp` and `OpenYourBox/Source/graph/NodeGraph.cpp`
+- [x] T011 Implement `makeExternalTorchScriptLoadNode` (or `makeNode` branch) defaults: Gold presentation, no Control/latent pins, empty status, choose-file prompt properties in `OpenYourBox/Source/graph/NodeGraph.cpp`
+- [x] T012 Add `prepareExternalArtifact` API (off-audio-thread `TorchScriptBlackBoxFactory::load`, silence-preservation off, publish to `publishedFrozenArtifacts`) in `OpenYourBox/Source/PluginProcessor.h` and `OpenYourBox/Source/PluginProcessor.cpp`
+- [x] T013 Wire LiveGraphEngine empty `externalLoad` path: dry passthrough when status empty/never loaded; silence when error with no prior factory; keep prior factory during loading in `OpenYourBox/Source/dsp/LiveGraphEngine.cpp`
+- [x] T014 Disable Unfreeze for `BlackBoxOrigin::externalLoad` with user-visible explanation in `OpenYourBox/Source/graph/NodeGraph.cpp` and/or `OpenYourBox/Source/graph/NodeRenderer.cpp`
 
 **Checkpoint**: Foundation ready — palette places an empty TorchScript Load Gold node; prepare API exists; live engine dry-passthroughs empty nodes; Unfreeze blocked for external origin.
 
@@ -69,13 +69,13 @@ description: "Task list for TorchScript Checkpoint Loader Node"
 
 ### Implementation for User Story 1
 
-- [ ] T015 [US1] Property panel: path display, Browse, Clear, and load-status/error text for `externalLoad` nodes in `OpenYourBox/Source/graph/NodeRenderer.cpp`
-- [ ] T016 [US1] Wire Browse to `FileChooser` (`*.pt;*.pth`) → `prepareExternalArtifact` (not WeightLoader-only) from `OpenYourBox/Source/PluginEditor.cpp` / `OpenYourBox/Source/graph/NodeRenderer.cpp`
-- [ ] T017 [US1] On prepare success: set `artifactPath`/`weightsPath`, status `ready`, copy compactness if present, rebuild runtime atomically in `OpenYourBox/Source/PluginProcessor.cpp` and `OpenYourBox/Source/graph/NodeGraph.cpp`
-- [ ] T018 [US1] On prepare success without encode/decode or conditioning: keep audio-only pins; run via existing BlackBox `forward` path in `OpenYourBox/Source/dsp/LiveGraphEngine.cpp`
-- [ ] T019 [US1] Support selecting a different valid checkpoint (retain prior model until new factory ready) per `specs/015-torchscript-load-node/contracts/external-checkpoint-load-contract.md` in `OpenYourBox/Source/PluginProcessor.cpp`
-- [ ] T020 [US1] Implement Clear → empty status, clear paths, dry passthrough, drop optional pins in `OpenYourBox/Source/graph/NodeGraph.cpp`
-- [ ] T021 [P] [US1] Add LiveGraphEngine coverage for empty passthrough and ready forward with a fixture factory in `Tests/LiveGraphEngineTests.cpp`
+- [x] T015 [US1] Property panel: path display, Browse, Clear, and load-status/error text for `externalLoad` nodes in `OpenYourBox/Source/graph/NodeRenderer.cpp`
+- [x] T016 [US1] Wire Browse to `FileChooser` (`*.pt;*.pth`) → `prepareExternalArtifact` (not WeightLoader-only) from `OpenYourBox/Source/PluginEditor.cpp` / `OpenYourBox/Source/graph/NodeRenderer.cpp`
+- [x] T017 [US1] On prepare success: set `artifactPath`/`weightsPath`, status `ready`, copy compactness if present, rebuild runtime atomically in `OpenYourBox/Source/PluginProcessor.cpp` and `OpenYourBox/Source/graph/NodeGraph.cpp`
+- [x] T018 [US1] On prepare success without encode/decode or conditioning: keep audio-only pins; run via existing BlackBox `forward` path in `OpenYourBox/Source/dsp/LiveGraphEngine.cpp`
+- [x] T019 [US1] Support selecting a different valid checkpoint (retain prior model until new factory ready) per `specs/015-torchscript-load-node/contracts/external-checkpoint-load-contract.md` in `OpenYourBox/Source/PluginProcessor.cpp`
+- [x] T020 [US1] Implement Clear → empty status, clear paths, dry passthrough, drop optional pins in `OpenYourBox/Source/graph/NodeGraph.cpp`
+- [x] T021 [P] [US1] Add LiveGraphEngine coverage for empty passthrough and ready forward with a fixture factory in `Tests/LiveGraphEngineTests.cpp`
 
 **Checkpoint**: US1 complete — place, browse, hear, swap, clear work for forward-only checkpoints.
 
@@ -89,13 +89,13 @@ description: "Task list for TorchScript Checkpoint Loader Node"
 
 ### Implementation for User Story 2
 
-- [ ] T022 [US2] Missing/unreadable/invalid checkpoint → recoverable error message; silence if no prior model; keep prior model if present in `OpenYourBox/Source/PluginProcessor.cpp` and `OpenYourBox/Source/graph/NodeRenderer.cpp`
-- [ ] T023 [US2] Reject directory selection and non-accepted extensions with clear messages in `OpenYourBox/Source/PluginEditor.cpp` / `OpenYourBox/Source/graph/NodeRenderer.cpp`
-- [ ] T024 [US2] Auto-infer input/output (and latent when applicable) channel counts on successful load; prefill editable override fields per `specs/015-torchscript-load-node/contracts/pin-surface-and-channels-contract.md` in `OpenYourBox/Source/PluginProcessor.cpp` and `OpenYourBox/Source/graph/NodeGraph.cpp`
-- [ ] T025 [US2] Property UI for inferred + override channel fields and Reset-to-inferred in `OpenYourBox/Source/graph/NodeRenderer.cpp`
-- [ ] T026 [US2] Shape Integrity: effective channels (`override ?? inferred`) refuse illegal cables; revalidate on override change in `OpenYourBox/Source/graph/NodeGraph.cpp`
-- [ ] T027 [US2] Incomplete-shape state when inference fails and overrides missing (connections not legal) in `OpenYourBox/Source/graph/NodeGraph.cpp`
-- [ ] T028 [P] [US2] Add tests for error silence, prior-model retain, and override shape refuse in `Tests/LiveGraphEngineTests.cpp` / graph tests as appropriate
+- [x] T022 [US2] Missing/unreadable/invalid checkpoint → recoverable error message; silence if no prior model; keep prior model if present in `OpenYourBox/Source/PluginProcessor.cpp` and `OpenYourBox/Source/graph/NodeRenderer.cpp`
+- [x] T023 [US2] Reject directory selection and non-accepted extensions with clear messages in `OpenYourBox/Source/PluginEditor.cpp` / `OpenYourBox/Source/graph/NodeRenderer.cpp`
+- [x] T024 [US2] Auto-infer input/output (and latent when applicable) channel counts on successful load; prefill editable override fields per `specs/015-torchscript-load-node/contracts/pin-surface-and-channels-contract.md` in `OpenYourBox/Source/PluginProcessor.cpp` and `OpenYourBox/Source/graph/NodeGraph.cpp`
+- [x] T025 [US2] Property UI for inferred + override channel fields and Reset-to-inferred in `OpenYourBox/Source/graph/NodeRenderer.cpp`
+- [x] T026 [US2] Shape Integrity: effective channels (`override ?? inferred`) refuse illegal cables; revalidate on override change in `OpenYourBox/Source/graph/NodeGraph.cpp`
+- [x] T027 [US2] Incomplete-shape state when inference fails and overrides missing (connections not legal) in `OpenYourBox/Source/graph/NodeGraph.cpp`
+- [x] T028 [P] [US2] Add tests for error silence, prior-model retain, and override shape refuse in `Tests/LiveGraphEngineTests.cpp` / graph tests as appropriate
 
 **Checkpoint**: US2 complete — failures are safe and shapes are gateable via inferred/override channels.
 
@@ -109,11 +109,11 @@ description: "Task list for TorchScript Checkpoint Loader Node"
 
 ### Implementation for User Story 3
 
-- [ ] T029 [US3] Persist `artifactPath`/`weightsPath`, `external_load` origin, override/inferred channel fields with graph and presets in `OpenYourBox/Source/graph/NodeGraph.cpp`
-- [ ] T030 [US3] On `applyPatchSnapshot` / session restore: re-call `prepareExternalArtifact` for each `externalLoad` with existing file per `specs/015-torchscript-load-node/contracts/persist-and-restore-contract.md` in `OpenYourBox/Source/PluginProcessor.cpp` and `OpenYourBox/Source/graph/NodeGraph.cpp`
-- [ ] T031 [US3] On restore with missing file: keep path string, status error, silence, no crash in `OpenYourBox/Source/PluginProcessor.cpp`
-- [ ] T032 [US3] Registry sharing: multiple nodes same path; clearing one must not break others (refcount or leave entry until unused) in `OpenYourBox/Source/PluginProcessor.cpp`
-- [ ] T033 [P] [US3] Add serialize/restore coverage for `external_load` path + overrides in graph/preset tests under `Tests/`
+- [x] T029 [US3] Persist `artifactPath`/`weightsPath`, `external_load` origin, override/inferred channel fields with graph and presets in `OpenYourBox/Source/graph/NodeGraph.cpp`
+- [x] T030 [US3] On `applyPatchSnapshot` / session restore: re-call `prepareExternalArtifact` for each `externalLoad` with existing file per `specs/015-torchscript-load-node/contracts/persist-and-restore-contract.md` in `OpenYourBox/Source/PluginProcessor.cpp` and `OpenYourBox/Source/graph/NodeGraph.cpp`
+- [x] T031 [US3] On restore with missing file: keep path string, status error, silence, no crash in `OpenYourBox/Source/PluginProcessor.cpp`
+- [x] T032 [US3] Registry sharing: multiple nodes same path; clearing one must not break others (refcount or leave entry until unused) in `OpenYourBox/Source/PluginProcessor.cpp`
+- [x] T033 [P] [US3] Add serialize/restore coverage for `external_load` path + overrides in graph/preset tests under `Tests/`
 
 **Checkpoint**: US3 complete — relaunch restores ready models or clear missing-file errors.
 
@@ -127,12 +127,12 @@ description: "Task list for TorchScript Checkpoint Loader Node"
 
 ### Implementation for User Story 4
 
-- [ ] T034 [US4] After load with `hasEncodeDecode`: morph latent in/out pins (trained RAVE labels/routing, decode-from-latent) in `OpenYourBox/Source/graph/NodeGraph.cpp` and `OpenYourBox/Source/dsp/LiveGraphEngine.cpp`
-- [ ] T035 [US4] After load with conditioning: add Control pin only then; unconnected = unconditioned forward in `OpenYourBox/Source/graph/NodeGraph.cpp` and `OpenYourBox/Source/dsp/LiveGraphEngine.cpp`
-- [ ] T036 [US4] Remove latent/Control pins when clearing or loading a file lacking those capabilities; revalidate cables in `OpenYourBox/Source/graph/NodeGraph.cpp`
-- [ ] T037 [US4] Fidelity control when encode/decode + `compactnessReady`; hide/disable with explanation otherwise; wire `copyCompactnessFromArtifact` for external loads in `OpenYourBox/Source/graph/NodeGraph.cpp` and `OpenYourBox/Source/graph/NodeRenderer.cpp`
-- [ ] T038 [US4] Confirm Gold chrome / non-randomizable / Unfreeze disabled for `externalLoad` in `OpenYourBox/Source/graph/NodeRenderer.cpp`
-- [ ] T039 [P] [US4] Add encode/decode + optional conditioning fixture coverage in `Tests/LiveGraphEngineTests.cpp`
+- [x] T034 [US4] After load with `hasEncodeDecode`: morph latent in/out pins (trained RAVE labels/routing, decode-from-latent) in `OpenYourBox/Source/graph/NodeGraph.cpp` and `OpenYourBox/Source/dsp/LiveGraphEngine.cpp`
+- [x] T035 [US4] After load with conditioning: add Control pin only then; unconnected = unconditioned forward in `OpenYourBox/Source/graph/NodeGraph.cpp` and `OpenYourBox/Source/dsp/LiveGraphEngine.cpp`
+- [x] T036 [US4] Remove latent/Control pins when clearing or loading a file lacking those capabilities; revalidate cables in `OpenYourBox/Source/graph/NodeGraph.cpp`
+- [x] T037 [US4] Fidelity control when encode/decode + `compactnessReady`; hide/disable with explanation otherwise; wire `copyCompactnessFromArtifact` for external loads in `OpenYourBox/Source/graph/NodeGraph.cpp` and `OpenYourBox/Source/graph/NodeRenderer.cpp`
+- [x] T038 [US4] Confirm Gold chrome / non-randomizable / Unfreeze disabled for `externalLoad` in `OpenYourBox/Source/graph/NodeRenderer.cpp`
+- [x] T039 [P] [US4] Add encode/decode + optional conditioning fixture coverage in `Tests/LiveGraphEngineTests.cpp`
 
 **Checkpoint**: US4 complete — pretrained RAVE-style surface parity with trained Gold boxes for capable checkpoints.
 
@@ -142,10 +142,10 @@ description: "Task list for TorchScript Checkpoint Loader Node"
 
 **Purpose**: End-to-end validation and cleanup across stories.
 
-- [ ] T040 [P] Run and record `specs/015-torchscript-load-node/quickstart.md` Scenarios A–F against a Debug/Release build
-- [ ] T041 [P] Mark TODO item for loading external RAVE checkpoints done or link to this spec in `TODO.md`
-- [ ] T042 Code cleanup: ensure no audio-thread `jit::load` / file I/O; document `prepareExternalArtifact` with doxygen in `OpenYourBox/Source/PluginProcessor.h`
-- [ ] T043 Verify sample-rate mismatch best-effort warning path (if detectable) does not hard-fail in `OpenYourBox/Source/graph/NodeRenderer.cpp` / `OpenYourBox/Source/PluginProcessor.cpp`
+- [x] T040 [P] Run and record `specs/015-torchscript-load-node/quickstart.md` Scenarios A–F against a Debug/Release build
+- [x] T041 [P] Mark TODO item for loading external RAVE checkpoints done or link to this spec in `TODO.md`
+- [x] T042 Code cleanup: ensure no audio-thread `jit::load` / file I/O; document `prepareExternalArtifact` with doxygen in `OpenYourBox/Source/PluginProcessor.h`
+- [x] T043 Verify sample-rate mismatch best-effort warning path (if detectable) does not hard-fail in `OpenYourBox/Source/graph/NodeRenderer.cpp` / `OpenYourBox/Source/PluginProcessor.cpp`
 
 ---
 

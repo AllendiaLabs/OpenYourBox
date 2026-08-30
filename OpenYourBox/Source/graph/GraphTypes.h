@@ -88,8 +88,83 @@ enum class BlackBoxOrigin {
   /** @brief Manual Freeze Selection. */
   manualFreeze,
   /** @brief Successful Train auto-load. */
-  trainAutoload
+  trainAutoload,
+  /** @brief Factory palette TorchScript Load of an external checkpoint. */
+  externalLoad
 };
+
+/** @brief User-visible load lifecycle for `BlackBoxOrigin::externalLoad`. */
+enum class ExternalLoadStatus {
+  /** @brief Empty path; never successfully loaded (dry passthrough). */
+  empty,
+  /** @brief Off-thread prepare in progress. */
+  loading,
+  /** @brief Factory published and ready to process. */
+  ready,
+  /** @brief Recoverable failure; silence unless a prior factory is retained. */
+  error
+};
+
+/**
+ * @brief Returns the persisted origin token for a Gold BlackBox.
+ * @param origin Graph origin enum.
+ */
+inline const char *blackBoxOriginName(BlackBoxOrigin origin) noexcept {
+  switch (origin) {
+  case BlackBoxOrigin::trainAutoload:
+    return "train_autoload";
+  case BlackBoxOrigin::externalLoad:
+    return "external_load";
+  case BlackBoxOrigin::manualFreeze:
+    break;
+  }
+  return "manual_freeze";
+}
+
+/**
+ * @brief Parses a persisted origin token.
+ * @param name ValueTree `blackBoxOrigin` string.
+ */
+inline BlackBoxOrigin blackBoxOriginFromName(const juce::String &name) noexcept {
+  if (name == "train_autoload")
+    return BlackBoxOrigin::trainAutoload;
+  if (name == "external_load")
+    return BlackBoxOrigin::externalLoad;
+  return BlackBoxOrigin::manualFreeze;
+}
+
+/**
+ * @brief Returns the persisted load-status token.
+ * @param status External-load lifecycle.
+ */
+inline const char *externalLoadStatusName(ExternalLoadStatus status) noexcept {
+  switch (status) {
+  case ExternalLoadStatus::loading:
+    return "loading";
+  case ExternalLoadStatus::ready:
+    return "ready";
+  case ExternalLoadStatus::error:
+    return "error";
+  case ExternalLoadStatus::empty:
+    break;
+  }
+  return "empty";
+}
+
+/**
+ * @brief Parses a persisted load-status token.
+ * @param name ValueTree `externalLoadStatus` string.
+ */
+inline ExternalLoadStatus
+externalLoadStatusFromName(const juce::String &name) noexcept {
+  if (name == "loading")
+    return ExternalLoadStatus::loading;
+  if (name == "ready")
+    return ExternalLoadStatus::ready;
+  if (name == "error")
+    return ExternalLoadStatus::error;
+  return ExternalLoadStatus::empty;
+}
 
 /** @brief Per-element analysis plot family requested by the editor. */
 enum class AnalysisView {
@@ -1622,6 +1697,45 @@ struct GraphNode {
   std::string weightsPath;
   /** @brief How a Gold BlackBox was produced. */
   BlackBoxOrigin blackBoxOrigin = BlackBoxOrigin::manualFreeze;
+  /**
+   * @brief Load lifecycle for `externalLoad` nodes.
+   *
+   * Empty → dry passthrough. Error with no retained factory → silence.
+   */
+  ExternalLoadStatus externalLoadStatus = ExternalLoadStatus::empty;
+  /** @brief Recoverable user-facing reason when `externalLoadStatus` is error. */
+  std::string externalLoadErrorMessage;
+  /**
+   * @brief Path of the factory currently retained for live audio.
+   *
+   * Session-only: kept during a failed or in-progress reload so the prior
+   * model keeps running until a successful swap or explicit clear.
+   */
+  std::string runtimeArtifactPath;
+  /** @brief Last successful probe input width, or 0 when unknown. */
+  int inferredInputChannels = 0;
+  /** @brief Last successful probe output width, or 0 when unknown. */
+  int inferredOutputChannels = 0;
+  /** @brief Last successful encode latent width, or 0 when unused. */
+  int inferredLatentChannels = 0;
+  /** @brief Shape-check override for input channels; −1 means use inferred. */
+  int overrideInputChannels = -1;
+  /** @brief Shape-check override for output channels; −1 means use inferred. */
+  int overrideOutputChannels = -1;
+  /** @brief Shape-check override for latent channels; −1 means use inferred. */
+  int overrideLatentChannels = -1;
+  /** @brief True when the loaded checkpoint exposes encode and decode. */
+  bool externalHasEncodeDecode = false;
+  /** @brief True when the loaded checkpoint advertises conditioning. */
+  bool externalAcceptsConditioning = false;
+  /**
+   * @brief True when inference failed and required overrides are missing.
+   *
+   * Connections are not treated as legal until valid overrides exist.
+   */
+  bool externalShapeIncomplete = false;
+  /** @brief Best-effort sample-rate mismatch notice; empty when unused. */
+  std::string sampleRateWarning;
   /** @brief Live fidelity percent applied inside bottleneck/Gold encode. */
   float fidelityPercent = defaultFidelityPercent;
   /** @brief True when compactness PCA buffers are present on the artifact. */
@@ -1642,6 +1756,42 @@ struct GraphNode {
    */
   std::vector<RepeatWeightSlot> repeatSlots;
 };
+
+/**
+ * @brief Returns true when @p node is a Factory TorchScript Load Gold box.
+ * @param node Graph node to inspect.
+ */
+inline bool isExternalLoadNode(const GraphNode &node) noexcept {
+  return node.type == NodeType::blackBox &&
+         node.blackBoxOrigin == BlackBoxOrigin::externalLoad;
+}
+
+/**
+ * @brief Returns the shape-check input width (`override ?? inferred`).
+ * @param node External-load node.
+ */
+inline int effectiveInputChannels(const GraphNode &node) noexcept {
+  return node.overrideInputChannels > 0 ? node.overrideInputChannels
+                                        : node.inferredInputChannels;
+}
+
+/**
+ * @brief Returns the shape-check output width (`override ?? inferred`).
+ * @param node External-load node.
+ */
+inline int effectiveOutputChannels(const GraphNode &node) noexcept {
+  return node.overrideOutputChannels > 0 ? node.overrideOutputChannels
+                                         : node.inferredOutputChannels;
+}
+
+/**
+ * @brief Returns the shape-check latent width (`override ?? inferred`).
+ * @param node External-load node.
+ */
+inline int effectiveLatentChannels(const GraphNode &node) noexcept {
+  return node.overrideLatentChannels > 0 ? node.overrideLatentChannels
+                                         : node.inferredLatentChannels;
+}
 
 /** @brief Directed connection between two graph pins. */
 struct GraphLink {

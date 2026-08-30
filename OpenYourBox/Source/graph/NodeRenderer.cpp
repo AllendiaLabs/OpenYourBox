@@ -25,6 +25,8 @@ namespace {
 struct PaletteItem {
   const char *label;
   openyourbox::graph::NodeType type;
+  /** @brief True when this item places a TorchScript Load Gold node. */
+  bool externalLoad = false;
 };
 
 struct PaletteCategory {
@@ -44,6 +46,7 @@ constexpr PaletteItem effectsPaletteItems[] = {
 constexpr PaletteItem neuralPaletteItems[] = {
     {"LSTM", openyourbox::graph::NodeType::lstm},
     {"RNN", openyourbox::graph::NodeType::rnn},
+    {"TorchScript Load", openyourbox::graph::NodeType::blackBox, true},
 };
 
 constexpr PaletteItem layerPaletteItems[] = {
@@ -594,7 +597,25 @@ std::string pinExpandedShapeInfo(const openyourbox::graph::Pin &pin,
  * @return False for source-only Knob/XY elements.
  */
 bool canInsertOnLink(openyourbox::graph::NodeType type) noexcept {
-  return !openyourbox::graph::isConditioningSourceType(type);
+  return !openyourbox::graph::isConditioningSourceType(type) &&
+         type != openyourbox::graph::NodeType::blackBox;
+}
+
+/**
+ * @brief Places a Factory palette item onto the focused canvas or group.
+ * @param graph Editable graph document.
+ * @param item Palette payload.
+ * @param position Destination canvas coordinates.
+ * @param parentGroupId Destination group, or empty for the root.
+ * @return Stable identifier of the new node.
+ */
+std::int32_t placePaletteItem(openyourbox::graph::NodeGraph &graph,
+                              const PaletteItem &item,
+                              juce::Point<float> position,
+                              std::optional<std::int32_t> parentGroupId) {
+  if (item.externalLoad)
+    return graph.addExternalTorchScriptLoadNode(position, parentGroupId);
+  return graph.addNode(item.type, position, parentGroupId);
 }
 
 /**
@@ -989,10 +1010,12 @@ void NodeRenderer::render(NodeGraph &graph,
                 ? ImVec2(canvasPosition.x - target->position.x,
                          canvasPosition.y - target->position.y)
                 : canvasPosition;
-        graph.addNode(item.type, {local.x, local.y}, dropGroup);
+        const auto id =
+            placePaletteItem(graph, item, {local.x, local.y}, dropGroup);
+        (void)id;
       } else {
-        graph.addNode(item.type, {canvasPosition.x, canvasPosition.y},
-                      focusedGroupId);
+        placePaletteItem(graph, item,
+                         {canvasPosition.x, canvasPosition.y}, focusedGroupId);
       }
       positionedNodeIds.erase(graph.getNodes().back().id);
       mutatedThisFrame = true;
@@ -1148,8 +1171,8 @@ void NodeRenderer::renderPalette(NodeGraph &graph,
         if (isDouble) {
           paletteLastClickLabel.clear();
           const auto focus = graph.getViewport().focusedGroupId;
-          graph.addNode(item.type, {lastCanvasCentre.x, lastCanvasCentre.y},
-                        focus);
+          placePaletteItem(graph, item,
+                           {lastCanvasCentre.x, lastCanvasCentre.y}, focus);
           mutatedThisFrame = true;
           recompileThisFrame = true;
         }
@@ -1562,8 +1585,16 @@ void NodeRenderer::handleContextMenus(NodeGraph &graph,
     const auto *group =
         contextGroupId != 0 ? graph.findGroup(contextGroupId) : nullptr;
     if (node != nullptr && node->state == NodeState::frozenGold) {
-      if (ImGui::MenuItem("Unfreeze") && callbacks.unfreezeNode)
+      const auto allowUnfreeze = graph.canUnfreeze(contextNodeId);
+      if (ImGui::MenuItem("Unfreeze", nullptr, false, allowUnfreeze) &&
+          callbacks.unfreezeNode)
         callbacks.unfreezeNode(contextNodeId);
+      if (!allowUnfreeze && isExternalLoadNode(*node)) {
+        ImGui::TextDisabled("External checkpoints cannot Unfreeze");
+        if (ImGui::IsItemHovered())
+          ImGui::SetTooltip(
+              "TorchScript Load has no OpenYourBox source graph to restore.");
+      }
     } else {
       const auto expandedFreeze =
           graph.expandSelectionToFreezableLeaves(freezeIds);
@@ -2792,7 +2823,7 @@ void NodeRenderer::handleStructureDropTarget(
   } else if (palette != nullptr) {
     const auto item = *static_cast<const PaletteItem *>(palette->Data);
     const auto id =
-        graph.addNode(item.type, defaultNewBoxPosition, targetParent);
+        placePaletteItem(graph, item, defaultNewBoxPosition, targetParent);
     positionedNodeIds.erase(id);
     mutatedThisFrame = true;
     recompileThisFrame = true;
@@ -3052,6 +3083,91 @@ void NodeRenderer::renderNodeParameterEditors(
       ImGui::TextDisabled("Delay %.0f smp / %.2f ms @ 48 kHz", samples,
                           samples * 1000.0 / 48000.0);
     }
+  }
+
+  if (isExternalLoadNode(node)) {
+    const char *statusLabel = "Empty";
+    switch (node.externalLoadStatus) {
+    case ExternalLoadStatus::loading:
+      statusLabel = "Loading";
+      break;
+    case ExternalLoadStatus::ready:
+      statusLabel = "Ready";
+      break;
+    case ExternalLoadStatus::error:
+      statusLabel = "Error";
+      break;
+    case ExternalLoadStatus::empty:
+      break;
+    }
+    ImGui::TextWrapped("Status: %s", statusLabel);
+    if (node.externalLoadStatus == ExternalLoadStatus::empty)
+      ImGui::TextDisabled("Choose a TorchScript checkpoint to process audio.");
+    if (!node.artifactPath.empty())
+      ImGui::TextWrapped("Path: %s",
+                         juce::File(node.artifactPath).getFullPathName().toRawUTF8());
+    else
+      ImGui::TextDisabled("Path: (none)");
+    if (!node.externalLoadErrorMessage.empty()) {
+      ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.45f, 0.35f, 1.0f));
+      ImGui::TextWrapped("%s", node.externalLoadErrorMessage.c_str());
+      ImGui::PopStyleColor();
+    }
+    if (!node.sampleRateWarning.empty()) {
+      ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.72f, 0.18f, 1.0f));
+      ImGui::TextWrapped("%s", node.sampleRateWarning.c_str());
+      ImGui::PopStyleColor();
+    }
+    if (ImGui::SmallButton("Browse") && callbacks.browseWeights && !readOnly)
+      callbacks.browseWeights(node.id);
+    ImGui::SameLine();
+    if (ImGui::SmallButton("Clear") && !readOnly) {
+      const auto clearedPath = node.artifactPath.empty() ? node.runtimeArtifactPath
+                                                         : node.artifactPath;
+      graph.clearExternalCheckpoint(node.id);
+      mutatedThisFrame = true;
+      recompileThisFrame = true;
+      if (callbacks.externalCheckpointCleared)
+        callbacks.externalCheckpointCleared(clearedPath);
+    }
+    if (node.externalLoadStatus == ExternalLoadStatus::ready ||
+        node.inferredInputChannels > 0 || node.overrideInputChannels > 0) {
+      ImGui::Separator();
+      ImGui::TextDisabled("Inferred in/out/latent: %d / %d / %d",
+                          node.inferredInputChannels, node.inferredOutputChannels,
+                          node.inferredLatentChannels);
+      auto overrideRow = [&](const char *label, const char *key, int current) {
+        int value = current > 0 ? current : 0;
+        ImGui::SetNextItemWidth(80.0f);
+        if (ImGui::InputInt(label, &value) && !readOnly) {
+          if (!graph.setExternalChannelOverride(node.id, key, value)) {
+            transientMessage = graph.lastPropertyMessage();
+            transientMessageDeadline = ImGui::GetTime() + 2.5;
+            if (callbacks.showMessage && !transientMessage.empty())
+              callbacks.showMessage(transientMessage);
+          } else {
+            mutatedThisFrame = true;
+            recompileThisFrame = true;
+          }
+        }
+      };
+      overrideRow("Input ch##extIn", "input",
+                  effectiveInputChannels(node));
+      overrideRow("Output ch##extOut", "output",
+                  effectiveOutputChannels(node));
+      if (node.externalHasEncodeDecode)
+        overrideRow("Latent ch##extLatent", "latent",
+                    effectiveLatentChannels(node));
+      if (ImGui::SmallButton("Reset to inferred") && !readOnly) {
+        graph.resetExternalChannelOverrides(node.id);
+        mutatedThisFrame = true;
+        recompileThisFrame = true;
+      }
+    }
+    if (node.externalHasEncodeDecode && !node.compactnessReady)
+      ImGui::TextDisabled("Fidelity needs compactness buffers on this checkpoint.");
+    if (node.externalShapeIncomplete)
+      ImGui::TextDisabled("Enter channel overrides before connections are legal.");
   }
 
   const auto frozen = node.state == NodeState::frozenGold;
@@ -3502,7 +3618,8 @@ void NodeRenderer::renderNodeParameterEditors(
         callbacks.armChanged(node.id, armed);
     }
   }
-  if (node.hasWeights || node.type == NodeType::blackBox) {
+  if ((node.hasWeights || node.type == NodeType::blackBox) &&
+      !isExternalLoadNode(node)) {
     if (node.weightsProvenance == WeightsProvenance::file &&
         !node.weightsPath.empty())
       ImGui::TextWrapped("Weights: %s",

@@ -2448,6 +2448,10 @@ std::string firstIncompatibleLinkMessage(const openyourbox::graph::NodeGraph &gr
     const auto *node = graph.findNode(*destNode);
     if (node == nullptr)
       continue;
+    if (openyourbox::graph::isExternalLoadNode(*node) &&
+        node->externalShapeIncomplete && !openyourbox::graph::isLatentPin(*destination) &&
+        !openyourbox::graph::isControlInputPin(*destination))
+      return "Enter channel overrides before connecting this checkpoint";
     if (node->type == NodeType::pqmfSynthesis &&
         pqmfSynthesisChannelIsError(sourceShape.channels,
                                     std::max(2, readNodeProperty(
@@ -2709,10 +2713,33 @@ juce::ValueTree nodeToTree(const openyourbox::graph::GraphNode &node) {
                    nullptr);
   tree.setProperty("weightsPath", juce::String(node.weightsPath), nullptr);
   tree.setProperty("blackBoxOrigin",
-                   node.blackBoxOrigin ==
-                           openyourbox::graph::BlackBoxOrigin::trainAutoload
-                       ? "train_autoload"
-                       : "manual_freeze",
+                   openyourbox::graph::blackBoxOriginName(node.blackBoxOrigin),
+                   nullptr);
+  tree.setProperty("externalLoadStatus",
+                   openyourbox::graph::externalLoadStatusName(
+                       node.externalLoadStatus),
+                   nullptr);
+  tree.setProperty("externalLoadErrorMessage",
+                   juce::String(node.externalLoadErrorMessage), nullptr);
+  tree.setProperty("inferredInputChannels", node.inferredInputChannels,
+                   nullptr);
+  tree.setProperty("inferredOutputChannels", node.inferredOutputChannels,
+                   nullptr);
+  tree.setProperty("inferredLatentChannels", node.inferredLatentChannels,
+                   nullptr);
+  tree.setProperty("overrideInputChannels", node.overrideInputChannels,
+                   nullptr);
+  tree.setProperty("overrideOutputChannels", node.overrideOutputChannels,
+                   nullptr);
+  tree.setProperty("overrideLatentChannels", node.overrideLatentChannels,
+                   nullptr);
+  tree.setProperty("externalHasEncodeDecode", node.externalHasEncodeDecode,
+                   nullptr);
+  tree.setProperty("externalAcceptsConditioning",
+                   node.externalAcceptsConditioning, nullptr);
+  tree.setProperty("externalShapeIncomplete", node.externalShapeIncomplete,
+                   nullptr);
+  tree.setProperty("sampleRateWarning", juce::String(node.sampleRateWarning),
                    nullptr);
   tree.setProperty("fidelityPercent", node.fidelityPercent, nullptr);
   tree.setProperty("compactnessReady", node.compactnessReady, nullptr);
@@ -2854,11 +2881,32 @@ openyourbox::graph::GraphNode nodeFromTree(const juce::ValueTree &tree) {
           ? WeightsProvenance::file
           : WeightsProvenance::random;
   node.weightsPath = tree["weightsPath"].toString().toStdString();
-  node.blackBoxOrigin =
-      tree.getProperty("blackBoxOrigin", "manual_freeze").toString() ==
-              "train_autoload"
-          ? BlackBoxOrigin::trainAutoload
-          : BlackBoxOrigin::manualFreeze;
+  node.blackBoxOrigin = openyourbox::graph::blackBoxOriginFromName(
+      tree.getProperty("blackBoxOrigin", "manual_freeze").toString());
+  node.externalLoadStatus = openyourbox::graph::externalLoadStatusFromName(
+      tree.getProperty("externalLoadStatus", "empty").toString());
+  node.externalLoadErrorMessage =
+      tree.getProperty("externalLoadErrorMessage", "").toString().toStdString();
+  node.inferredInputChannels =
+      static_cast<int>(tree.getProperty("inferredInputChannels", 0));
+  node.inferredOutputChannels =
+      static_cast<int>(tree.getProperty("inferredOutputChannels", 0));
+  node.inferredLatentChannels =
+      static_cast<int>(tree.getProperty("inferredLatentChannels", 0));
+  node.overrideInputChannels =
+      static_cast<int>(tree.getProperty("overrideInputChannels", -1));
+  node.overrideOutputChannels =
+      static_cast<int>(tree.getProperty("overrideOutputChannels", -1));
+  node.overrideLatentChannels =
+      static_cast<int>(tree.getProperty("overrideLatentChannels", -1));
+  node.externalHasEncodeDecode =
+      static_cast<bool>(tree.getProperty("externalHasEncodeDecode", false));
+  node.externalAcceptsConditioning =
+      static_cast<bool>(tree.getProperty("externalAcceptsConditioning", false));
+  node.externalShapeIncomplete =
+      static_cast<bool>(tree.getProperty("externalShapeIncomplete", false));
+  node.sampleRateWarning =
+      tree.getProperty("sampleRateWarning", "").toString().toStdString();
   node.fidelityPercent = openyourbox::graph::clampFidelity(static_cast<float>(
       tree.getProperty("fidelityPercent", defaultFidelityPercent)));
   node.compactnessReady =
@@ -3702,8 +3750,12 @@ void NodeGraph::rebuildFromModel(const dsp::TCNConfiguration &configuration) {
 
 std::int32_t NodeGraph::addNode(NodeType type, juce::Point<float> position,
                                 std::optional<std::int32_t> parentGroupId) {
-  auto node = makeNode(type, position);
-  if (isFixedIoType(type))
+  return insertConstructedNode(makeNode(type, position), parentGroupId);
+}
+
+std::int32_t NodeGraph::insertConstructedNode(
+    GraphNode node, std::optional<std::int32_t> parentGroupId) {
+  if (isFixedIoType(node.type))
     parentGroupId.reset();
   if (parentGroupId.has_value() && findGroup(*parentGroupId) == nullptr)
     parentGroupId.reset();
@@ -3724,6 +3776,12 @@ std::int32_t NodeGraph::addNode(NodeType type, juce::Point<float> position,
     }
   }
   return id;
+}
+
+std::int32_t NodeGraph::addExternalTorchScriptLoadNode(
+    juce::Point<float> position, std::optional<std::int32_t> parentGroupId) {
+  return insertConstructedNode(makeExternalTorchScriptLoadNode(position),
+                               parentGroupId);
 }
 
 void NodeGraph::ensureFixedHostIo() {
@@ -5438,6 +5496,17 @@ ConnectionResult NodeGraph::connect(std::int32_t firstPinId,
     updateMergeOutputShape(*this, *const_cast<GraphNode *>(sourceNodePtr));
 
   const auto sourceShape = outgoingShapeOf(*this, *source);
+  if (sourceNodePtr != nullptr && isExternalLoadNode(*sourceNodePtr) &&
+      sourceNodePtr->externalShapeIncomplete && !isLatentPin(*source) &&
+      !isControlInputPin(*source))
+    return {false,
+            "Enter channel overrides before connecting this checkpoint"};
+  if (destinationNodePtr != nullptr &&
+      isExternalLoadNode(*destinationNodePtr) &&
+      destinationNodePtr->externalShapeIncomplete &&
+      !isLatentPin(*destination) && !isControlInputPin(*destination))
+    return {false,
+            "Enter channel overrides before connecting this checkpoint"};
   if (!sourceShape.isCompatibleWith(destination->shape)) {
     if (sourceNodePtr != nullptr && sourceNodePtr->type == NodeType::merge) {
       std::unordered_set<std::int32_t> visiting;
@@ -6073,6 +6142,8 @@ bool NodeGraph::unfreeze(std::int32_t nodeId) {
   const auto *node = findNode(nodeId);
   if (node == nullptr || node->state != NodeState::frozenGold)
     return false;
+  if (isExternalLoadNode(*node))
+    return false;
 
   if (node->type == NodeType::blackBox) {
     const auto fragmentXml = juce::XmlDocument::parse(node->sourceSubgraph);
@@ -6550,7 +6621,7 @@ bool NodeGraph::restoreFromValueTree(const juce::ValueTree &tree) {
         hasControl = true;
       }
     }
-    if (!hasControl)
+    if (!hasControl && node.blackBoxOrigin != BlackBoxOrigin::externalLoad)
       node.inputs.push_back({nextPinId++, controlPinLabel, PinKind::input,
                              flexibleTensorShape()});
   }
@@ -7416,6 +7487,347 @@ GraphNode NodeGraph::makeNode(NodeType type, juce::Point<float> position) {
   }
   }
   return node;
+}
+
+GraphNode NodeGraph::makeExternalTorchScriptLoadNode(juce::Point<float> position) {
+  GraphNode node;
+  node.id = nextNodeId++;
+  node.type = NodeType::blackBox;
+  node.position = position;
+  node.state = NodeState::frozenGold;
+  node.colour = colourForType(node.type, node.state);
+  node.label = "TorchScript Load";
+  node.detail = "Choose a checkpoint";
+  node.hasWeights = false;
+  node.armedForTraining = false;
+  node.blackBoxOrigin = BlackBoxOrigin::externalLoad;
+  node.externalLoadStatus = ExternalLoadStatus::empty;
+  node.inputs.push_back(
+      {nextPinId++, "in", PinKind::input, flexibleTensorShape()});
+  node.outputs.push_back(
+      {nextPinId++, "out", PinKind::output, flexibleTensorShape()});
+  return node;
+}
+
+void NodeGraph::applyExternalLoadSurface(GraphNode &node) {
+  if (!isExternalLoadNode(node))
+    return;
+
+  std::int32_t audioInId = 0;
+  std::int32_t audioOutId = 0;
+  std::int32_t controlId = 0;
+  std::int32_t latentInId = 0;
+  std::int32_t latentOutId = 0;
+  for (const auto &pin : node.inputs) {
+    if (isControlInputPin(pin))
+      controlId = pin.id;
+    else if (isLatentPin(pin))
+      latentInId = pin.id;
+    else if (audioInId == 0)
+      audioInId = pin.id;
+  }
+  for (const auto &pin : node.outputs) {
+    if (isLatentPin(pin))
+      latentOutId = pin.id;
+    else if (audioOutId == 0)
+      audioOutId = pin.id;
+  }
+  if (audioInId == 0) {
+    audioInId = nextPinId++;
+    node.inputs.insert(node.inputs.begin(),
+                       {audioInId, "in", PinKind::input, flexibleTensorShape()});
+  }
+  if (audioOutId == 0) {
+    audioOutId = nextPinId++;
+    node.outputs.insert(
+        node.outputs.begin(),
+        {audioOutId, "out", PinKind::output, flexibleTensorShape()});
+  }
+
+  const bool wantControl =
+      node.externalLoadStatus == ExternalLoadStatus::ready &&
+      node.externalAcceptsConditioning;
+  const bool wantLatent = node.externalLoadStatus == ExternalLoadStatus::ready &&
+                          node.externalHasEncodeDecode;
+
+  std::vector<std::int32_t> removed;
+  if (!wantControl && controlId != 0)
+    removed.push_back(controlId);
+  if (!wantLatent) {
+    if (latentInId != 0)
+      removed.push_back(latentInId);
+    if (latentOutId != 0)
+      removed.push_back(latentOutId);
+  }
+  if (!removed.empty()) {
+    links.erase(std::remove_if(links.begin(), links.end(),
+                               [&removed](const GraphLink &link) {
+                                 return std::find(removed.begin(), removed.end(),
+                                                  link.sourcePinId) !=
+                                            removed.end() ||
+                                        std::find(removed.begin(), removed.end(),
+                                                  link.destinationPinId) !=
+                                            removed.end();
+                               }),
+                links.end());
+  }
+
+  std::vector<Pin> inputs;
+  std::vector<Pin> outputs;
+  for (auto &pin : node.inputs) {
+    if (pin.id == audioInId)
+      inputs.push_back(pin);
+  }
+  if (wantControl) {
+    if (controlId == 0)
+      controlId = nextPinId++;
+    Pin control{controlId, controlPinLabel, PinKind::input,
+                flexibleTensorShape()};
+    inputs.push_back(control);
+  }
+  if (wantLatent) {
+    if (latentInId == 0)
+      latentInId = nextPinId++;
+    const auto latentWidth = std::max(0, effectiveLatentChannels(node));
+    Pin latentIn{latentInId, latentPinLabel, PinKind::input,
+                 flexibleTensorShape(latentWidth)};
+    inputs.push_back(latentIn);
+  }
+  for (auto &pin : node.outputs) {
+    if (pin.id == audioOutId)
+      outputs.push_back(pin);
+  }
+  if (wantLatent) {
+    if (latentOutId == 0)
+      latentOutId = nextPinId++;
+    const auto latentWidth = std::max(0, effectiveLatentChannels(node));
+    Pin latentOut{latentOutId, latentPinLabel, PinKind::output,
+                  flexibleTensorShape(latentWidth)};
+    outputs.push_back(latentOut);
+  }
+  node.inputs = std::move(inputs);
+  node.outputs = std::move(outputs);
+
+  const bool empty = node.externalLoadStatus == ExternalLoadStatus::empty;
+  const int inCh = empty || node.externalShapeIncomplete
+                       ? 0
+                       : std::max(0, effectiveInputChannels(node));
+  const int outCh = empty || node.externalShapeIncomplete
+                        ? 0
+                        : std::max(0, effectiveOutputChannels(node));
+  for (auto &pin : node.inputs) {
+    if (isControlInputPin(pin))
+      pin.shape = flexibleTensorShape();
+    else if (isLatentPin(pin))
+      pin.shape.channels =
+          empty || node.externalShapeIncomplete
+              ? 0
+              : std::max(0, effectiveLatentChannels(node));
+    else
+      pin.shape.channels = inCh;
+  }
+  for (auto &pin : node.outputs) {
+    if (isLatentPin(pin))
+      pin.shape.channels =
+          empty || node.externalShapeIncomplete
+              ? 0
+              : std::max(0, effectiveLatentChannels(node));
+    else
+      pin.shape.channels = outCh;
+  }
+
+  node.properties.erase(
+      std::remove_if(node.properties.begin(), node.properties.end(),
+                     [](const NodeProperty &property) {
+                       return property.key == "fidelity";
+                     }),
+      node.properties.end());
+  if (wantLatent) {
+    NodeProperty fidelity;
+    fidelity.key = "fidelity";
+    fidelity.label = "Fidelity";
+    fidelity.kind = PropertyKind::real;
+    fidelity.floatValue = clampFidelity(node.fidelityPercent);
+    fidelity.floatMinimum = fidelityMinimum;
+    fidelity.floatMaximum = fidelityMaximum;
+    node.properties.push_back(std::move(fidelity));
+  }
+}
+
+bool NodeGraph::beginExternalCheckpointLoad(std::int32_t nodeId,
+                                            const std::string &path) {
+  auto *node = findNode(nodeId);
+  if (node == nullptr || !isExternalLoadNode(*node))
+    return false;
+  node->artifactPath = path;
+  node->weightsPath = path;
+  node->weightsProvenance = WeightsProvenance::file;
+  node->externalLoadStatus = ExternalLoadStatus::loading;
+  node->externalLoadErrorMessage.clear();
+  node->detail = "Loading…";
+  return true;
+}
+
+bool NodeGraph::applyExternalCheckpointReady(
+    std::int32_t nodeId, const std::string &path, int inferredIn,
+    int inferredOut, int inferredLatent, bool hasEncodeDecode,
+    bool acceptsConditioning, bool compactnessReadyFlag,
+    std::vector<float> mean, std::vector<float> pca,
+    std::vector<float> cumulative, const std::string &rateWarning) {
+  auto *node = findNode(nodeId);
+  if (node == nullptr || !isExternalLoadNode(*node))
+    return false;
+  node->artifactPath = path;
+  node->weightsPath = path;
+  node->runtimeArtifactPath = path;
+  node->weightsProvenance = WeightsProvenance::file;
+  node->externalLoadStatus = ExternalLoadStatus::ready;
+  node->externalLoadErrorMessage.clear();
+  node->inferredInputChannels = std::max(0, inferredIn);
+  node->inferredOutputChannels = std::max(0, inferredOut);
+  node->inferredLatentChannels = std::max(0, inferredLatent);
+  if (node->overrideInputChannels < 1 && node->inferredInputChannels > 0)
+    node->overrideInputChannels = node->inferredInputChannels;
+  if (node->overrideOutputChannels < 1 && node->inferredOutputChannels > 0)
+    node->overrideOutputChannels = node->inferredOutputChannels;
+  if (hasEncodeDecode && node->overrideLatentChannels < 1 &&
+      node->inferredLatentChannels > 0)
+    node->overrideLatentChannels = node->inferredLatentChannels;
+  node->externalHasEncodeDecode = hasEncodeDecode;
+  node->externalAcceptsConditioning = acceptsConditioning;
+  node->compactnessReady = compactnessReadyFlag && hasEncodeDecode;
+  node->latentMean = std::move(mean);
+  node->latentPca = std::move(pca);
+  node->cumulativeVariance = std::move(cumulative);
+  node->sampleRateWarning = rateWarning;
+  node->externalShapeIncomplete =
+      effectiveInputChannels(*node) < 1 ||
+      effectiveOutputChannels(*node) < 1 ||
+      (hasEncodeDecode && effectiveLatentChannels(*node) < 1);
+  const auto stem = [&path]() {
+    const auto slash = path.find_last_of("/\\");
+    auto name = slash == std::string::npos ? path : path.substr(slash + 1);
+    const auto dot = name.find_last_of('.');
+    if (dot != std::string::npos && dot > 0)
+      name.resize(dot);
+    return name;
+  }();
+  node->label = stem.empty() ? "TorchScript Load" : stem;
+  node->detail = node->externalShapeIncomplete ? "Enter channel overrides"
+                                               : "Locked";
+  applyExternalLoadSurface(*node);
+  refreshPropagatedPinShapes(*this);
+  return true;
+}
+
+bool NodeGraph::applyExternalCheckpointError(std::int32_t nodeId,
+                                            const std::string &message) {
+  auto *node = findNode(nodeId);
+  if (node == nullptr || !isExternalLoadNode(*node))
+    return false;
+  node->externalLoadStatus = ExternalLoadStatus::error;
+  node->externalLoadErrorMessage =
+      message.empty() ? "Checkpoint could not be loaded" : message;
+  node->detail = "Load failed";
+  if (node->runtimeArtifactPath.empty()) {
+    node->externalHasEncodeDecode = false;
+    node->externalAcceptsConditioning = false;
+    node->compactnessReady = false;
+    node->latentMean.clear();
+    node->latentPca.clear();
+    node->cumulativeVariance.clear();
+    applyExternalLoadSurface(*node);
+  }
+  return true;
+}
+
+bool NodeGraph::clearExternalCheckpoint(std::int32_t nodeId) {
+  auto *node = findNode(nodeId);
+  if (node == nullptr || !isExternalLoadNode(*node))
+    return false;
+  node->artifactPath.clear();
+  node->weightsPath.clear();
+  node->runtimeArtifactPath.clear();
+  node->externalLoadStatus = ExternalLoadStatus::empty;
+  node->externalLoadErrorMessage.clear();
+  node->inferredInputChannels = 0;
+  node->inferredOutputChannels = 0;
+  node->inferredLatentChannels = 0;
+  node->overrideInputChannels = -1;
+  node->overrideOutputChannels = -1;
+  node->overrideLatentChannels = -1;
+  node->externalHasEncodeDecode = false;
+  node->externalAcceptsConditioning = false;
+  node->externalShapeIncomplete = false;
+  node->sampleRateWarning.clear();
+  node->compactnessReady = false;
+  node->latentMean.clear();
+  node->latentPca.clear();
+  node->cumulativeVariance.clear();
+  node->fidelityPercent = defaultFidelityPercent;
+  node->label = "TorchScript Load";
+  node->detail = "Choose a checkpoint";
+  node->metrics.reset();
+  applyExternalLoadSurface(*node);
+  refreshPropagatedPinShapes(*this);
+  return true;
+}
+
+bool NodeGraph::setExternalChannelOverride(std::int32_t nodeId, const char *which,
+                                          int value) {
+  auto *node = findNode(nodeId);
+  if (node == nullptr || !isExternalLoadNode(*node) || which == nullptr)
+    return false;
+  int *target = nullptr;
+  if (std::strcmp(which, "input") == 0)
+    target = &node->overrideInputChannels;
+  else if (std::strcmp(which, "output") == 0)
+    target = &node->overrideOutputChannels;
+  else if (std::strcmp(which, "latent") == 0)
+    target = &node->overrideLatentChannels;
+  if (target == nullptr)
+    return false;
+  const auto previous = *target;
+  *target = value < 1 ? -1 : value;
+  const auto previousIncomplete = node->externalShapeIncomplete;
+  node->externalShapeIncomplete =
+      effectiveInputChannels(*node) < 1 || effectiveOutputChannels(*node) < 1 ||
+      (node->externalHasEncodeDecode && effectiveLatentChannels(*node) < 1);
+  applyExternalLoadSurface(*node);
+  refreshPropagatedPinShapes(*this);
+  const auto incompatible = firstIncompatibleLinkMessage(*this);
+  if (!incompatible.empty()) {
+    *target = previous;
+    node->externalShapeIncomplete = previousIncomplete;
+    applyExternalLoadSurface(*node);
+    refreshPropagatedPinShapes(*this);
+    lastPropertyError = incompatible;
+    return false;
+  }
+  lastPropertyError.clear();
+  return true;
+}
+
+bool NodeGraph::resetExternalChannelOverrides(std::int32_t nodeId) {
+  auto *node = findNode(nodeId);
+  if (node == nullptr || !isExternalLoadNode(*node))
+    return false;
+  node->overrideInputChannels = -1;
+  node->overrideOutputChannels = -1;
+  node->overrideLatentChannels = -1;
+  node->externalShapeIncomplete =
+      effectiveInputChannels(*node) < 1 || effectiveOutputChannels(*node) < 1 ||
+      (node->externalHasEncodeDecode && effectiveLatentChannels(*node) < 1);
+  applyExternalLoadSurface(*node);
+  refreshPropagatedPinShapes(*this);
+  return true;
+}
+
+bool NodeGraph::canUnfreeze(std::int32_t nodeId) const noexcept {
+  const auto *node = findNode(nodeId);
+  if (node == nullptr || node->state != NodeState::frozenGold)
+    return false;
+  return !isExternalLoadNode(*node);
 }
 
 void NodeGraph::setMixerInputCount(GraphNode &node, int inputCount,

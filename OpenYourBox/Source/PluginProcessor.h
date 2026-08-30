@@ -264,6 +264,33 @@ public:
                               std::string &error);
 
   /**
+   * @brief Loads an external TorchScript checkpoint into the frozen registry.
+   * @param artifactPath Absolute path to a `.pt`, `.pth`, or `.ts` file.
+   * @param inputChannelsHint Preferred probe width (host channels or override).
+   * @param error Receives a human-readable load or validation error.
+   * @return True only when the prepared factory has been published.
+   *
+   * Performs blocking `torch::jit::load` and must not run on the audio thread.
+   * Silence preservation is not required. Channel hints retry `{hint, 1, 2, 4,
+   * 8, 16}` when the first probe fails.
+   */
+  bool prepareExternalArtifact(const std::string &artifactPath,
+                               int inputChannelsHint, std::string &error);
+
+  /**
+   * @brief Returns the last factory published for @p artifactPath.
+   * @param artifactPath Canonical checkpoint path.
+   */
+  [[nodiscard]] std::shared_ptr<const openyourbox::dsp::TorchScriptBlackBoxFactory>
+  getPreparedExternalArtifact(const std::string &artifactPath) const;
+
+  /**
+   * @brief Drops a registry entry when no persisted node still references it.
+   * @param artifactPath Canonical checkpoint path.
+   */
+  void releaseFrozenArtifactIfUnused(const std::string &artifactPath);
+
+  /**
    * @brief Compiles armed nodes as a frozen preview of a training checkpoint.
    * @param artifactPath Validated TorchScript checkpoint path.
    * @param nodeIds Armed node identifiers captured at Run.
@@ -502,6 +529,14 @@ private:
    * @param message Status text.
    */
   void setCaptureStatusMessage(const juce::String &message);
+
+  /**
+   * @brief Re-prepares every persisted `external_load` checkpoint into the registry.
+   *
+   * Missing files keep the path string and are marked error. Existing files
+   * are loaded off the audio thread (caller must already be off-audio).
+   */
+  void reprepareExternalArtifactsFromGraph();
 
   /**
    * @brief Applies a history snapshot and restores current-preset state.

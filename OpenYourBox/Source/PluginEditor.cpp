@@ -237,6 +237,9 @@ void OpenYourBoxAudioProcessorEditor::renderFrame() {
   callbacks.browseWeights = [this](std::int32_t nodeId) {
     handleBrowseWeights(nodeId);
   };
+  callbacks.externalCheckpointCleared = [this](const std::string &path) {
+    audioProcessor.releaseFrozenArtifactIfUnused(path);
+  };
   callbacks.beginPatchGesture = [this](const char *label) {
     beginHistoryGesture(label);
   };
@@ -1229,6 +1232,12 @@ void OpenYourBoxAudioProcessorEditor::importLibraryPair(
 }
 
 void OpenYourBoxAudioProcessorEditor::handleBrowseWeights(std::int32_t nodeId) {
+  const auto *node = nodeGraph.findNode(nodeId);
+  if (node != nullptr &&
+      openyourbox::graph::isExternalLoadNode(*node)) {
+    handleBrowseExternalCheckpoint(nodeId);
+    return;
+  }
   juce::MessageManager::callAsync([this, nodeId] {
     const auto *node = nodeGraph.findNode(nodeId);
     if (node == nullptr)
@@ -1258,6 +1267,97 @@ void OpenYourBoxAudioProcessorEditor::handleBrowseWeights(std::int32_t nodeId) {
               [this](std::int32_t, const std::string &error) {
                 showError("Incompatible weights: " + juce::String(error));
               });
+        });
+  });
+}
+
+void OpenYourBoxAudioProcessorEditor::handleBrowseExternalCheckpoint(
+    std::int32_t nodeId) {
+  juce::MessageManager::callAsync([this, nodeId] {
+    const auto *node = nodeGraph.findNode(nodeId);
+    if (node == nullptr)
+      return;
+    const auto startDir =
+        node->artifactPath.empty()
+            ? juce::File::getSpecialLocation(juce::File::userHomeDirectory)
+            : juce::File(node->artifactPath).getParentDirectory();
+    fileChooser = std::make_shared<juce::FileChooser>(
+        "Load TorchScript checkpoint", startDir, "*.pt;*.pth;*.ts");
+    fileChooser->launchAsync(
+        juce::FileBrowserComponent::openMode |
+            juce::FileBrowserComponent::canSelectFiles,
+        [this, nodeId](const juce::FileChooser &chosen) {
+          const auto file = chosen.getResult();
+          fileChooser.reset();
+          if (file.getFullPathName().isEmpty())
+            return;
+          if (file.isDirectory()) {
+            nodeGraph.applyExternalCheckpointError(
+                nodeId, "Select a checkpoint file, not a directory");
+            persistGraph(true, false);
+            showError("Select a checkpoint file, not a directory");
+            return;
+          }
+          const auto extension = file.getFileExtension().toLowerCase();
+          if (extension != ".pt" && extension != ".pth" && extension != ".ts") {
+            nodeGraph.applyExternalCheckpointError(
+                nodeId,
+                "Checkpoint must be a TorchScript .pt, .pth, or .ts file");
+            persistGraph(true, false);
+            showError(
+                "Checkpoint must be a TorchScript .pt, .pth, or .ts file");
+            return;
+          }
+          const auto path = file.getFullPathName().toStdString();
+          if (!nodeGraph.beginExternalCheckpointLoad(nodeId, path))
+            return;
+          persistGraph(false, false);
+          const auto hint = [&]() {
+            if (const auto *target = nodeGraph.findNode(nodeId)) {
+              if (target->overrideInputChannels > 0)
+                return target->overrideInputChannels;
+              if (target->inferredInputChannels > 0)
+                return target->inferredInputChannels;
+            }
+            return std::max(1, audioProcessor.getTotalNumInputChannels());
+          }();
+          juce::Thread::launch([this, nodeId, path, hint]() {
+            std::string error;
+            const auto ok =
+                audioProcessor.prepareExternalArtifact(path, hint, error);
+            juce::MessageManager::callAsync([this, nodeId, path, ok, error] {
+              if (ok) {
+                const auto factory =
+                    audioProcessor.getPreparedExternalArtifact(path);
+                if (factory == nullptr) {
+                  nodeGraph.applyExternalCheckpointError(
+                      nodeId, "Checkpoint factory was not published");
+                  persistGraph(true, false);
+                  return;
+                }
+                nodeGraph.applyExternalCheckpointReady(
+                    nodeId, path, factory->getInputChannels(),
+                    factory->getOutputChannels(), factory->getLatentChannels(),
+                    factory->hasEncodeDecode(), factory->acceptsConditioning(),
+                    factory->compactnessReady(), factory->compactnessMean(),
+                    factory->compactnessPca(), factory->compactnessCumulative(),
+                    factory->sampleRateWarning());
+                persistGraph(true, false);
+                commitHistoryFromBaseline("Load TorchScript checkpoint");
+                showGraphMessage("Loaded " +
+                                 juce::File(path).getFileName().toStdString());
+                if (!factory->sampleRateWarning().empty())
+                  showWarning(juce::String(factory->sampleRateWarning()));
+              } else {
+                nodeGraph.applyExternalCheckpointError(
+                    nodeId, error.empty() ? "Checkpoint could not be loaded"
+                                          : error);
+                persistGraph(true, false);
+                showError(error.empty() ? juce::String("Checkpoint could not be loaded")
+                                        : juce::String(error));
+              }
+            });
+          });
         });
   });
 }
@@ -1316,6 +1416,26 @@ void OpenYourBoxAudioProcessorEditor::reloadLiveGraphFromProcessor() {
     nodeGraph.restoreFromValueTree(restored);
   displayedConfiguration = audioProcessor.getRequestedConfiguration();
   graphInitialized = true;
+  for (const auto &node : nodeGraph.getNodes()) {
+    if (!openyourbox::graph::isExternalLoadNode(node) ||
+        node.artifactPath.empty())
+      continue;
+    const auto factory =
+        audioProcessor.getPreparedExternalArtifact(node.artifactPath);
+    if (factory != nullptr) {
+      nodeGraph.applyExternalCheckpointReady(
+          node.id, node.artifactPath, factory->getInputChannels(),
+          factory->getOutputChannels(), factory->getLatentChannels(),
+          factory->hasEncodeDecode(), factory->acceptsConditioning(),
+          factory->compactnessReady(), factory->compactnessMean(),
+          factory->compactnessPca(), factory->compactnessCumulative(),
+          factory->sampleRateWarning());
+    } else if (!juce::File(node.artifactPath).existsAsFile()) {
+      nodeGraph.applyExternalCheckpointError(node.id,
+                                            "Checkpoint file is missing");
+    }
+  }
+  persistGraph(true, false);
   publishRuntimeControls();
   invalidateAnalysis();
   lastCommittedSnapshot = audioProcessor.capturePatchSnapshot();

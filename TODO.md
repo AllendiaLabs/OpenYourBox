@@ -59,7 +59,7 @@
 - [ ] add bias option to elements
 - [ ] compactness not ready
 - [ ] input to latent or pca?
-- [ ] load last checkpoint of rave: https://github.com/acids-ircam/RAVE/discussions/82
+- [x] load last checkpoint of rave: https://github.com/acids-ircam/RAVE/discussions/82 (`specs/015-torchscript-load-node/`)
 
 - [ ] trained boxes should store a list of checkpoints to select from, with "best" one too. 
 

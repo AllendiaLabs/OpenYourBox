@@ -8,9 +8,12 @@
 #include <array>
 #include <cmath>
 #include <cstring>
+#include <functional>
 #include <sstream>
+#include <string>
 #include <unordered_set>
 #include <utility>
+#include <vector>
 
 namespace {
 constexpr std::array listenedParameterIDs{
@@ -408,6 +411,7 @@ bool OpenYourBoxAudioProcessor::applyPatchSnapshot(
   }
 
   publishRuntime(published);
+  reprepareExternalArtifactsFromGraph();
   requestGraphCompile();
   applyingSnapshot = rollback;
   editHistory.setSuppressed(wasSuppressed);
@@ -994,7 +998,11 @@ OpenYourBoxAudioProcessor::resolveFrozenBlackBoxForAnalysis(
 std::shared_ptr<const openyourbox::dsp::FrozenBlackBoxFactory>
 OpenYourBoxAudioProcessor::resolveFrozenBlackBox(
     const openyourbox::graph::GraphNode &node) const {
-  if (node.artifactPath.empty())
+  auto path = node.artifactPath;
+  if (node.blackBoxOrigin == openyourbox::graph::BlackBoxOrigin::externalLoad &&
+      !node.runtimeArtifactPath.empty())
+    path = node.runtimeArtifactPath;
+  if (path.empty())
     return {};
   const auto registry = std::atomic_load_explicit(&publishedFrozenArtifacts,
                                                   std::memory_order_acquire);
@@ -1074,6 +1082,148 @@ bool OpenYourBoxAudioProcessor::prepareTrainedArtifact(
       std::shared_ptr<const FrozenArtifactRegistry>(std::move(replacement)),
       std::memory_order_release);
   return true;
+}
+
+bool OpenYourBoxAudioProcessor::prepareExternalArtifact(
+    const std::string &artifactPath, int inputChannelsHint, std::string &error) {
+  error.clear();
+  const juce::File file(artifactPath);
+  if (artifactPath.empty()) {
+    error = "Choose a TorchScript checkpoint file";
+    return false;
+  }
+  if (file.isDirectory()) {
+    error = "Select a checkpoint file, not a directory";
+    return false;
+  }
+  if (!file.existsAsFile()) {
+    error = "Checkpoint file is missing";
+    return false;
+  }
+  const auto extension = file.getFileExtension().toLowerCase();
+  if (extension != ".pt" && extension != ".pth" && extension != ".ts") {
+    error = "Checkpoint must be a TorchScript .pt, .pth, or .ts file";
+    return false;
+  }
+
+  const auto canonical = file.getFullPathName().toStdString();
+  std::vector<int> hints;
+  const auto addHint = [&hints](int width) {
+    if (width < 1)
+      return;
+    if (std::find(hints.begin(), hints.end(), width) == hints.end())
+      hints.push_back(width);
+  };
+  addHint(inputChannelsHint);
+  addHint(std::max(1, getTotalNumInputChannels()));
+  for (int width : {1, 2, 4, 8, 16})
+    addHint(width);
+
+  std::shared_ptr<const openyourbox::dsp::TorchScriptBlackBoxFactory> factory;
+  for (const auto hint : hints) {
+    std::string attemptError;
+    factory = openyourbox::dsp::TorchScriptBlackBoxFactory::load(
+        canonical, hint, 1, attemptError, false, false, 0, getSampleRate());
+    if (factory != nullptr) {
+      error.clear();
+      break;
+    }
+    error = attemptError;
+  }
+  if (factory == nullptr)
+    return false;
+
+  const auto current = std::atomic_load_explicit(&publishedFrozenArtifacts,
+                                                 std::memory_order_acquire);
+  auto replacement = current != nullptr
+                         ? std::make_shared<FrozenArtifactRegistry>(*current)
+                         : std::make_shared<FrozenArtifactRegistry>();
+  replacement->artifacts[canonical] = factory;
+  std::atomic_store_explicit(
+      &publishedFrozenArtifacts,
+      std::shared_ptr<const FrozenArtifactRegistry>(std::move(replacement)),
+      std::memory_order_release);
+  return true;
+}
+
+std::shared_ptr<const openyourbox::dsp::TorchScriptBlackBoxFactory>
+OpenYourBoxAudioProcessor::getPreparedExternalArtifact(
+    const std::string &artifactPath) const {
+  const auto current = std::atomic_load_explicit(&publishedFrozenArtifacts,
+                                                 std::memory_order_acquire);
+  if (current == nullptr)
+    return {};
+  const auto found = current->artifacts.find(artifactPath);
+  return found != current->artifacts.end() ? found->second : nullptr;
+}
+
+void OpenYourBoxAudioProcessor::releaseFrozenArtifactIfUnused(
+    const std::string &artifactPath) {
+  if (artifactPath.empty())
+    return;
+  bool used = false;
+  const juce::ScopedLock lock(graphStateLock);
+  std::function<void(const juce::ValueTree &)> walk = [&](const juce::ValueTree &tree) {
+    if (tree.hasType("Node") &&
+        tree.getProperty("blackBoxOrigin").toString() == "external_load") {
+      const auto path = tree.getProperty("artifactPath").toString().toStdString();
+      if (path == artifactPath)
+        used = true;
+    }
+    for (int index = 0; index < tree.getNumChildren(); ++index)
+      walk(tree.getChild(index));
+  };
+  walk(persistedGraphState);
+  if (!used)
+    releaseFrozenArtifact(artifactPath);
+}
+
+void OpenYourBoxAudioProcessor::reprepareExternalArtifactsFromGraph() {
+  struct Pending {
+    juce::ValueTree node;
+    std::string path;
+    int hint = 1;
+  };
+  std::vector<Pending> pending;
+  {
+    const juce::ScopedLock lock(graphStateLock);
+    std::function<void(juce::ValueTree)> walk = [&](juce::ValueTree tree) {
+      if (tree.hasType("Node") &&
+          tree.getProperty("blackBoxOrigin").toString() == "external_load") {
+        Pending item;
+        item.node = tree;
+        item.path = tree.getProperty("artifactPath").toString().toStdString();
+        item.hint = std::max(
+            1, static_cast<int>(tree.getProperty("overrideInputChannels", 0)));
+        pending.push_back(std::move(item));
+      }
+      for (int index = 0; index < tree.getNumChildren(); ++index)
+        walk(tree.getChild(index));
+    };
+    walk(persistedGraphState);
+  }
+  for (auto &item : pending) {
+    if (item.path.empty()) {
+      item.node.setProperty("externalLoadStatus", "empty", nullptr);
+      item.node.setProperty("externalLoadErrorMessage", "", nullptr);
+      continue;
+    }
+    if (!juce::File(item.path).existsAsFile()) {
+      item.node.setProperty("externalLoadStatus", "error", nullptr);
+      item.node.setProperty("externalLoadErrorMessage",
+                            "Checkpoint file is missing", nullptr);
+      continue;
+    }
+    std::string error;
+    if (prepareExternalArtifact(item.path, item.hint, error)) {
+      item.node.setProperty("externalLoadStatus", "ready", nullptr);
+      item.node.setProperty("externalLoadErrorMessage", "", nullptr);
+    } else {
+      item.node.setProperty("externalLoadStatus", "error", nullptr);
+      item.node.setProperty("externalLoadErrorMessage", juce::String(error),
+                           nullptr);
+    }
+  }
 }
 
 void OpenYourBoxAudioProcessor::setTrainingPreview(

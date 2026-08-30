@@ -6,7 +6,7 @@ Validation guide for `015-torchscript-load-node`. Implementation details belong 
 
 - Build OpenYourBox VST (Debug or Release) with LibTorch linked as usual
 - Host or standalone runner that loads the plugin and plays audio
-- A known-good TorchScript export (pretrained RAVE `.pt` preferred), or a fixture `.pt` produced by the project’s freeze/train path that exposes `forward` (and ideally `encode`/`decode`)
+- A known-good TorchScript export (pretrained RAVE `.ts` / `.pt` preferred), or a fixture `.pt` produced by the project’s freeze/train path that exposes `forward` (and ideally `encode`/`decode`)
 - Optional: CTest target covering `LiveGraphEngine` tests
 
 ## Setup

@@ -47,6 +47,11 @@ struct NodeRendererCallbacks {
   std::function<void(std::int32_t, bool)> armChanged;
   /** @brief Invoked when the user browses a weight file for a node. */
   std::function<void(std::int32_t)> browseWeights;
+  /**
+   * @brief Invoked after a TorchScript Load node is cleared.
+   * @param artifactPath Path that is no longer referenced by that node.
+   */
+  std::function<void(const std::string &)> externalCheckpointCleared;
   /** @brief Invoked after a box is placed from the user box library.
    * @param rootId New node or group identifier.
    */

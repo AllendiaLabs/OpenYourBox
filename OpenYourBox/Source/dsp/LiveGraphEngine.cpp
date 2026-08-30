@@ -57,6 +57,14 @@ struct CompiledElement {
   std::vector<torch::Tensor> weights;
   /** @brief Frozen artifact metadata and off-thread kernel constructor. */
   std::shared_ptr<const openyourbox::dsp::FrozenBlackBoxFactory> blackBoxFactory;
+  /**
+   * @brief True when an empty external-load node dry-passthroughs audio.
+   */
+  bool dryPassthrough = false;
+  /**
+   * @brief True when an errored external-load node with no factory outputs silence.
+   */
+  bool outputSilence = false;
   /** @brief Element-local receptive field in samples. */
   std::uint64_t receptiveField = 1;
   /** @brief Mutable scalar parameter count owned by this element. */
@@ -1491,6 +1499,14 @@ void LiveGraphRuntime::executeElement(std::size_t index,
     const auto historyLength =
         static_cast<std::int64_t>(element.receptiveField - 1);
     auto *kernel = runtime.blackBoxKernels[index].get();
+    if (element.outputSilence) {
+      output = torch::zeros_like(upstream);
+      break;
+    }
+    if (element.dryPassthrough || kernel == nullptr) {
+      output = upstream;
+      break;
+    }
     const bool decodeFromLatent =
         !element.inputUseLatentTap.empty() && element.inputUseLatentTap.front() != 0;
     if (kernel != nullptr && kernel->hasEncodeDecode() && decodeFromLatent) {
@@ -2574,14 +2590,26 @@ LiveGraphEngine::compile(const graph::NodeGraph &graphDocument,
                     : -1);
           }
         }
+        if (node.blackBoxOrigin == graph::BlackBoxOrigin::externalLoad &&
+            !element.blackBoxFactory) {
+          const auto passthrough =
+              node.externalLoadStatus == graph::ExternalLoadStatus::empty ||
+              (node.externalLoadStatus == graph::ExternalLoadStatus::loading &&
+               node.runtimeArtifactPath.empty());
+          element.dryPassthrough = passthrough;
+          element.outputSilence = !passthrough;
+          element.outputChannels = std::max(1, element.inputChannels);
+          break;
+        }
         if (!element.blackBoxFactory ||
             element.blackBoxFactory->getOutputChannels() < 1)
           return failure(LiveGraphErrorCode::invalidBlackBox, node.id,
                          "Frozen hook metadata is absent or shape-incompatible");
         // FiLM Control injects bias, so hooked freeze cannot keep digital
-        // silence. Train autoload already allows that; a live Control pin must
-        // as well.
+        // silence. Train autoload and external loads already allow that; a live
+        // Control pin must as well.
         if (node.blackBoxOrigin != graph::BlackBoxOrigin::trainAutoload &&
+            node.blackBoxOrigin != graph::BlackBoxOrigin::externalLoad &&
             element.filmInputIndex < 0 &&
             !element.blackBoxFactory->hasEncodeDecode() &&
             !element.blackBoxFactory->preservesSilence())
@@ -2589,7 +2617,8 @@ LiveGraphEngine::compile(const graph::NodeGraph &graphDocument,
                          "Frozen hook metadata is absent, shape-incompatible, "
                          "or not silence-preserving");
         element.outputChannels = element.blackBoxFactory->getOutputChannels();
-        if (node.blackBoxOrigin == graph::BlackBoxOrigin::trainAutoload &&
+        if ((node.blackBoxOrigin == graph::BlackBoxOrigin::trainAutoload ||
+             node.blackBoxOrigin == graph::BlackBoxOrigin::externalLoad) &&
             element.inputChannels > 0)
           element.outputChannels = element.inputChannels;
         element.receptiveField = std::max<std::uint64_t>(
@@ -2961,13 +2990,18 @@ LiveGraphEngine::prepare(std::shared_ptr<const LiveGraphSnapshot> snapshot,
               torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCPU));
       }
       if (element.type == graph::NodeType::blackBox) {
-        runtime->blackBoxKernels[index] =
-            element.blackBoxFactory->createKernel();
-        if (!runtime->blackBoxKernels[index]) {
-          error.code = LiveGraphErrorCode::invalidBlackBox;
-          error.nodeId = element.nodeId;
-          error.message = "Frozen BlackBox kernel could not be prepared";
-          return {};
+        if (element.dryPassthrough || element.outputSilence ||
+            !element.blackBoxFactory) {
+          runtime->blackBoxKernels[index].reset();
+        } else {
+          runtime->blackBoxKernels[index] =
+              element.blackBoxFactory->createKernel();
+          if (!runtime->blackBoxKernels[index]) {
+            error.code = LiveGraphErrorCode::invalidBlackBox;
+            error.nodeId = element.nodeId;
+            error.message = "Frozen BlackBox kernel could not be prepared";
+            return {};
+          }
         }
       }
     }

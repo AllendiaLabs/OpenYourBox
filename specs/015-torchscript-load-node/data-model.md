@@ -13,7 +13,7 @@ Specialization of Gold `NodeType::blackBox` with `BlackBoxOrigin::externalLoad`.
 | `state` | `frozenGold` when ready; may remain Gold-styled while empty/error | Not Blue / not randomizable |
 | `blackBoxOrigin` | `externalLoad` | New enum value; Unfreeze disabled |
 | `label` | string | Default “TorchScript Load”; may show filename stem when loaded |
-| `artifactPath` | string | Absolute path to `.pt` / `.pth`; empty when never chosen / cleared |
+| `artifactPath` | string | Absolute path to `.pt` / `.pth` / `.ts`; empty when never chosen / cleared |
 | `weightsPath` | string | Same as artifact for provenance; optional mirror of today’s BlackBox pattern |
 | `loadStatus` | enum: `empty` \| `loading` \| `ready` \| `error` | User-visible; may be derived + cached message |
 | `loadErrorMessage` | string | Short recoverable reason when `error` |
@@ -69,7 +69,7 @@ error ──choose other──► loading
 
 ## Validation Rules
 
-1. Path must be an existing regular file (not a directory) with accepted extensions (at least `.pt`, `.pth`).
+1. Path must be an existing regular file (not a directory) with accepted extensions (at least `.pt`, `.pth`, `.ts`).
 2. Load failure → `error` + message; keep prior ready factory if any.
 3. Shape checking uses effective channel counts; illegal cables refused with mismatch feedback.
 4. If inference fails and overrides incomplete → incomplete-shape / error; connections not treated as legal until valid overrides exist.

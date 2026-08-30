@@ -7,7 +7,7 @@ Define load, prepare, swap, capability detection, and fail-safe audio behavior f
 ## File choice
 
 - UI: browse (`FileChooser`) and/or path text in property panel.
-- Accepted extensions: at least `*.pt;*.pth`.
+- Accepted extensions: at least `*.pt;*.pth;*.ts` (RAVE pretrained exports commonly use `.ts`).
 - Directory selection → reject with recoverable message (error policy if no prior model).
 - Clear control → unload to `empty` (dry passthrough).
 

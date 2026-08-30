@@ -1,6 +1,7 @@
 #include "dsp/LiveGraphEngine.h"
 #include "dsp/PqmfBank.h"
 #include "dsp/RateConv.h"
+#include "dsp/TorchScriptBlackBox.h"
 #include "library/TrainingLibrary.h"
 #include "library/UserBoxLibrary.h"
 #include "library/UserDataPaths.h"
@@ -3399,6 +3400,264 @@ int main() {
                      "restored LSTM keeps leak rate");
     passed &= expect(hasFloat(restoredRnn, "recurrent_weight_scale", 3.0f),
                      "restored RNN keeps recurrent weight scale");
+  }
+
+  {
+    using openyourbox::dsp::LiveGraphCompileError;
+    using openyourbox::dsp::LiveGraphEngine;
+    using openyourbox::graph::BlackBoxOrigin;
+    using openyourbox::graph::ExternalLoadStatus;
+    using openyourbox::graph::NodeType;
+    openyourbox::graph::NodeGraph graph;
+    const auto input = graph.addNode(NodeType::audioInput, {0.0f, 0.0f});
+    const auto load = graph.addExternalTorchScriptLoadNode({180.0f, 0.0f});
+    const auto output = graph.addNode(NodeType::audioOutput, {360.0f, 0.0f});
+    const auto *loadNode = graph.findNode(load);
+    passed &= expect(loadNode != nullptr &&
+                         loadNode->blackBoxOrigin ==
+                             BlackBoxOrigin::externalLoad &&
+                         loadNode->inputs.size() == 1 &&
+                         loadNode->outputs.size() == 1,
+                     "TorchScript Load places audio-only Gold pins");
+    passed &= expect(!graph.canUnfreeze(load),
+                     "external load cannot Unfreeze");
+    passed &= expect(
+        graph
+            .connect(graph.findNode(input)->outputs.front().id,
+                     graph.findNode(load)->inputs.front().id)
+            .accepted &&
+            graph
+                .connect(graph.findNode(load)->outputs.front().id,
+                         graph.findNode(output)->inputs.front().id)
+                .accepted,
+        "empty TorchScript Load accepts dry-passthrough cables");
+    const auto compiled = LiveGraphEngine::compile(
+        graph, options,
+        [](const openyourbox::graph::GraphNode &) { return nullptr; });
+    if (!compiled.succeeded())
+      std::cerr << "empty external load: " << compiled.error.message << '\n';
+    passed &= expect(compiled.succeeded(),
+                     "empty external load must compile as passthrough");
+    LiveGraphCompileError prepareError;
+    const auto runtime = LiveGraphEngine::prepare(compiled.snapshot, prepareError);
+    passed &= expect(runtime != nullptr, "empty external load must prepare");
+    if (runtime != nullptr) {
+      const auto inputTensor = torch::randn({1, 2, 32}, torch::kFloat32);
+      const auto outputTensor = runtime->processTensor(inputTensor);
+      passed &= expect(outputTensor.defined() &&
+                           torch::allclose(outputTensor, inputTensor),
+                       "empty external load dry-passthroughs audio");
+    }
+
+    graph.applyExternalCheckpointError(load, "invalid checkpoint");
+    const auto silenced = LiveGraphEngine::compile(
+        graph, options,
+        [](const openyourbox::graph::GraphNode &) { return nullptr; });
+    passed &= expect(silenced.succeeded(),
+                     "errored external load with no factory must compile");
+    const auto silentRuntime =
+        LiveGraphEngine::prepare(silenced.snapshot, prepareError);
+    passed &= expect(silentRuntime != nullptr, "error silence must prepare");
+    if (silentRuntime != nullptr) {
+      const auto inputTensor = torch::ones({1, 2, 32}, torch::kFloat32);
+      const auto outputTensor = silentRuntime->processTensor(inputTensor);
+      passed &= expect(outputTensor.defined() &&
+                           torch::count_nonzero(outputTensor).item<int64_t>() == 0,
+                       "error with no prior factory outputs silence");
+    }
+
+    const auto factory = std::make_shared<TestFrozenFactory>();
+    graph.applyExternalCheckpointReady(load, "test-external.pt", 2, 2, 0, false,
+                                       false, false, {}, {}, {}, "");
+    const auto readyCompiled = LiveGraphEngine::compile(
+        graph, options,
+        [factory](const openyourbox::graph::GraphNode &) { return factory; });
+    passed &= expect(readyCompiled.succeeded(),
+                     "ready external load compiles with a fixture factory");
+    const auto readyRuntime =
+        LiveGraphEngine::prepare(readyCompiled.snapshot, prepareError);
+    passed &= expect(readyRuntime != nullptr, "ready external load prepares");
+    if (readyRuntime != nullptr) {
+      const auto inputTensor = torch::randn({1, 2, 32}, torch::kFloat32);
+      const auto outputTensor = readyRuntime->processTensor(inputTensor);
+      passed &= expect(outputTensor.defined() &&
+                           !torch::equal(outputTensor, inputTensor),
+                       "ready external load forwards through the factory");
+    }
+
+    graph.applyExternalCheckpointError(load, "reload failed");
+    passed &= expect(graph.findNode(load)->runtimeArtifactPath ==
+                         "test-external.pt",
+                     "failed reload retains the prior runtime path");
+    const auto retained = LiveGraphEngine::compile(
+        graph, options, [factory](const openyourbox::graph::GraphNode &node) {
+          return node.runtimeArtifactPath.empty() ? nullptr : factory;
+        });
+    passed &= expect(retained.succeeded(),
+                     "failed reload with prior factory must keep compiling");
+
+    passed &= expect(!graph.setExternalChannelOverride(load, "input", 8),
+                     "override that breaks a stereo cable is refused");
+    passed &= expect(graph.resetExternalChannelOverrides(load),
+                     "reset restores inferred channel overrides");
+
+    const auto tree = graph.toValueTree();
+    openyourbox::graph::NodeGraph restored;
+    passed &= expect(restored.restoreFromValueTree(tree),
+                     "external_load origin round-trips through ValueTree");
+    const auto *restoredNode = restored.findNode(load);
+    passed &= expect(restoredNode != nullptr &&
+                         restoredNode->blackBoxOrigin ==
+                             BlackBoxOrigin::externalLoad &&
+                         restoredNode->artifactPath == "test-external.pt",
+                     "restored node keeps external_load path");
+
+    class TestEncodeDecodeFactory final
+        : public openyourbox::dsp::FrozenBlackBoxFactory {
+    public:
+      int getInputChannels() const noexcept override { return 2; }
+      int getOutputChannels() const noexcept override { return 2; }
+      std::uint64_t getReceptiveField() const noexcept override { return 1; }
+      std::uint64_t getParameterCount() const noexcept override { return 0; }
+      bool preservesSilence() const noexcept override { return true; }
+      bool hasEncodeDecode() const noexcept override { return true; }
+      int getLatentChannels() const noexcept override { return 2; }
+      std::unique_ptr<openyourbox::dsp::FrozenBlackBoxKernel>
+      createKernel() const override {
+        return std::make_unique<TestFrozenKernel>();
+      }
+    };
+    graph.applyExternalCheckpointReady(load, "test-rave.pt", 2, 2, 2, true,
+                                       true, false, {}, {}, {}, "");
+    const auto *rave = graph.findNode(load);
+    passed &= expect(rave != nullptr && rave->inputs.size() >= 2 &&
+                         rave->outputs.size() >= 2,
+                     "encode/decode load morphs latent pins");
+    bool hasControl = false;
+    bool hasLatent = false;
+    for (const auto &pin : rave->inputs) {
+      if (openyourbox::graph::isControlInputPin(pin))
+        hasControl = true;
+      if (openyourbox::graph::isLatentPin(pin))
+        hasLatent = true;
+    }
+    passed &= expect(hasControl && hasLatent,
+                     "conditioned encode/decode load exposes Control and latent");
+    const auto encodeFactory = std::make_shared<TestEncodeDecodeFactory>();
+    const auto encodeCompiled = LiveGraphEngine::compile(
+        graph, options,
+        [encodeFactory](const openyourbox::graph::GraphNode &) {
+          return encodeFactory;
+        });
+    if (!encodeCompiled.succeeded())
+      std::cerr << "encode fixture: " << encodeCompiled.error.message << '\n';
+    passed &= expect(encodeCompiled.succeeded(),
+                     "encode/decode fixture compiles");
+
+    graph.clearExternalCheckpoint(load);
+    const auto *cleared = graph.findNode(load);
+    passed &= expect(cleared != nullptr &&
+                         cleared->externalLoadStatus ==
+                             ExternalLoadStatus::empty &&
+                         cleared->inputs.size() == 1 &&
+                         cleared->outputs.size() == 1,
+                     "Clear returns to audio-only empty passthrough");
+  }
+
+  {
+    using openyourbox::dsp::TorchScriptBlackBoxFactory;
+    auto saveModule = [](torch::jit::Module &module, const juce::String &name) {
+      const auto file = juce::File::getSpecialLocation(juce::File::tempDirectory)
+                            .getChildFile(name);
+      file.deleteFile();
+      module.save(file.getFullPathName().toStdString());
+      return file;
+    };
+
+    torch::jit::Module identity("TraceModel");
+    identity.define(R"(
+def forward(self, x):
+    return x
+)");
+    const auto identityFile = saveModule(identity, "oyb-identity-forward.ts");
+    std::string identityError;
+    const auto identityFactory = TorchScriptBlackBoxFactory::load(
+        identityFile.getFullPathName().toStdString(), 1, 1, identityError,
+        false, false, 0);
+    passed &= expect(identityFactory != nullptr,
+                     identityError.empty()
+                         ? "1-arg identity TraceModel must load"
+                         : identityError.c_str());
+    if (identityFactory != nullptr) {
+      passed &= expect(!identityFactory->acceptsConditioning(),
+                       "1-arg TraceModel must not grow a Control pin");
+      auto kernel = identityFactory->createKernel();
+      passed &= expect(kernel != nullptr, "identity kernel must construct");
+      if (kernel != nullptr) {
+        const auto ones = torch::ones({1, 1, 32}, torch::kFloat32);
+        const auto out = kernel->forward(ones);
+        passed &= expect(out.defined() && torch::allclose(out, ones),
+                         "flexible 1-arg models must not add hop latency");
+      }
+    }
+    identityFile.deleteFile();
+
+    torch::jit::Module hop("TraceModel");
+    hop.define(R"(
+def forward(self, x):
+    return x.view(x.size(0), x.size(1), 2048)
+)");
+    const auto hopFile =
+        saveModule(hop, "guitar_iil_b2048_r48000_z16.ts");
+    std::string hopError;
+    const auto hopFactory = TorchScriptBlackBoxFactory::load(
+        hopFile.getFullPathName().toStdString(), 1, 1, hopError, false, false,
+        0);
+    if (hopFactory == nullptr)
+      std::cerr << "2048-hop TraceModel load: " << hopError << '\n';
+    passed &= expect(hopFactory != nullptr,
+                     hopError.empty()
+                         ? "RAVE-style 2048 TraceModel must load"
+                         : hopError.c_str());
+    passed &= expect(hopError.find("at most 2 argument") == std::string::npos,
+                     "1-arg TraceModel must not be probed with cond");
+    if (hopFactory != nullptr) {
+      passed &= expect(!hopFactory->acceptsConditioning(),
+                       "2048-hop TraceModel is unconditioned");
+      auto kernel = hopFactory->createKernel();
+      passed &= expect(kernel != nullptr, "2048-hop kernel must construct");
+      if (kernel != nullptr) {
+        bool blocksOk = true;
+        for (int i = 0; i < 8; ++i) {
+          const auto block = kernel->forward(
+              torch::zeros({1, 1, 256}, torch::kFloat32));
+          if (!block.defined() || block.size(2) != 256) {
+            blocksOk = false;
+            break;
+          }
+        }
+        passed &= expect(blocksOk,
+                         "2048-hop kernel must emit host-sized blocks");
+      }
+    }
+    hopFile.deleteFile();
+
+    torch::jit::Module cond("CondModel");
+    cond.define(R"(
+def forward(self, x, c):
+    return x
+)");
+    const auto condFile = saveModule(cond, "oyb-conditioned-forward.ts");
+    std::string condError;
+    const auto condFactory = TorchScriptBlackBoxFactory::load(
+        condFile.getFullPathName().toStdString(), 1, 1, condError, false, false,
+        0);
+    passed &= expect(condFactory != nullptr &&
+                         condFactory->acceptsConditioning(),
+                     condError.empty()
+                         ? "2-arg forward must still detect conditioning"
+                         : condError.c_str());
+    condFile.deleteFile();
   }
 
   if (passed)

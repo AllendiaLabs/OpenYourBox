@@ -152,6 +152,53 @@ public:
    * @return True when those methods were present at load.
    */
   [[nodiscard]] virtual bool hasEncodeDecode() const noexcept { return false; }
+
+  /**
+   * @brief Reports whether `forward` accepts a conditioning tensor.
+   * @return True when the load probe used `forward(audio, cond)`.
+   */
+  [[nodiscard]] virtual bool acceptsConditioning() const noexcept {
+    return false;
+  }
+
+  /**
+   * @brief Returns encode output channels when encode/decode exists.
+   * @return Latent width, or 0 when unknown or unused.
+   */
+  [[nodiscard]] virtual int getLatentChannels() const noexcept { return 0; }
+
+  /**
+   * @brief Reports whether compactness PCA attrs were present on the artifact.
+   */
+  [[nodiscard]] virtual bool compactnessReady() const noexcept { return false; }
+
+  /** @brief Compactness mean `[latent]`, empty when unused. */
+  [[nodiscard]] virtual const std::vector<float> &compactnessMean() const {
+    static const std::vector<float> empty;
+    return empty;
+  }
+
+  /** @brief Compactness PCA `[latent × latent]` row-major, empty when unused. */
+  [[nodiscard]] virtual const std::vector<float> &compactnessPca() const {
+    static const std::vector<float> empty;
+    return empty;
+  }
+
+  /** @brief Cumulative singular-value ratios, empty when unused. */
+  [[nodiscard]] virtual const std::vector<float> &
+  compactnessCumulative() const {
+    static const std::vector<float> empty;
+    return empty;
+  }
+
+  /**
+   * @brief Best-effort sample-rate mismatch notice captured at load.
+   * @return Empty when the artifact does not advertise a rate, or it matches.
+   */
+  [[nodiscard]] virtual const std::string &sampleRateWarning() const {
+    static const std::string empty;
+    return empty;
+  }
 };
 
 /**

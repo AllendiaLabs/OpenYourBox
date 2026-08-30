@@ -148,12 +148,16 @@ namespace {
  * @param paths Destination list.
  */
 void collectArtifactPaths(const juce::ValueTree &tree, juce::StringArray &paths) {
-  for (const auto *key : {"weightsPath", "artifactPath"}) {
-    if (!tree.hasProperty(key))
-      continue;
-    const auto current = tree.getProperty(key).toString();
-    if (current.isNotEmpty())
-      paths.addIfNotAlreadyThere(current);
+  const auto origin = tree.getProperty("blackBoxOrigin").toString();
+  const bool externalLoad = origin == "external_load";
+  if (!externalLoad) {
+    for (const auto *key : {"weightsPath", "artifactPath"}) {
+      if (!tree.hasProperty(key))
+        continue;
+      const auto current = tree.getProperty(key).toString();
+      if (current.isNotEmpty())
+        paths.addIfNotAlreadyThere(current);
+    }
   }
   for (int index = 0; index < tree.getNumChildren(); ++index)
     collectArtifactPaths(tree.getChild(index), paths);
