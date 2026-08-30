@@ -299,6 +299,8 @@ public:
     }
     encodeDecode = module.find_method("encode").has_value() &&
                    module.find_method("decode").has_value();
+    hasEncodeDistributionMethod =
+        encodeDecode && module.find_method("encode_distribution").has_value();
     try {
       if (module.hasattr("latent_mean"))
         latentMean = module.attr("latent_mean").toTensor().contiguous();
@@ -338,6 +340,36 @@ public:
     } catch (const std::exception &) {
       return {};
     }
+  }
+
+  LatentDistribution encodeDistribution(const torch::Tensor &input) override {
+    torch::InferenceMode inferenceGuard;
+    LatentDistribution distribution;
+    if (!encodeDecode)
+      return distribution;
+    if (requiresFixedBlock && input.size(2) != inferenceBlock)
+      return distribution;
+    if (hasEncodeDistributionMethod) {
+      try {
+        const auto value = module.get_method("encode_distribution")({input});
+        if (value.isTuple()) {
+          const auto tuple = value.toTuple();
+          const auto &elements = tuple->elements();
+          if (elements.size() >= 2 && elements[0].isTensor() &&
+              elements[1].isTensor()) {
+            distribution.mean = elements[0].toTensor();
+            distribution.std = elements[1].toTensor();
+            return distribution;
+          }
+        } else if (value.isTensor()) {
+          distribution.mean = value.toTensor();
+          return distribution;
+        }
+      } catch (const std::exception &) {
+      }
+    }
+    distribution.mean = encode(input);
+    return distribution;
   }
 
   torch::Tensor decode(const torch::Tensor &latent) override {
@@ -477,6 +509,8 @@ private:
   torch::Tensor pendingOutput;
   /** @brief True when encode and decode methods exist. */
   bool encodeDecode = false;
+  /** @brief True when `encode_distribution` was found on the artifact. */
+  bool hasEncodeDistributionMethod = false;
   /** @brief Optional compactness mean loaded from the artifact. */
   torch::Tensor latentMean;
   /** @brief Optional compactness PCA loaded from the artifact. */

@@ -5,6 +5,7 @@
 #include <array>
 #include <cmath>
 #include <iostream>
+#include <utility>
 
 namespace {
 /**
@@ -50,6 +51,19 @@ int main() {
   auto mean = projected.narrow(1, 0, latent);
   passed &= expect(torch::allclose(first, mean),
                    "encodeMean must match the grouped-conv μ half");
+
+  auto distribution = openyourbox::dsp::VariationalBottleneck::encodeDistribution(
+      padded, weight, 99.0f, false, {}, {}, {});
+  passed &= expect(distribution.first.defined() && distribution.second.defined(),
+                   "encodeDistribution must return μ and σ");
+  passed &= expect(torch::equal(distribution.first, first),
+                   "encodeDistribution μ must match encodeMean");
+  passed &= expect(torch::all(distribution.second > 0).item<bool>(),
+                   "encodeDistribution σ must be strictly positive");
+  const auto restd = openyourbox::dsp::VariationalBottleneck::softplusStd(
+      projected.narrow(1, latent, latent));
+  passed &= expect(torch::allclose(distribution.second, restd),
+                   "encodeDistribution σ must be softplus(scale)+eps");
 
   auto cumulative = torch::tensor({0.4f, 0.7f, 0.9f, 1.0f});
   const auto keepHigh =

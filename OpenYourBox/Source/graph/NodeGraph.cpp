@@ -2456,6 +2456,7 @@ std::string incompatibilityMessageForLink(
     return {};
   if (openyourbox::graph::isExternalLoadNode(*node) &&
       node->externalShapeIncomplete && !openyourbox::graph::isLatentPin(*destination) &&
+      !openyourbox::graph::isBiasOrScalePin(*destination) &&
       !openyourbox::graph::isControlInputPin(*destination))
     return "Enter channel overrides before connecting this checkpoint";
   if (node->type == NodeType::pqmfSynthesis &&
@@ -2790,6 +2791,7 @@ juce::ValueTree nodeToTree(const openyourbox::graph::GraphNode &node) {
   tree.setProperty("sampleRateWarning", juce::String(node.sampleRateWarning),
                    nullptr);
   tree.setProperty("fidelityPercent", node.fidelityPercent, nullptr);
+  tree.setProperty("priorMix", node.priorMix, nullptr);
   tree.setProperty("compactnessReady", node.compactnessReady, nullptr);
   storeFloatVector(tree, "latentMean", node.latentMean);
   storeFloatVector(tree, "latentPca", node.latentPca);
@@ -2957,6 +2959,8 @@ openyourbox::graph::GraphNode nodeFromTree(const juce::ValueTree &tree) {
       tree.getProperty("sampleRateWarning", "").toString().toStdString();
   node.fidelityPercent = openyourbox::graph::clampFidelity(static_cast<float>(
       tree.getProperty("fidelityPercent", defaultFidelityPercent)));
+  node.priorMix = openyourbox::graph::clampPriorMix(static_cast<float>(
+      tree.getProperty("priorMix", defaultPriorMix)));
   node.compactnessReady =
       static_cast<bool>(tree.getProperty("compactnessReady", false));
   loadFloatVector(tree, "latentMean", node.latentMean);
@@ -5546,13 +5550,15 @@ ConnectionResult NodeGraph::connect(std::int32_t firstPinId,
   const auto sourceShape = outgoingShapeOf(*this, *source);
   if (sourceNodePtr != nullptr && isExternalLoadNode(*sourceNodePtr) &&
       sourceNodePtr->externalShapeIncomplete && !isLatentPin(*source) &&
+      !isBiasOrScalePin(*source) &&
       !isControlInputPin(*source))
     return {false,
             "Enter channel overrides before connecting this checkpoint"};
   if (destinationNodePtr != nullptr &&
       isExternalLoadNode(*destinationNodePtr) &&
       destinationNodePtr->externalShapeIncomplete &&
-      !isLatentPin(*destination) && !isControlInputPin(*destination))
+      !isLatentPin(*destination) && !isBiasOrScalePin(*destination) &&
+      !isControlInputPin(*destination))
     return {false,
             "Enter channel overrides before connecting this checkpoint"};
   if (!sourceShape.isCompatibleWith(destination->shape)) {
@@ -5907,9 +5913,9 @@ bool NodeGraph::setFloatProperty(std::int32_t nodeId, const std::string &key,
   auto *node = findNode(nodeId);
   if (node == nullptr)
     return false;
-  const bool fidelityOnGold =
-      key == "fidelity" && node->state == NodeState::frozenGold;
-  if (node->state == NodeState::frozenGold && !fidelityOnGold)
+  const bool goldLiveProperty =
+      isGoldEditablePropertyKey(key) && node->state == NodeState::frozenGold;
+  if (node->state == NodeState::frozenGold && !goldLiveProperty)
     return false;
   const auto property = std::find_if(
       node->properties.begin(), node->properties.end(),
@@ -5945,6 +5951,8 @@ bool NodeGraph::setFloatProperty(std::int32_t nodeId, const std::string &key,
   property->setFloatValue(value);
   if (key == "fidelity")
     node->fidelityPercent = clampFidelity(property->floatValue);
+  if (key == "priorMix")
+    node->priorMix = clampPriorMix(property->floatValue);
   if (propertySupportsRepeatValueList(*property)) {
     property->repeatListInvalid = false;
     property->repeatListInvalidMessage.clear();
@@ -6065,9 +6073,9 @@ bool NodeGraph::setFloatPropertyRepeatValues(std::int32_t nodeId,
   auto *node = findNode(nodeId);
   if (node == nullptr)
     return false;
-  const bool fidelityOnGold =
-      key == "fidelity" && node->state == NodeState::frozenGold;
-  if (node->state == NodeState::frozenGold && !fidelityOnGold)
+  const bool goldLiveProperty =
+      isGoldEditablePropertyKey(key) && node->state == NodeState::frozenGold;
+  if (node->state == NodeState::frozenGold && !goldLiveProperty)
     return false;
   const auto property = std::find_if(
       node->properties.begin(), node->properties.end(),
@@ -6097,6 +6105,8 @@ bool NodeGraph::setFloatPropertyRepeatValues(std::int32_t nodeId,
   lastPropertyError.clear();
   if (key == "fidelity")
     node->fidelityPercent = clampFidelity(property->floatValue);
+  if (key == "priorMix")
+    node->priorMix = clampPriorMix(property->floatValue);
   refreshPropagatedPinShapes(*this);
   return true;
 }
@@ -7577,11 +7587,17 @@ void NodeGraph::applyExternalLoadSurface(GraphNode &node) {
   std::int32_t audioInId = 0;
   std::int32_t audioOutId = 0;
   std::int32_t controlId = 0;
+  std::int32_t biasId = 0;
+  std::int32_t scaleId = 0;
   std::int32_t latentInId = 0;
   std::int32_t latentOutId = 0;
   for (const auto &pin : node.inputs) {
     if (isControlInputPin(pin))
       controlId = pin.id;
+    else if (isBiasPin(pin))
+      biasId = pin.id;
+    else if (isScalePin(pin))
+      scaleId = pin.id;
     else if (isLatentPin(pin))
       latentInId = pin.id;
     else if (audioInId == 0)
@@ -7614,9 +7630,13 @@ void NodeGraph::applyExternalLoadSurface(GraphNode &node) {
   std::vector<std::int32_t> removed;
   if (!wantControl && controlId != 0)
     removed.push_back(controlId);
+  if (latentInId != 0)
+    removed.push_back(latentInId);
   if (!wantLatent) {
-    if (latentInId != 0)
-      removed.push_back(latentInId);
+    if (biasId != 0)
+      removed.push_back(biasId);
+    if (scaleId != 0)
+      removed.push_back(scaleId);
     if (latentOutId != 0)
       removed.push_back(latentOutId);
   }
@@ -7647,12 +7667,15 @@ void NodeGraph::applyExternalLoadSurface(GraphNode &node) {
     inputs.push_back(control);
   }
   if (wantLatent) {
-    if (latentInId == 0)
-      latentInId = nextPinId++;
     const auto latentWidth = std::max(0, effectiveLatentChannels(node));
-    Pin latentIn{latentInId, latentPinLabel, PinKind::input,
-                 flexibleTensorShape(latentWidth)};
-    inputs.push_back(latentIn);
+    if (biasId == 0)
+      biasId = nextPinId++;
+    if (scaleId == 0)
+      scaleId = nextPinId++;
+    inputs.push_back({biasId, biasPinLabel, PinKind::input,
+                      flexibleTensorShape(latentWidth)});
+    inputs.push_back({scaleId, scalePinLabel, PinKind::input,
+                      flexibleTensorShape(latentWidth)});
   }
   for (auto &pin : node.outputs) {
     if (pin.id == audioOutId)
@@ -7676,23 +7699,20 @@ void NodeGraph::applyExternalLoadSurface(GraphNode &node) {
   const int outCh = empty || node.externalShapeIncomplete
                         ? 0
                         : std::max(0, effectiveOutputChannels(node));
+  const int latentCh = empty || node.externalShapeIncomplete
+                           ? 0
+                           : std::max(0, effectiveLatentChannels(node));
   for (auto &pin : node.inputs) {
     if (isControlInputPin(pin))
       pin.shape = flexibleTensorShape();
-    else if (isLatentPin(pin))
-      pin.shape.channels =
-          empty || node.externalShapeIncomplete
-              ? 0
-              : std::max(0, effectiveLatentChannels(node));
+    else if (isBiasOrScalePin(pin) || isLatentPin(pin))
+      pin.shape.channels = latentCh;
     else
       pin.shape.channels = inCh;
   }
   for (auto &pin : node.outputs) {
     if (isLatentPin(pin))
-      pin.shape.channels =
-          empty || node.externalShapeIncomplete
-              ? 0
-              : std::max(0, effectiveLatentChannels(node));
+      pin.shape.channels = latentCh;
     else
       pin.shape.channels = outCh;
   }
@@ -7700,7 +7720,8 @@ void NodeGraph::applyExternalLoadSurface(GraphNode &node) {
   node.properties.erase(
       std::remove_if(node.properties.begin(), node.properties.end(),
                      [](const NodeProperty &property) {
-                       return property.key == "fidelity";
+                       return property.key == "fidelity" ||
+                              property.key == "priorMix";
                      }),
       node.properties.end());
   if (wantLatent) {
@@ -7712,6 +7733,16 @@ void NodeGraph::applyExternalLoadSurface(GraphNode &node) {
     fidelity.floatMinimum = fidelityMinimum;
     fidelity.floatMaximum = fidelityMaximum;
     node.properties.push_back(std::move(fidelity));
+    NodeProperty mix;
+    mix.key = "priorMix";
+    mix.label = "Prior Mix";
+    mix.kind = PropertyKind::real;
+    mix.floatValue = clampPriorMix(node.priorMix);
+    mix.floatMinimum = priorMixMinimum;
+    mix.floatMaximum = priorMixMaximum;
+    node.properties.push_back(std::move(mix));
+  } else {
+    node.priorMix = defaultPriorMix;
   }
 }
 
@@ -8393,9 +8424,20 @@ NodeGraph::absorbArmedChain(const TrainJobResult &result) {
   if (result.hasEncodeDecode) {
     box.outputs.push_back({nextPinId++, latentPinLabel, PinKind::output,
                            flexibleTensorShape(defaultLatentSize)});
-    box.inputs.push_back({nextPinId++, latentPinLabel, PinKind::input,
+    box.inputs.push_back({nextPinId++, biasPinLabel, PinKind::input,
+                          flexibleTensorShape(defaultLatentSize)});
+    box.inputs.push_back({nextPinId++, scalePinLabel, PinKind::input,
                           flexibleTensorShape(defaultLatentSize)});
     box.fidelityPercent = defaultFidelityPercent;
+    box.priorMix = defaultPriorMix;
+    NodeProperty mix;
+    mix.key = "priorMix";
+    mix.label = "Prior Mix";
+    mix.kind = PropertyKind::real;
+    mix.floatValue = defaultPriorMix;
+    mix.floatMinimum = priorMixMinimum;
+    mix.floatMaximum = priorMixMaximum;
+    box.properties.push_back(std::move(mix));
   }
   const auto boxId = box.id;
   const auto audioIn = box.inputs.front().id;

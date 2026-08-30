@@ -1,4 +1,5 @@
 #include "NodeRenderer.h"
+#include "FactoryPalette.h"
 
 #include <imgui.h>
 #include <imgui_internal.h>
@@ -21,72 +22,13 @@
 
 namespace ed = ax::NodeEditor;
 
+using openyourbox::graph::PaletteItem;
+using openyourbox::graph::PaletteCategory;
+using openyourbox::graph::paletteCategories;
+using openyourbox::graph::canInsertOnLink;
+using openyourbox::graph::placePaletteItem;
+
 namespace {
-struct PaletteItem {
-  const char *label;
-  openyourbox::graph::NodeType type;
-  /** @brief True when this item places a TorchScript Load Gold node. */
-  bool externalLoad = false;
-};
-
-struct PaletteCategory {
-  const char *label;
-  const PaletteItem *items;
-  std::size_t count;
-};
-
-constexpr PaletteItem effectsPaletteItems[] = {
-    {"ExpDecayReverb", openyourbox::graph::NodeType::expDecayReverb},
-    {"FilteredNoiseReverb", openyourbox::graph::NodeType::filteredNoiseReverb},
-    {"FIRFilter", openyourbox::graph::NodeType::firFilter},
-    {"ModDelay", openyourbox::graph::NodeType::modDelay},
-    {"Reverb", openyourbox::graph::NodeType::reverb},
-};
-
-constexpr PaletteItem neuralPaletteItems[] = {
-    {"LSTM", openyourbox::graph::NodeType::lstm},
-    {"RNN", openyourbox::graph::NodeType::rnn},
-    {"TorchScript Load", openyourbox::graph::NodeType::blackBox, true},
-};
-
-constexpr PaletteItem layerPaletteItems[] = {
-    {"Activation", openyourbox::graph::NodeType::activation},
-    {"BatchNorm1d", openyourbox::graph::NodeType::batchNorm},
-    {"Bottleneck", openyourbox::graph::NodeType::variationalBottleneck},
-    {"Conv1D", openyourbox::graph::NodeType::convolution},
-    {"ConvTranspose1d", openyourbox::graph::NodeType::convTranspose},
-    {"Linear", openyourbox::graph::NodeType::linear},
-    {"Math Expression", openyourbox::graph::NodeType::mathExpression},
-    {"Noise Synth", openyourbox::graph::NodeType::noiseSynthesizer},
-    {"PQMF Analysis", openyourbox::graph::NodeType::pqmfAnalysis},
-    {"PQMF Synthesis", openyourbox::graph::NodeType::pqmfSynthesis},
-    {"TCN", openyourbox::graph::NodeType::tcn},
-    {"Utility", openyourbox::graph::NodeType::merge},
-};
-
-constexpr PaletteItem sourcePaletteItems[] = {
-    {"Knob Input", openyourbox::graph::NodeType::knobInput},
-    {"XY Trackpad", openyourbox::graph::NodeType::xyTrackpad},
-};
-
-constexpr PaletteCategory paletteCategories[] = {
-    {"Effects", effectsPaletteItems, std::size(effectsPaletteItems)},
-    {"Neural / Sequence", neuralPaletteItems, std::size(neuralPaletteItems)},
-    {"Layers", layerPaletteItems, std::size(layerPaletteItems)},
-    {"Sources", sourcePaletteItems, std::size(sourcePaletteItems)},
-};
-
-/**
- * @brief Invokes @p visitor for every Factory palette item.
- * @tparam Visitor Callable `(const PaletteItem &)`.
- */
-template <typename Visitor> void forEachPaletteItem(Visitor &&visitor) {
-  for (const auto &category : paletteCategories) {
-    for (std::size_t index = 0; index < category.count; ++index)
-      visitor(category.items[index]);
-  }
-}
-
 constexpr float nodeBodyWidth = 188.0f;
 /** @brief Width reserved for right-aligned property value controls. */
 constexpr float propertyValueWidth = 76.0f;
@@ -589,33 +531,6 @@ std::string pinExpandedShapeInfo(const openyourbox::graph::Pin &pin,
                                  const std::vector<int> &repeatCounts) {
   return openyourbox::graph::formatShapeRepeatList(pin.repeatShapes, pin.shape,
                                                  repeatCounts);
-}
-
-/**
- * @brief Returns true when a palette type can be inserted onto an existing cable.
- * @param type Palette element type.
- * @return False for source-only Knob/XY elements.
- */
-bool canInsertOnLink(openyourbox::graph::NodeType type) noexcept {
-  return !openyourbox::graph::isConditioningSourceType(type) &&
-         type != openyourbox::graph::NodeType::blackBox;
-}
-
-/**
- * @brief Places a Factory palette item onto the focused canvas or group.
- * @param graph Editable graph document.
- * @param item Palette payload.
- * @param position Destination canvas coordinates.
- * @param parentGroupId Destination group, or empty for the root.
- * @return Stable identifier of the new node.
- */
-std::int32_t placePaletteItem(openyourbox::graph::NodeGraph &graph,
-                              const PaletteItem &item,
-                              juce::Point<float> position,
-                              std::optional<std::int32_t> parentGroupId) {
-  if (item.externalLoad)
-    return graph.addExternalTorchScriptLoadNode(position, parentGroupId);
-  return graph.addNode(item.type, position, parentGroupId);
 }
 
 /**
@@ -1735,31 +1650,53 @@ void NodeRenderer::handleContextMenus(NodeGraph &graph,
   if (ImGui::BeginPopup("Link Context")) {
     if (ImGui::BeginMenu("Insert")) {
       const auto *link = graph.findLink(contextLinkId);
-      forEachPaletteItem([&](const PaletteItem &item) {
-        if (!canInsertOnLink(item.type))
-          return;
-        if (ImGui::MenuItem(item.label)) {
-          juce::Point<float> position{250.0f, 140.0f};
-          if (link != nullptr) {
-            const auto sourceNode = graph.findNodeForPin(link->sourcePinId);
-            const auto destNode = graph.findNodeForPin(link->destinationPinId);
-            const auto *source =
-                sourceNode.has_value() ? graph.findNode(*sourceNode) : nullptr;
-            const auto *destination =
-                destNode.has_value() ? graph.findNode(*destNode) : nullptr;
-            if (source != nullptr && destination != nullptr)
-              position = {(source->position.x + destination->position.x) *
-                              0.5f,
-                          (source->position.y + destination->position.y) *
-                              0.5f};
+      juce::Point<float> position{250.0f, 140.0f};
+      if (link != nullptr) {
+        const auto sourceNode = graph.findNodeForPin(link->sourcePinId);
+        const auto destNode = graph.findNodeForPin(link->destinationPinId);
+        const auto *source =
+            sourceNode.has_value() ? graph.findNode(*sourceNode) : nullptr;
+        const auto *destination =
+            destNode.has_value() ? graph.findNode(*destNode) : nullptr;
+        if (source != nullptr && destination != nullptr)
+          position = {(source->position.x + destination->position.x) * 0.5f,
+                      (source->position.y + destination->position.y) * 0.5f};
+      }
+      for (const auto &category : paletteCategories) {
+        if (!ImGui::BeginMenu(category.label))
+          continue;
+        for (std::size_t index = 0; index < category.count; ++index) {
+          const auto &item = category.items[index];
+          if (!canInsertOnLink(item.type))
+            continue;
+          if (ImGui::MenuItem(item.label)) {
+            pendingLinkInsert.linkId = contextLinkId;
+            pendingLinkInsert.type = item.type;
+            pendingLinkInsert.position = position;
+            pendingLinkInsert.externalLoad = item.externalLoad;
+            pendingLinkInsert.pending = true;
+            ImGui::CloseCurrentPopup();
           }
-          pendingLinkInsert.linkId = contextLinkId;
-          pendingLinkInsert.type = item.type;
-          pendingLinkInsert.position = position;
-          pendingLinkInsert.pending = true;
-          ImGui::CloseCurrentPopup();
         }
-      });
+        ImGui::EndMenu();
+      }
+      if (activeBoxLibrary != nullptr) {
+        openyourbox::ui::UserBoxLibraryPanel::renderInsertMenu(
+            *activeBoxLibrary,
+            [this](const juce::String &id, juce::String &error) {
+              return activeBoxLibrary->loadEntrySnapshot(id, error);
+            },
+            [this, position](const juce::String &entryId,
+                             std::int32_t nestedRootId) {
+              pendingLibraryInsert.entryId = entryId;
+              pendingLibraryInsert.nestedRootId = nestedRootId;
+              pendingLibraryInsert.position = position;
+              pendingLibraryInsert.pinId = 0;
+              pendingLibraryInsert.linkId = contextLinkId;
+              pendingLibraryInsert.pending = true;
+              ImGui::CloseCurrentPopup();
+            });
+      }
       ImGui::EndMenu();
     }
     if (ImGui::MenuItem("Delete")) {
@@ -1776,21 +1713,45 @@ void NodeRenderer::handleContextMenus(NodeGraph &graph,
       const auto ownerId = graph.findNodeForPin(contextPinId);
       const auto *owner =
           ownerId.has_value() ? graph.findNode(*ownerId) : nullptr;
-      forEachPaletteItem([&](const PaletteItem &item) {
-        if (ImGui::MenuItem(item.label)) {
-          juce::Point<float> position{lastCanvasCentre.x, lastCanvasCentre.y};
-          if (!isCollapsedGroupPin(contextPinId) && owner != nullptr &&
-              pin != nullptr) {
-            const auto offset = pin->kind == PinKind::output ? 210.0f : -210.0f;
-            position = {owner->position.x + offset, owner->position.y};
+      juce::Point<float> position{lastCanvasCentre.x, lastCanvasCentre.y};
+      if (!isCollapsedGroupPin(contextPinId) && owner != nullptr &&
+          pin != nullptr) {
+        const auto offset = pin->kind == PinKind::output ? 210.0f : -210.0f;
+        position = {owner->position.x + offset, owner->position.y};
+      }
+      for (const auto &category : paletteCategories) {
+        if (!ImGui::BeginMenu(category.label))
+          continue;
+        for (std::size_t index = 0; index < category.count; ++index) {
+          const auto &item = category.items[index];
+          if (ImGui::MenuItem(item.label)) {
+            pendingPinAttach.pinId = contextPinId;
+            pendingPinAttach.type = item.type;
+            pendingPinAttach.position = position;
+            pendingPinAttach.externalLoad = item.externalLoad;
+            pendingPinAttach.pending = true;
+            ImGui::CloseCurrentPopup();
           }
-          pendingPinAttach.pinId = contextPinId;
-          pendingPinAttach.type = item.type;
-          pendingPinAttach.position = position;
-          pendingPinAttach.pending = true;
-          ImGui::CloseCurrentPopup();
         }
-      });
+        ImGui::EndMenu();
+      }
+      if (activeBoxLibrary != nullptr) {
+        openyourbox::ui::UserBoxLibraryPanel::renderInsertMenu(
+            *activeBoxLibrary,
+            [this](const juce::String &id, juce::String &error) {
+              return activeBoxLibrary->loadEntrySnapshot(id, error);
+            },
+            [this, position](const juce::String &entryId,
+                             std::int32_t nestedRootId) {
+              pendingLibraryInsert.entryId = entryId;
+              pendingLibraryInsert.nestedRootId = nestedRootId;
+              pendingLibraryInsert.position = position;
+              pendingLibraryInsert.pinId = contextPinId;
+              pendingLibraryInsert.linkId = 0;
+              pendingLibraryInsert.pending = true;
+              ImGui::CloseCurrentPopup();
+            });
+      }
       ImGui::EndMenu();
     }
     ImGui::EndPopup();
@@ -1803,10 +1764,29 @@ void NodeRenderer::handleContextMenus(NodeGraph &graph,
 void NodeRenderer::applyPendingContextActions(NodeGraph &graph) {
   if (pendingPinAttach.pending) {
     pendingPinAttach.pending = false;
-    if (const auto nodeId = graph.attachNodeToPin(
-            pendingPinAttach.pinId, pendingPinAttach.type,
-            pendingPinAttach.position);
-        nodeId.has_value()) {
+    std::optional<std::int32_t> nodeId;
+    if (pendingPinAttach.externalLoad) {
+      std::optional<std::int32_t> parent = graph.getViewport().focusedGroupId;
+      const auto ownerId = graph.findNodeForPin(pendingPinAttach.pinId);
+      if (ownerId.has_value()) {
+        if (const auto *owner = graph.findNode(*ownerId))
+          parent = owner->parentGroupId;
+      }
+      nodeId = graph.addExternalTorchScriptLoadNode(pendingPinAttach.position,
+                                                    parent);
+      auto *node = nodeId.has_value() ? graph.findNode(*nodeId) : nullptr;
+      const auto *pin = graph.findPin(pendingPinAttach.pinId);
+      if (node != nullptr && pin != nullptr) {
+        if (pin->kind == PinKind::output && !node->inputs.empty())
+          graph.connect(pendingPinAttach.pinId, node->inputs.front().id);
+        else if (pin->kind == PinKind::input && !node->outputs.empty())
+          graph.connect(node->outputs.front().id, pendingPinAttach.pinId);
+      }
+    } else {
+      nodeId = graph.attachNodeToPin(pendingPinAttach.pinId, pendingPinAttach.type,
+                                     pendingPinAttach.position);
+    }
+    if (nodeId.has_value()) {
       positionedNodeIds.erase(*nodeId);
       mutatedThisFrame = true;
       recompileThisFrame = true;
@@ -1822,6 +1802,45 @@ void NodeRenderer::applyPendingContextActions(NodeGraph &graph) {
       mutatedThisFrame = true;
       recompileThisFrame = true;
     }
+  }
+
+  if (pendingLibraryInsert.pending) {
+    pendingLibraryInsert.pending = false;
+    if (activeBoxLibrary == nullptr)
+      return;
+    juce::String error;
+    const auto rootId = activeBoxLibrary->insertBox(
+        graph, pendingLibraryInsert.entryId, pendingLibraryInsert.position,
+        error, pendingLibraryInsert.nestedRootId);
+    if (!rootId.has_value()) {
+      if (error.isNotEmpty()) {
+        transientMessage = error.toStdString();
+        transientMessageDeadline = ImGui::GetTime() + 2.5;
+        if (activeCallbacks != nullptr && activeCallbacks->showMessage)
+          activeCallbacks->showMessage(error.toStdString());
+      }
+      return;
+    }
+    positionedNodeIds.erase(*rootId);
+    positionedGroupIds.erase(*rootId);
+    adoptNewBox(graph, *rootId,
+                ImVec2(pendingLibraryInsert.position.x,
+                       pendingLibraryInsert.position.y),
+                0);
+    if (pendingLibraryInsert.pinId != 0) {
+      const auto *pin = graph.findPin(pendingLibraryInsert.pinId);
+      const auto *node = graph.findNode(*rootId);
+      if (pin != nullptr && node != nullptr) {
+        if (pin->kind == PinKind::output && !node->inputs.empty())
+          graph.connect(pendingLibraryInsert.pinId, node->inputs.front().id);
+        else if (pin->kind == PinKind::input && !node->outputs.empty())
+          graph.connect(node->outputs.front().id, pendingLibraryInsert.pinId);
+      }
+    }
+    mutatedThisFrame = true;
+    recompileThisFrame = true;
+    if (activeCallbacks != nullptr && activeCallbacks->boxPlaced)
+      activeCallbacks->boxPlaced(*rootId);
   }
 }
 
@@ -3179,7 +3198,8 @@ void NodeRenderer::renderNodeParameterEditors(
         (node.type == NodeType::variationalBottleneck ||
          node.type == NodeType::blackBox);
     const bool liveOnGold =
-        frozen && property.key == "fidelity" && !fidelityLocked;
+        frozen && isGoldEditablePropertyKey(property.key) &&
+        (property.key != "fidelity" || !fidelityLocked);
     if (liveOnGold)
       ImGui::EndDisabled();
     if (!frozen && fidelityLocked)

@@ -1119,10 +1119,15 @@ class TrainWorkerMlflowTests(unittest.TestCase):
             audio = torch.zeros(1, 1, 256)
             with torch.inference_mode():
                 forwarded = loaded.forward(audio)
+                encoded = loaded.encode(audio)
+                mu, std = loaded.encode_distribution(audio)
             self.assertEqual(forwarded.dim(), 3)
             self.assertEqual(int(forwarded.size(0)), 1)
             self.assertGreaterEqual(int(forwarded.size(1)), 1)
             self.assertGreaterEqual(int(forwarded.size(2)), 1)
+            self.assertEqual(tuple(mu.shape), tuple(encoded.shape))
+            self.assertEqual(tuple(std.shape), tuple(mu.shape))
+            self.assertTrue(bool(torch.all(std > 0)))
 
     def test_match_time_to_is_causal(self) -> None:
         """Shorter tensors left-pad; longer tensors keep the newest samples."""

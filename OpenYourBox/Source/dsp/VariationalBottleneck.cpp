@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <utility>
 
 namespace openyourbox::dsp {
 namespace {
@@ -63,17 +64,35 @@ torch::Tensor VariationalBottleneck::applyFidelity(
   return restored + latentMean.view({1, width, 1});
 }
 
-torch::Tensor VariationalBottleneck::encodeMean(
+torch::Tensor VariationalBottleneck::softplusStd(const torch::Tensor &scale) {
+  if (!scale.defined())
+    return {};
+  return torch::softplus(scale) + softplusEpsilon;
+}
+
+std::pair<torch::Tensor, torch::Tensor> VariationalBottleneck::encodeDistribution(
     const torch::Tensor &features, const torch::Tensor &groupedWeight,
     float fidelityPercent, bool compactnessReady,
     const torch::Tensor &latentMean, const torch::Tensor &latentPca,
     const torch::Tensor &cumulativeVariance) {
   auto projected = groupedHead(features, groupedWeight);
   const auto latentWidth = projected.size(1) / 2;
-  auto latent = projected.narrow(1, 0, latentWidth);
+  auto mean = projected.narrow(1, 0, latentWidth);
+  auto std = softplusStd(projected.narrow(1, latentWidth, latentWidth));
   if (compactnessReady)
-    latent = applyFidelity(latent, fidelityPercent, latentMean, latentPca,
-                           cumulativeVariance);
-  return latent;
+    mean = applyFidelity(mean, fidelityPercent, latentMean, latentPca,
+                         cumulativeVariance);
+  return {mean, std};
+}
+
+torch::Tensor VariationalBottleneck::encodeMean(
+    const torch::Tensor &features, const torch::Tensor &groupedWeight,
+    float fidelityPercent, bool compactnessReady,
+    const torch::Tensor &latentMean, const torch::Tensor &latentPca,
+    const torch::Tensor &cumulativeVariance) {
+  return encodeDistribution(features, groupedWeight, fidelityPercent,
+                            compactnessReady, latentMean, latentPca,
+                            cumulativeVariance)
+      .first;
 }
 } // namespace openyourbox::dsp

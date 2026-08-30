@@ -487,6 +487,8 @@ private:
     NodeType type = NodeType::linear;
     /** @brief Spawn position for the new element. */
     juce::Point<float> position{};
+    /** @brief True when this item places a TorchScript Load node. */
+    bool externalLoad = false;
     /** @brief Whether an attach action is queued. */
     bool pending = false;
   } pendingPinAttach;
@@ -498,9 +500,26 @@ private:
     NodeType type = NodeType::linear;
     /** @brief Spawn position for the new element. */
     juce::Point<float> position{};
+    /** @brief True when this item places a TorchScript Load node. */
+    bool externalLoad = false;
     /** @brief Whether an insert action is queued. */
     bool pending = false;
   } pendingLinkInsert;
+  /** @brief User-library insert queued from a Pin Add or Link Insert menu. */
+  struct PendingLibraryInsert {
+    /** @brief Catalog UUID. */
+    juce::String entryId;
+    /** @brief Snapshot nested root, or 0 for the saved root. */
+    std::int32_t nestedRootId = 0;
+    /** @brief Spawn position for the inserted box. */
+    juce::Point<float> position{};
+    /** @brief Pin to best-effort wire, or 0. */
+    std::int32_t pinId = 0;
+    /** @brief Link near which to place, or 0. */
+    std::int32_t linkId = 0;
+    /** @brief Whether a library insert is queued. */
+    bool pending = false;
+  } pendingLibraryInsert;
   /** @brief Session Parameters-tab binding. */
   SelectionContext selectionContext;
   /** @brief Signature of the last selection that forced the Parameters tab. */

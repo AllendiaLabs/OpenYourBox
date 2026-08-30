@@ -76,3 +76,5 @@
     - https://github.com/danielmanz17/Brave 
   - Latent jamming / prior as a partner. A second net (GRU is the live-cheap one) predicts the next z so you jam with a continuation of the corpus, not a clone of the input. MSPrior (https://github.com/caillonantoine/msprior), Caillon’s semantic-hand demo (https://caillonantoine.github.io/2023/05/16/semantic-control.html). Your audio becomes a suggestion, not a waveform to copy.
 - Latent granular resynthesis: https://arxiv.org/abs/2507.19202
+
+- I own JUCE 8 Indie. Downgrade OYB JUCE from 9 to latest 8. Update notice accordingly.  
