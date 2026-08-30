@@ -150,6 +150,23 @@ int main() {
                        {twoCh, fourCh, eightCh, twoCh, fourCh, sixteenCh}, twoCh,
                        {2, 1}, true) == "[8ch, 16ch]",
                    "repeats=1 group still lists ancestor repeats of nested last-out");
+  openyourbox::graph::ShapeSignature hop128;
+  hop128.channels = 32;
+  hop128.temporalRate = 128;
+  hop128.nBand = 8;
+  openyourbox::graph::ShapeSignature hop32 = hop128;
+  hop32.temporalRate = 32;
+  openyourbox::graph::ShapeSignature hop8 = hop128;
+  hop8.temporalRate = 8;
+  passed &= expect(collapsedGroupAttachShape({hop128, hop32, hop8}, hop128,
+                                             {3, 2, 2}, true)
+                           .temporalRate == 128,
+                   "nested residual hub that only leaked parent hops attaches "
+                   "at first-copy hop, not last-out 8");
+  passed &= expect(collapsedGroupAttachShape({hop128, hop32, hop8}, hop128,
+                                             {3}, true)
+                           .temporalRate == 8,
+                   "upsample group own axis still folds to last-out hop 8");
 
   NodeProperty channels;
   channels.key = "channels";

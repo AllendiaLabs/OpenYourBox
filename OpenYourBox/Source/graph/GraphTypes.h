@@ -909,7 +909,10 @@ foldInnerRepeatShapes(const std::vector<ShapeSignature> &shapes, int innerFold,
  * Repeats of the group itself — and of any nested groups whose repeat axes
  * leaked onto this hub — chain serially, so the parent canvas only attaches
  * to first-repeat inputs and last-repeat outputs. Those inner shapes are folded
- * away. Strict ancestor repeat axes remain as one entry per outer slot.
+ * away when the list length divides the remaining ancestor product. When it
+ * does not divide (a nested hub that only leaked parent hops), the list is
+ * left unfolded so sibling cables keep first-in of the shared ancestor slot.
+ * Strict ancestor repeat axes remain as one entry per outer slot.
  *
  * @param shapes Per-repeat shapes; may include the group's own axis and nested
  *        descendant repeat axes inside it.
@@ -933,8 +936,10 @@ inline std::vector<ShapeSignature> collapsedGroupPinShapes(
   int innerFold = 1;
   if (shapeCount > 0 && shapeCount % outerProduct == 0)
     innerFold = std::max(1, shapeCount / outerProduct);
-  else if (shapeCount > 0)
-    innerFold = shapeCount;
+  // When the list does not divide the remaining ancestor product it is not an
+  // inner serial axis (typical nested residual hubs that only leaked parent
+  // hops). Leave it unfolded so attach stays first-in of the shared ancestor
+  // slot instead of collapsing the whole list to last-out.
   return foldInnerRepeatShapes(shapes, innerFold, takeLast);
 }
 

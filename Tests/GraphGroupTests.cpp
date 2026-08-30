@@ -1,4 +1,5 @@
 #include "graph/NodeGraph.h"
+#include "library/UserBoxLibrary.h"
 
 #include <JuceHeader.h>
 
@@ -21,6 +22,86 @@ bool expect(bool condition, const char *message) {
   if (!condition)
     std::cerr << "FAIL: " << message << '\n';
   return condition;
+}
+
+/**
+ * @brief Wires a named user-library RAVE group between mono Audio In and Out.
+ * @param name Catalog display name (absent boxes are skipped).
+ * @return True when the box is missing or both host cables are accepted.
+ */
+bool testUserLibraryRaveConnectsToHostIo(const char *name) {
+  using openyourbox::graph::NodeGraph;
+  using openyourbox::graph::NodeType;
+  using openyourbox::library::UserBoxLibrary;
+  UserBoxLibrary library;
+  const auto *entry = library.findEntryByName(name);
+  if (entry == nullptr)
+    return true;
+  const auto label = std::string(name);
+  juce::String snapshotError;
+  const auto snapshot = library.loadEntrySnapshot(entry->id, snapshotError);
+  const auto snapshotMessage = snapshotError.isEmpty()
+                                   ? label + " snapshot must load"
+                                   : snapshotError.toStdString();
+  if (!expect(snapshot.isValid(), snapshotMessage.c_str()))
+    return false;
+  NodeGraph graph;
+  graph.ensureFixedHostIo();
+  std::int32_t inId = 0;
+  std::int32_t outId = 0;
+  for (const auto &node : graph.getNodes()) {
+    if (node.type == NodeType::audioInput)
+      inId = node.id;
+    if (node.type == NodeType::audioOutput)
+      outId = node.id;
+  }
+  const auto monoMessage = label + " host I/O must be mono";
+  if (!expect(inId != 0 && outId != 0 && graph.setProperty(inId, "channels", 0) &&
+                  graph.setProperty(outId, "channels", 0),
+              monoMessage.c_str()))
+    return false;
+  juce::String importError;
+  const auto rootId = graph.importBox(snapshot, {200.0f, 0.0f}, true, importError);
+  const auto importMessage = importError.isEmpty()
+                                 ? label + " library box must import"
+                                 : importError.toStdString();
+  if (!expect(rootId.has_value(), importMessage.c_str()))
+    return false;
+  const auto *group = graph.findGroup(*rootId);
+  std::int32_t inputHubId = 0;
+  std::int32_t outputHubId = 0;
+  if (group != nullptr) {
+    for (const auto memberId : group->memberIds) {
+      const auto *node = graph.findNode(memberId);
+      if (node == nullptr)
+        continue;
+      if (node->type == NodeType::groupInput)
+        inputHubId = node->id;
+      else if (node->type == NodeType::groupOutput)
+        outputHubId = node->id;
+    }
+  }
+  const auto *inNode = graph.findNode(inId);
+  const auto *outNode = graph.findNode(outId);
+  const auto *inputHub = graph.findNode(inputHubId);
+  const auto *outputHub = graph.findNode(outputHubId);
+  const auto hubMessage = label + " library box must expose I/O hubs";
+  if (!expect(inNode != nullptr && outNode != nullptr && inputHub != nullptr &&
+                  outputHub != nullptr,
+              hubMessage.c_str()))
+    return false;
+  const auto inLink =
+      graph.connect(inNode->outputs.front().id, inputHub->inputs.front().id);
+  const auto inLinkMessage = "Audio In to " + label;
+  if (!expect(inLink.accepted,
+              inLink.accepted ? inLinkMessage.c_str() : inLink.message.c_str()))
+    return false;
+  const auto outLink =
+      graph.connect(outputHub->outputs.front().id, outNode->inputs.front().id);
+  const auto outLinkMessage = label + " to Audio Out";
+  return expect(outLink.accepted,
+                outLink.accepted ? outLinkMessage.c_str()
+                                 : outLink.message.c_str());
 }
 
 /**
@@ -1635,6 +1716,275 @@ int main() {
                        "offset grouping still bookends content with I/O gaps");
     }
   }
+
+  {
+    NodeGraph hops;
+    hops.ensureFixedHostIo();
+    std::int32_t inId = 0;
+    std::int32_t outId = 0;
+    for (const auto &node : hops.getNodes()) {
+      if (node.type == NodeType::audioInput)
+        inId = node.id;
+      if (node.type == NodeType::audioOutput)
+        outId = node.id;
+    }
+    passed &= expect(inId != 0 && outId != 0 &&
+                         hops.setProperty(inId, "channels", 0) &&
+                         hops.setProperty(outId, "channels", 0),
+                     "hop-matching RAVE uses mono host I/O");
+    const auto analysis =
+        hops.addNode(NodeType::pqmfAnalysis, {120.0f, 0.0f});
+    const auto downAct =
+        hops.addNode(NodeType::activation, {260.0f, 0.0f});
+    const auto down =
+        hops.addNode(NodeType::convolution, {400.0f, 0.0f});
+    const auto upAct =
+        hops.addNode(NodeType::activation, {540.0f, 0.0f});
+    const auto up =
+        hops.addNode(NodeType::convTranspose, {680.0f, 0.0f});
+    const auto synth =
+        hops.addNode(NodeType::pqmfSynthesis, {820.0f, 0.0f});
+    passed &= expect(hops.setProperty(analysis, "n_band", 8) &&
+                         hops.setProperty(synth, "n_band", 8) &&
+                         hops.setProperty(down, "stride", 4) &&
+                         hops.setProperty(down, "channels", 8) &&
+                         hops.setProperty(up, "stride", 4) &&
+                         hops.setProperty(up, "channels", 8),
+                     "PQMF 8 with matching stride-4 encode/decode");
+    const auto *inNode = hops.findNode(inId);
+    const auto *analysisNode = hops.findNode(analysis);
+    const auto *downActNode = hops.findNode(downAct);
+    const auto *downNode = hops.findNode(down);
+    const auto *upActNode = hops.findNode(upAct);
+    const auto *upNode = hops.findNode(up);
+    const auto *synthNode = hops.findNode(synth);
+    const auto *outNode = hops.findNode(outId);
+    passed &= expect(inNode != nullptr && analysisNode != nullptr &&
+                         downActNode != nullptr && downNode != nullptr &&
+                         upActNode != nullptr && upNode != nullptr &&
+                         synthNode != nullptr && outNode != nullptr,
+                     "hop-matching RAVE nodes exist");
+    if (inNode != nullptr && analysisNode != nullptr && downActNode != nullptr &&
+        downNode != nullptr && upActNode != nullptr && upNode != nullptr &&
+        synthNode != nullptr && outNode != nullptr) {
+      passed &= expect(
+          hops.connect(downActNode->outputs.front().id,
+                       downNode->inputs.front().id)
+              .accepted &&
+              hops.connect(upActNode->outputs.front().id,
+                           upNode->inputs.front().id)
+                  .accepted,
+          "encoder and decoder bodies wire");
+      const auto encoder = hops.createGroup({downAct, down});
+      const auto decoder = hops.createGroup({upAct, up});
+      passed &= expect(encoder.accepted && decoder.accepted &&
+                           connectDeclaredThrough(hops, encoder.groupId,
+                                                  downAct, down) &&
+                           connectDeclaredThrough(hops, decoder.groupId, upAct,
+                                                  up) &&
+                           hops.setGroupRepeats(encoder.groupId, 2).accepted &&
+                           hops.setGroupRepeats(decoder.groupId, 2).accepted,
+                       "stride-4 encoder/decoder groups N=2");
+      const auto encoderIn =
+          findBoundary(hops, encoder.groupId, NodeType::groupInput);
+      const auto encoderOut =
+          findBoundary(hops, encoder.groupId, NodeType::groupOutput);
+      const auto decoderIn =
+          findBoundary(hops, decoder.groupId, NodeType::groupInput);
+      const auto decoderOut =
+          findBoundary(hops, decoder.groupId, NodeType::groupOutput);
+      const auto *encoderInHub = hops.findNode(encoderIn);
+      const auto *encoderOutHub = hops.findNode(encoderOut);
+      const auto *decoderInHub = hops.findNode(decoderIn);
+      const auto *decoderOutHub = hops.findNode(decoderOut);
+      analysisNode = hops.findNode(analysis);
+      synthNode = hops.findNode(synth);
+      inNode = hops.findNode(inId);
+      outNode = hops.findNode(outId);
+      passed &= expect(encoderInHub != nullptr && encoderOutHub != nullptr &&
+                           decoderInHub != nullptr && decoderOutHub != nullptr,
+                       "RAVE group hubs exist");
+      if (encoderInHub != nullptr && encoderOutHub != nullptr &&
+          decoderInHub != nullptr && decoderOutHub != nullptr &&
+          analysisNode != nullptr && synthNode != nullptr && inNode != nullptr &&
+          outNode != nullptr) {
+        const auto wiredIn = hops.connect(inNode->outputs.front().id,
+                                          analysisNode->inputs.front().id);
+        const auto wiredAnalysis = hops.connect(
+            analysisNode->outputs.front().id, encoderInHub->inputs.front().id);
+        const auto wiredLatent = hops.connect(
+            encoderOutHub->outputs.front().id, decoderInHub->inputs.front().id);
+        const auto wiredSynth = hops.connect(
+            decoderOutHub->outputs.front().id, synthNode->inputs.front().id);
+        const auto wiredOut = hops.connect(synthNode->outputs.front().id,
+                                           outNode->inputs.front().id);
+        passed &= expect(wiredIn.accepted, wiredIn.message.c_str());
+        passed &= expect(wiredAnalysis.accepted, wiredAnalysis.message.c_str());
+        passed &= expect(wiredLatent.accepted, wiredLatent.message.c_str());
+        passed &= expect(wiredSynth.accepted, wiredSynth.message.c_str());
+        passed &= expect(wiredOut.accepted, wiredOut.message.c_str());
+        passed &= expect(wiredIn.accepted && wiredAnalysis.accepted &&
+                             wiredLatent.accepted && wiredSynth.accepted &&
+                             wiredOut.accepted,
+                         "matching hop-product RAVE must connect between "
+                         "audio I/O");
+      }
+    }
+  }
+
+  {
+    NodeGraph nestedExit;
+    nestedExit.ensureFixedHostIo();
+    std::int32_t inId = 0;
+    std::int32_t outId = 0;
+    for (const auto &node : nestedExit.getNodes()) {
+      if (node.type == NodeType::audioInput)
+        inId = node.id;
+      if (node.type == NodeType::audioOutput)
+        outId = node.id;
+    }
+    passed &= expect(inId != 0 && outId != 0 &&
+                         nestedExit.setProperty(inId, "channels", 0) &&
+                         nestedExit.setProperty(outId, "channels", 0),
+                     "nested-exit RAVE uses mono host I/O");
+    const auto analysis =
+        nestedExit.addNode(NodeType::pqmfAnalysis, {120.0f, 0.0f});
+    const auto downAct =
+        nestedExit.addNode(NodeType::activation, {260.0f, 0.0f});
+    const auto down =
+        nestedExit.addNode(NodeType::convolution, {400.0f, 0.0f});
+    const auto upAct =
+        nestedExit.addNode(NodeType::activation, {540.0f, 0.0f});
+    const auto up =
+        nestedExit.addNode(NodeType::convTranspose, {680.0f, 0.0f});
+    const auto residualAct =
+        nestedExit.addNode(NodeType::activation, {820.0f, 0.0f});
+    const auto residualAct2 =
+        nestedExit.addNode(NodeType::activation, {900.0f, 0.0f});
+    const auto synth =
+        nestedExit.addNode(NodeType::pqmfSynthesis, {1040.0f, 0.0f});
+    passed &= expect(nestedExit.setProperty(analysis, "n_band", 8) &&
+                         nestedExit.setProperty(synth, "n_band", 8) &&
+                         nestedExit.setProperty(down, "stride", 4) &&
+                         nestedExit.setProperty(down, "channels", 8) &&
+                         nestedExit.setProperty(up, "stride", 4) &&
+                         nestedExit.setProperty(up, "channels", 8),
+                     "nested-exit PQMF 8 with matching stride-4 encode/decode");
+    const auto *downActNode = nestedExit.findNode(downAct);
+    const auto *downNode = nestedExit.findNode(down);
+    const auto *upActNode = nestedExit.findNode(upAct);
+    const auto *upNode = nestedExit.findNode(up);
+    passed &= expect(downActNode != nullptr && downNode != nullptr &&
+                         upActNode != nullptr && upNode != nullptr,
+                     "nested-exit encoder/decoder bodies exist");
+    if (downActNode != nullptr && downNode != nullptr && upActNode != nullptr &&
+        upNode != nullptr) {
+      passed &= expect(
+          nestedExit
+              .connect(downActNode->outputs.front().id,
+                       downNode->inputs.front().id)
+              .accepted &&
+              nestedExit
+                  .connect(upActNode->outputs.front().id,
+                           upNode->inputs.front().id)
+                  .accepted &&
+              nestedExit
+                  .connect(nestedExit.findNode(residualAct)->outputs.front().id,
+                           nestedExit.findNode(residualAct2)->inputs.front().id)
+                  .accepted,
+          "nested-exit encoder and decoder bodies wire");
+      const auto residual = nestedExit.createGroup({residualAct, residualAct2});
+      const auto encoder = nestedExit.createGroup({downAct, down});
+      const auto decoder =
+          nestedExit.createGroup({upAct, up, residual.groupId});
+      passed &= expect(
+          residual.accepted && encoder.accepted && decoder.accepted &&
+              connectDeclaredThrough(nestedExit, residual.groupId, residualAct,
+                                     residualAct2) &&
+              connectDeclaredThrough(nestedExit, encoder.groupId, downAct,
+                                     down) &&
+              nestedExit.setGroupRepeats(residual.groupId, 2).accepted &&
+              nestedExit.setGroupRepeats(encoder.groupId, 2).accepted,
+          "nested residual group sits on the upsample exit");
+      const auto decoderIn =
+          findBoundary(nestedExit, decoder.groupId, NodeType::groupInput);
+      const auto decoderOut =
+          findBoundary(nestedExit, decoder.groupId, NodeType::groupOutput);
+      const auto residualIn =
+          findBoundary(nestedExit, residual.groupId, NodeType::groupInput);
+      const auto residualOut =
+          findBoundary(nestedExit, residual.groupId, NodeType::groupOutput);
+      const auto encoderIn =
+          findBoundary(nestedExit, encoder.groupId, NodeType::groupInput);
+      const auto encoderOut =
+          findBoundary(nestedExit, encoder.groupId, NodeType::groupOutput);
+      const auto *decoderInHub = nestedExit.findNode(decoderIn);
+      const auto *decoderOutHub = nestedExit.findNode(decoderOut);
+      const auto *residualInHub = nestedExit.findNode(residualIn);
+      const auto *residualOutHub = nestedExit.findNode(residualOut);
+      const auto *encoderInHub = nestedExit.findNode(encoderIn);
+      const auto *encoderOutHub = nestedExit.findNode(encoderOut);
+      upNode = nestedExit.findNode(up);
+      const auto *upActHub = nestedExit.findNode(upAct);
+      const auto *analysisNode = nestedExit.findNode(analysis);
+      const auto *synthNode = nestedExit.findNode(synth);
+      const auto *inNode = nestedExit.findNode(inId);
+      const auto *outNode = nestedExit.findNode(outId);
+      passed &= expect(
+          decoderInHub != nullptr && decoderOutHub != nullptr &&
+              residualInHub != nullptr && residualOutHub != nullptr &&
+              encoderInHub != nullptr && encoderOutHub != nullptr &&
+              upNode != nullptr && upActHub != nullptr &&
+              analysisNode != nullptr && synthNode != nullptr &&
+              inNode != nullptr && outNode != nullptr,
+          "nested-exit hubs exist");
+      if (decoderInHub != nullptr && decoderOutHub != nullptr &&
+          residualInHub != nullptr && residualOutHub != nullptr &&
+          encoderInHub != nullptr && encoderOutHub != nullptr &&
+          upNode != nullptr && upActHub != nullptr && analysisNode != nullptr &&
+          synthNode != nullptr && inNode != nullptr && outNode != nullptr) {
+        passed &= expect(
+            nestedExit
+                .connect(decoderInHub->outputs.front().id,
+                         upActHub->inputs.front().id)
+                .accepted &&
+                nestedExit
+                    .connect(upNode->outputs.front().id,
+                             residualInHub->inputs.front().id)
+                    .accepted &&
+                nestedExit
+                    .connect(residualOutHub->outputs.front().id,
+                             decoderOutHub->inputs.front().id)
+                    .accepted &&
+                nestedExit.setGroupRepeats(decoder.groupId, 2).accepted,
+            "ConvTranspose feeds nested residual then decoder output");
+        const auto wiredIn = nestedExit.connect(
+            inNode->outputs.front().id, analysisNode->inputs.front().id);
+        const auto wiredAnalysis = nestedExit.connect(
+            analysisNode->outputs.front().id, encoderInHub->inputs.front().id);
+        const auto wiredLatent = nestedExit.connect(
+            encoderOutHub->outputs.front().id, decoderInHub->inputs.front().id);
+        const auto wiredSynth = nestedExit.connect(
+            decoderOutHub->outputs.front().id, synthNode->inputs.front().id);
+        const auto wiredOut = nestedExit.connect(synthNode->outputs.front().id,
+                                                 outNode->inputs.front().id);
+        passed &= expect(wiredIn.accepted, wiredIn.message.c_str());
+        passed &= expect(wiredAnalysis.accepted, wiredAnalysis.message.c_str());
+        passed &= expect(wiredLatent.accepted, wiredLatent.message.c_str());
+        passed &= expect(wiredSynth.accepted, wiredSynth.message.c_str());
+        passed &= expect(wiredOut.accepted, wiredOut.message.c_str());
+        decoderOutHub = nestedExit.findNode(decoderOut);
+        passed &= expect(
+            decoderOutHub != nullptr && !decoderOutHub->outputs.empty() &&
+                decoderOutHub->outputs.front().shape.temporalRate == 8,
+            "decoder exit is last upsample hop, not bottleneck hop");
+      }
+    }
+  }
+
+  passed &= testUserLibraryRaveConnectsToHostIo("RAVE");
+  passed &= testUserLibraryRaveConnectsToHostIo("Small-RAVE");
+  passed &= testUserLibraryRaveConnectsToHostIo("Tiny-RAVE");
 
   const auto worldBeforeUngroup = restored.worldPositionOfNode(convA);
   const auto lifted = restored.ungroup(created.groupId);

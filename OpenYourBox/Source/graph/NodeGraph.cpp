@@ -2112,47 +2112,70 @@ void refreshOutputRepeatShapes(openyourbox::graph::NodeGraph &graph) {
     }
   }
   // Hubs are flattened out of the materialized graph, so repeat their
-  // per-slot shapes from the connected member pins instead.
+  // per-slot shapes from the connected member pins instead. Nested group
+  // hubs must be filled before a parent hub copies from them, otherwise the
+  // parent keeps first-repeat hops (RAVE upsample last-out becomes bottleneck
+  // hop and cannot reach PQMF synthesis).
+  std::vector<openyourbox::graph::GraphNode *> hubNodes;
   for (auto &node : graph.getNodes()) {
-    if (node.type == openyourbox::graph::NodeType::groupOutput) {
-      const auto laneCount = std::min(node.inputs.size(), node.outputs.size());
+    if (node.type == openyourbox::graph::NodeType::groupOutput ||
+        node.type == openyourbox::graph::NodeType::groupInput)
+      hubNodes.push_back(&node);
+  }
+  std::sort(hubNodes.begin(), hubNodes.end(),
+            [&graph](const openyourbox::graph::GraphNode *left,
+                     const openyourbox::graph::GraphNode *right) {
+              const auto depthOf =
+                  [&graph](const openyourbox::graph::GraphNode *node) {
+                    if (node == nullptr || !node->parentGroupId.has_value())
+                      return 0;
+                    return groupDepth(graph, *node->parentGroupId);
+                  };
+              return depthOf(left) > depthOf(right);
+            });
+  for (auto *node : hubNodes) {
+    if (node == nullptr)
+      continue;
+    if (node->type == openyourbox::graph::NodeType::groupOutput) {
+      const auto laneCount = std::min(node->inputs.size(), node->outputs.size());
       for (std::size_t index = 0; index < laneCount; ++index) {
         for (const auto &link : graph.getLinks()) {
-          if (link.destinationPinId != node.inputs[index].id)
+          if (link.destinationPinId != node->inputs[index].id)
             continue;
           const auto *source = graph.findPin(link.sourcePinId);
           if (source != nullptr && !source->repeatShapes.empty()) {
             const auto hubRepeats =
-                std::max(1, graph.effectiveRuntimeRepeatCount(node.id));
+                std::max(1, graph.effectiveRuntimeRepeatCount(node->id));
             const auto n = static_cast<int>(source->repeatShapes.size());
             int innerFold = 1;
             if (n >= hubRepeats && n % hubRepeats == 0)
               innerFold = n / hubRepeats;
-            node.outputs[index].repeatShapes = openyourbox::graph::foldInnerRepeatShapes(
-                source->repeatShapes, innerFold, true);
+            node->outputs[index].repeatShapes =
+                openyourbox::graph::foldInnerRepeatShapes(source->repeatShapes,
+                                                          innerFold, true);
           }
           break;
         }
       }
-      applyGroupOutputExitShapes(graph, node);
-    } else if (node.type == openyourbox::graph::NodeType::groupInput) {
-      const auto laneCount = std::min(node.inputs.size(), node.outputs.size());
+      applyGroupOutputExitShapes(graph, *node);
+    } else if (node->type == openyourbox::graph::NodeType::groupInput) {
+      const auto laneCount = std::min(node->inputs.size(), node->outputs.size());
       for (std::size_t index = 0; index < laneCount; ++index) {
         for (const auto &link : graph.getLinks()) {
-          if (link.sourcePinId != node.outputs[index].id)
+          if (link.sourcePinId != node->outputs[index].id)
             continue;
           const auto *destination = graph.findPin(link.destinationPinId);
           if (destination != nullptr && !destination->repeatShapes.empty()) {
             const auto hubRepeats =
-                std::max(1, graph.effectiveRuntimeRepeatCount(node.id));
+                std::max(1, graph.effectiveRuntimeRepeatCount(node->id));
             const auto n = static_cast<int>(destination->repeatShapes.size());
             int innerFold = 1;
             if (n >= hubRepeats && n % hubRepeats == 0)
               innerFold = n / hubRepeats;
             const auto folded = openyourbox::graph::foldInnerRepeatShapes(
                 destination->repeatShapes, innerFold, false);
-            node.inputs[index].repeatShapes = folded;
-            node.outputs[index].repeatShapes = folded;
+            node->inputs[index].repeatShapes = folded;
+            node->outputs[index].repeatShapes = folded;
           }
           break;
         }
