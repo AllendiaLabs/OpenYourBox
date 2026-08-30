@@ -257,8 +257,8 @@ using FrozenBlackBoxResolver =
 struct RuntimeControlState {
   /** @brief Per-node Gain overrides used by Activation and TCN elements. */
   std::unordered_map<std::int32_t, float> gainByNodeId;
-  /** @brief Per-node Knob/XY values; XY stores X in [0] and Y in [1]. */
-  std::unordered_map<std::int32_t, std::array<float, 2>> conditioningByNodeId;
+  /** @brief Per-node Knob/XY values; Knob uses N entries, XY uses X then Y. */
+  std::unordered_map<std::int32_t, std::vector<float>> conditioningByNodeId;
   /** @brief Per-node fidelity percent for bottleneck and Gold RAVE. */
   std::unordered_map<std::int32_t, float> fidelityByNodeId;
   /** @brief Per-node prior-mix in `[0, 1]` for RAVE-capable Gold boxes. */

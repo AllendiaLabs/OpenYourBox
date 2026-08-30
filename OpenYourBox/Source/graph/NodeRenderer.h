@@ -301,7 +301,7 @@ private:
   void adoptNewBox(NodeGraph &graph, std::int32_t boxId, ImVec2 canvasPosition,
                    std::int32_t dropGroupId);
   /**
-   * @brief Draws Knob Input rotary control and numeric readout.
+   * @brief Draws Knob Input sliders and numeric readouts for every knob.
    * @param graph Message-thread graph document.
    * @param node Knob Input node.
    * @param callbacks Runtime actions owned by the plug-in editor.

@@ -2,6 +2,7 @@
 
 #include <JuceHeader.h>
 
+#include <cmath>
 #include <iostream>
 #include <string>
 #include <vector>
@@ -700,6 +701,141 @@ int main() {
                          incomingCount(graph, mixNode->inputs[0].id) == 0 &&
                          hasLink(graph, signalOut(*mixNode), signalIn(*tailNode)),
                      "deleting a source-only box must not invent a bypass");
+  }
+
+  {
+    NodeGraph graph;
+    const auto knob = graph.addNode(NodeType::knobInput, {0.0f, 0.0f});
+    const auto *node = requireNode(graph, knob);
+    passed &= expect(node != nullptr && node->outputs.size() == 2 &&
+                         node->outputs.front().label == "c" &&
+                         node->outputs.back().label == "concat" &&
+                         node->outputs.back().shape.channels == 1,
+                     "Knob Input defaults to one c pin plus concat");
+    passed &= expect(graph.setProperty(knob, "knobs", 3),
+                     "Knobs property may grow the element");
+    node = requireNode(graph, knob);
+    passed &= expect(node != nullptr && node->outputs.size() == 4 &&
+                         node->outputs[0].label == "c1" &&
+                         node->outputs[2].label == "c3" &&
+                         node->outputs.back().label == "concat" &&
+                         node->outputs.back().shape.channels == 3 &&
+                         node->detail == "3D conditioning",
+                     "three knobs expose c1–c3 plus concat");
+    const auto firstPin = node->outputs.front().id;
+    passed &=
+        expect(graph.setConditioningValue(knob, 0, 1.25f) &&
+                   graph.setConditioningValue(knob, 2, -2.5f) &&
+                   !graph.setConditioningValue(knob, 3, 0.0f),
+               "per-knob values stay in range of the current count");
+    const auto mix = graph.addNode(NodeType::merge, {120.0f, 0.0f});
+    graph.setProperty(mix, "inputs", 2);
+    node = requireNode(graph, knob);
+    const auto *mixNode = requireNode(graph, mix);
+    passed &= expect(node != nullptr && mixNode != nullptr &&
+                         node->outputs.size() >= 2 &&
+                         graph.connect(node->outputs[1].id, mixNode->inputs[0].id)
+                             .accepted,
+                     "second knob pin may connect");
+    passed &= expect(graph.setProperty(knob, "knobs", 1),
+                     "Knobs property may shrink the element");
+    node = requireNode(graph, knob);
+    mixNode = requireNode(graph, mix);
+    passed &= expect(node != nullptr && mixNode != nullptr &&
+                         node->outputs.size() == 2 &&
+                         node->outputs.front().id == firstPin &&
+                         node->outputs.front().label == "c" &&
+                         node->outputs.back().label == "concat" &&
+                         incomingCount(graph, mixNode->inputs[0].id) == 0,
+                     "shrinking knobs keeps the first pin, concat, and drops extra cables");
+    passed &= expect(graph.setProperty(knob, "knobs", 3) &&
+                         graph.setConditioningValue(knob, 1, 4.5f),
+                     "values restore after growing again");
+    auto tree = graph.toValueTree();
+    NodeGraph restored;
+    passed &= expect(restored.restoreFromValueTree(tree),
+                     "multi-knob document must restore");
+    const auto *restoredNode = restored.findNode(knob);
+    passed &= expect(
+        restoredNode != nullptr && restoredNode->outputs.size() == 4 &&
+            restoredNode->outputs.back().label == "concat" &&
+            restoredNode->outputs.back().shape.channels == 3 &&
+            restoredNode->conditioningValues.size() == 3 &&
+            std::abs(restoredNode->conditioningValues[1] - 4.5f) < 1.0e-4f,
+        "knob count, concat pin, and values survive ValueTree recall");
+  }
+
+  {
+    NodeGraph legacySource;
+    const auto knob = legacySource.addNode(NodeType::knobInput, {0.0f, 0.0f});
+    passed &= expect(legacySource.setConditioningValue(knob, 0.75f),
+                     "legacy fixture knob value");
+    auto tree = legacySource.toValueTree();
+    for (int index = 0; index < tree.getNumChildren(); ++index) {
+      auto child = tree.getChild(index);
+      if (!child.hasType("Node") || child["type"].toString() != "knob_input")
+        continue;
+      for (int propertyIndex = child.getNumChildren() - 1; propertyIndex >= 0;
+           --propertyIndex) {
+        auto nested = child.getChild(propertyIndex);
+        if (nested.hasType("Property") && nested["key"].toString() == "knobs")
+          child.removeChild(propertyIndex, nullptr);
+      }
+      child.removeProperty("conditioningValues", nullptr);
+    }
+    NodeGraph legacy;
+    passed &= expect(legacy.restoreFromValueTree(tree),
+                     "legacy single-knob documents must load");
+    const auto *legacyNode = legacy.findNode(knob);
+    int knobsValue = 0;
+    if (legacyNode != nullptr) {
+      for (const auto &property : legacyNode->properties) {
+        if (property.key == "knobs")
+          knobsValue = property.value;
+      }
+    }
+    passed &= expect(legacyNode != nullptr &&
+                         openyourbox::graph::individualConditioningOutputCount(
+                             *legacyNode) == 1 &&
+                         legacyNode->outputs.size() == 2 &&
+                         legacyNode->outputs.back().label == "concat" &&
+                         knobsValue == 1 &&
+                         std::abs(legacyNode->conditioningValue - 0.75f) <
+                             1.0e-4f,
+                     "legacy Knob Input gains a Knobs parameter of 1 and concat");
+  }
+
+  {
+    NodeGraph graph;
+    const auto pad = graph.addNode(NodeType::xyTrackpad, {0.0f, 0.0f});
+    const auto *node = requireNode(graph, pad);
+    passed &= expect(node != nullptr && node->outputs.size() == 3 &&
+                         node->outputs[0].label == "x" &&
+                         node->outputs[1].label == "y" &&
+                         node->outputs[2].label == "concat" &&
+                         node->outputs[2].shape.channels == 2,
+                     "XY Trackpad exposes x, y, and concat");
+    auto tree = graph.toValueTree();
+    for (int index = 0; index < tree.getNumChildren(); ++index) {
+      auto child = tree.getChild(index);
+      if (!child.hasType("Node") || child["type"].toString() != "xy_trackpad")
+        continue;
+      for (int pinIndex = child.getNumChildren() - 1; pinIndex >= 0;
+           --pinIndex) {
+        auto nested = child.getChild(pinIndex);
+        if (nested.hasType("Pin") && nested["kind"].toString() == "output" &&
+            nested["label"].toString() == "concat")
+          child.removeChild(pinIndex, nullptr);
+      }
+    }
+    NodeGraph restored;
+    passed &= expect(restored.restoreFromValueTree(tree),
+                     "legacy XY documents must load");
+    const auto *restoredPad = restored.findNode(pad);
+    passed &= expect(restoredPad != nullptr && restoredPad->outputs.size() == 3 &&
+                         restoredPad->outputs.back().label == "concat" &&
+                         restoredPad->outputs.back().shape.channels == 2,
+                     "legacy XY Trackpad gains a concat pin");
   }
 
   if (!passed)

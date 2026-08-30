@@ -654,10 +654,19 @@ public:
   /**
    * @brief Stores a Knob Input conditioning scalar.
    * @param nodeId Target Knob Input node.
-   * @param value Proposed conditioning value.
+   * @param value Proposed conditioning value for the first knob.
    * @return True when the node is a Knob Input.
    */
   bool setConditioningValue(std::int32_t nodeId, float value);
+
+  /**
+   * @brief Stores one Knob Input conditioning scalar by index.
+   * @param nodeId Target Knob Input node.
+   * @param index Zero-based knob index.
+   * @param value Proposed conditioning value.
+   * @return True when the node is a Knob Input and @p index is in range.
+   */
+  bool setConditioningValue(std::int32_t nodeId, int index, float value);
 
   /**
    * @brief Stores XY Trackpad conditioning scalars.
@@ -914,6 +923,22 @@ private:
    */
   void setMixerInputCount(GraphNode &node, int inputCount,
                           bool mathLabels = false);
+  /**
+   * @brief Rebuilds Knob Input output pins and values to match Knobs.
+   * @param node Knob Input node to update.
+   * @param knobCount Requested knob count, clamped to `[1, maximumKnobCount]`.
+   */
+  void setKnobOutputCount(GraphNode &node, int knobCount);
+  /**
+   * @brief Ensures the Knobs property, pins, and values agree on a Knob Input.
+   * @param node Candidate node; ignored when not a Knob Input.
+   */
+  void syncKnobInputNode(GraphNode &node);
+  /**
+   * @brief Ensures XY Trackpad keeps `x`, `y`, and a stacked concat output.
+   * @param node Candidate node; ignored when not an XY Trackpad.
+   */
+  void syncXyTrackpadNode(GraphNode &node);
   /**
    * @brief Resizes paired lanes on a Group Input/Output hub.
    * @param node Boundary hub to update.

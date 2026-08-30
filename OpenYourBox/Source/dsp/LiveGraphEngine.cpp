@@ -84,7 +84,9 @@ struct CompiledElement {
   float gain = 1.0f;
   /** @brief LeakyReLU negative slope for Activation and TCN elements. */
   float negativeSlope = openyourbox::graph::leakyReluNegativeSlopeDefault;
-  /** @brief Compiled Knob Input scalar, overridden by live controls. */
+  /** @brief Compiled Knob Input scalars, overridden by live controls. */
+  std::vector<float> conditioningValues;
+  /** @brief Compiled Knob Input first-knob scalar (mirrors values[0]). */
   float conditioningValue = 0.0f;
   /** @brief Compiled XY Trackpad X scalar. */
   float conditioningX = 0.0f;
@@ -613,9 +615,9 @@ bool hasValidPortLayout(const openyourbox::graph::GraphNode &node) noexcept {
   if (node.type == NodeType::audioOutput)
     return node.inputs.size() == 1 && node.outputs.empty();
   if (node.type == NodeType::knobInput)
-    return node.inputs.empty() && node.outputs.size() == 1;
+    return node.inputs.empty() && node.outputs.size() >= 2;
   if (node.type == NodeType::xyTrackpad)
-    return node.inputs.empty() && node.outputs.size() == 2;
+    return node.inputs.empty() && node.outputs.size() >= 3;
   if (openyourbox::graph::isMixerType(node.type) ||
       openyourbox::graph::isMathExpressionType(node.type))
     return node.inputs.size() >= 1 && node.outputs.size() == 1;
@@ -661,21 +663,6 @@ std::vector<std::int64_t> collectCompiledInputs(
     indices.push_back(static_cast<std::int64_t>(compiledSource->second));
   }
   return indices;
-}
-
-/**
- * @brief Returns the output-pin index of a source node, or -1.
- * @param node Source graph node.
- * @param pinId Source pin identifier.
- * @return Zero-based output index, or -1 when not found.
- */
-int outputPinIndex(const openyourbox::graph::GraphNode &node,
-                   std::int32_t pinId) noexcept {
-  for (int index = 0; index < static_cast<int>(node.outputs.size()); ++index) {
-    if (node.outputs[static_cast<std::size_t>(index)].id == pinId)
-      return index;
-  }
-  return -1;
 }
 
 /**
@@ -1001,8 +988,8 @@ struct LiveGraphRuntime::Impl {
   std::shared_ptr<const RuntimeControlState> controls;
   /** @brief Per-element Gain ramps for Activation and TCN. */
   std::vector<OnePoleSmoother> gainSmoothers;
-  /** @brief Per-element Knob/XY ramps; XY stores X in [0] and Y in [1]. */
-  std::vector<std::array<OnePoleSmoother, 2>> conditioningSmoothers;
+  /** @brief Per-element Knob/XY ramps, one smoother per output channel. */
+  std::vector<std::vector<OnePoleSmoother>> conditioningSmoothers;
   /** @brief Node currently executing on the single owning audio thread. */
   std::int32_t executingNodeId = 0;
   /** @brief Lock-free marker for the latest latched host-processing failure. */
@@ -1104,18 +1091,35 @@ float resolveGain(const CompiledElement &element,
   return element.gain;
 }
 
-std::array<float, 2>
+std::vector<float>
 resolveConditioning(const CompiledElement &element,
                     const openyourbox::dsp::RuntimeControlState *controls) {
+  const auto count = std::max(1, element.outputChannels);
+  std::vector<float> values(static_cast<std::size_t>(count), 0.0f);
+  if (!element.conditioningValues.empty()) {
+    for (int index = 0; index < count &&
+                        index < static_cast<int>(element.conditioningValues.size());
+         ++index)
+      values[static_cast<std::size_t>(index)] =
+          element.conditioningValues[static_cast<std::size_t>(index)];
+  } else if (element.type == openyourbox::graph::NodeType::knobInput) {
+    values.front() = element.conditioningValue;
+  } else {
+    values.front() = element.conditioningX;
+    if (count > 1)
+      values[1] = element.conditioningY;
+  }
   if (controls != nullptr) {
     const auto found = controls->conditioningByNodeId.find(element.nodeId);
-    if (found != controls->conditioningByNodeId.end())
-      return found->second;
+    if (found != controls->conditioningByNodeId.end()) {
+      for (int index = 0; index < count &&
+                          index < static_cast<int>(found->second.size());
+           ++index)
+        values[static_cast<std::size_t>(index)] =
+            found->second[static_cast<std::size_t>(index)];
+    }
   }
-  return {element.type == openyourbox::graph::NodeType::knobInput
-              ? element.conditioningValue
-              : element.conditioningX,
-          element.conditioningY};
+  return values;
 }
 
 float tensorPeak(const torch::Tensor &value) noexcept {
@@ -1159,6 +1163,21 @@ torch::Tensor matchTimeLength(const torch::Tensor &value, std::int64_t samples) 
       value, torch::nn::functional::PadFuncOptions({samples - value.size(2), 0})
                  .mode(torch::kConstant)
                  .value(0.0));
+}
+
+/**
+ * @brief Mean-only encoder spread fill before a connected or disconnected scale.
+ *
+ * Typical RAVE `encode` returns μ only. Spec 016 falls back to σ_e = 1 so scale
+ * still multiplies a real spread. Disconnected scale keeps σ = α instead, so
+ * full-forward reconstruction stays deterministic (no N(0,1) noise).
+ *
+ * @param hasScale True when a scale cable is connected this block.
+ * @param priorMix Mix amount α in `[0, 1]`.
+ * @return Spread to fill before `σ ← σ ⊙ scale`.
+ */
+float meanOnlySpreadFill(bool hasScale, float priorMix) noexcept {
+  return hasScale ? 1.0f : priorMix;
 }
 
 /**
@@ -1412,25 +1431,23 @@ void LiveGraphRuntime::executeElement(std::size_t index,
     publishOutputMeters();
     return;
   }
-  if (element.type == openyourbox::graph::NodeType::knobInput) {
+  if (element.type == openyourbox::graph::NodeType::knobInput ||
+      element.type == openyourbox::graph::NodeType::xyTrackpad) {
     const auto values = resolveConditioning(element, controls);
-    auto &smoother = runtime.conditioningSmoothers[index][0];
-    smoother.setTargetValue(values[0]);
-    output = torch::empty({1, 1, samples}, blockInput.options());
-    writeSmoothedChannel(output.data_ptr<float>(), samples, smoother);
-    publishOutputMeters();
-    return;
-  }
-  if (element.type == openyourbox::graph::NodeType::xyTrackpad) {
-    const auto values = resolveConditioning(element, controls);
-    auto &xSmoother = runtime.conditioningSmoothers[index][0];
-    auto &ySmoother = runtime.conditioningSmoothers[index][1];
-    xSmoother.setTargetValue(values[0]);
-    ySmoother.setTargetValue(values[1]);
-    output = torch::empty({1, 2, samples}, blockInput.options());
+    const auto channels = std::max(1, element.outputChannels);
+    auto &smoothers = runtime.conditioningSmoothers[index];
+    output = torch::empty({1, channels, samples}, blockInput.options());
     auto *data = output.data_ptr<float>();
-    writeSmoothedChannel(data, samples, xSmoother);
-    writeSmoothedChannel(data + samples, samples, ySmoother);
+    for (int channel = 0; channel < channels; ++channel) {
+      auto &smoother =
+          smoothers[static_cast<std::size_t>(channel)];
+      const auto target =
+          channel < static_cast<int>(values.size()) ? values[static_cast<std::size_t>(channel)]
+                                                    : 0.0f;
+      smoother.setTargetValue(target);
+      writeSmoothedChannel(data + static_cast<std::int64_t>(channel) * samples,
+                           samples, smoother);
+    }
     publishOutputMeters();
     return;
   }
@@ -1703,11 +1720,9 @@ void LiveGraphRuntime::executeElement(std::size_t index,
               if (stdEnc.defined())
                 std = stdEnc.mul(1.0f - priorMix).add(priorMix);
               else {
-                // Mean-only encode (typical RAVE `encode`): σ_e = 0 so
-                // σ = α. Disconnected scale stays 1 and reconstruction
-                // stays deterministic at priorMix = 0.
-                std = ensureWork(runtime.priorStdWork[index], priorMix);
-                std.fill_(priorMix);
+                const auto fill = meanOnlySpreadFill(hasScale, priorMix);
+                std = ensureWork(runtime.priorStdWork[index], fill);
+                std.fill_(fill);
               }
             }
 
@@ -1841,8 +1856,9 @@ void LiveGraphRuntime::executeElement(std::size_t index,
           if (stdEnc.defined())
             std = stdEnc.mul(1.0f - alpha).add(alpha);
           else {
-            std = ensureWork(runtime.priorStdWork[index], alpha);
-            std.fill_(alpha);
+            const auto fill = meanOnlySpreadFill(hasScale, alpha);
+            std = ensureWork(runtime.priorStdWork[index], fill);
+            std.fill_(fill);
           }
         }
 
@@ -2510,10 +2526,12 @@ LiveGraphEngine::compile(const graph::NodeGraph &graphDocument,
               continue;
             const auto *sourceNode = nodesById.at(source->second);
             const auto sourcePin = sourcePinIdByDestinationPin.find(pin.id);
-            if (sourceNode->type == NodeType::xyTrackpad &&
+            if ((sourceNode->type == NodeType::xyTrackpad ||
+                 sourceNode->type == NodeType::knobInput) &&
                 sourcePin != sourcePinIdByDestinationPin.end())
               element.inputExtractChannels[compiledInput] =
-                  outputPinIndex(*sourceNode, sourcePin->second);
+                  graph::conditioningExtractChannel(*sourceNode,
+                                                    sourcePin->second);
             if (sourcePin != sourcePinIdByDestinationPin.end()) {
               for (const auto &outPin : sourceNode->outputs) {
                 if (outPin.id == sourcePin->second &&
@@ -2938,9 +2956,13 @@ LiveGraphEngine::compile(const graph::NodeGraph &graphDocument,
         break;
       }
       case NodeType::knobInput:
-        element.outputChannels = 1;
+        element.outputChannels =
+            std::max(1, graph::individualConditioningOutputCount(node));
         element.outputIsConditioning = true;
-        element.conditioningValue = node.conditioningValue;
+        element.conditioningValues = node.conditioningValues;
+        if (element.conditioningValues.empty())
+          element.conditioningValues.push_back(node.conditioningValue);
+        element.conditioningValue = element.conditioningValues.front();
         break;
       case NodeType::xyTrackpad:
         element.outputChannels = 2;
@@ -3372,15 +3394,23 @@ LiveGraphEngine::prepare(std::shared_ptr<const LiveGraphSnapshot> snapshot,
       auto &gain = runtime->gainSmoothers[index];
       gain.reset(compiled.sampleRate, compiled.controlRampSeconds);
       gain.setCurrentAndTargetValue(element.gain);
-      auto &x = runtime->conditioningSmoothers[index][0];
-      auto &y = runtime->conditioningSmoothers[index][1];
-      x.reset(compiled.sampleRate, compiled.controlRampSeconds);
-      y.reset(compiled.sampleRate, compiled.controlRampSeconds);
-      const auto initialX =
-          element.type == graph::NodeType::knobInput ? element.conditioningValue
-                                                     : element.conditioningX;
-      x.setCurrentAndTargetValue(initialX);
-      y.setCurrentAndTargetValue(element.conditioningY);
+      const auto smootherCount = std::max(1, element.outputChannels);
+      auto &smoothers = runtime->conditioningSmoothers[index];
+      smoothers.resize(static_cast<std::size_t>(smootherCount));
+      for (int channel = 0; channel < smootherCount; ++channel) {
+        auto &smoother = smoothers[static_cast<std::size_t>(channel)];
+        smoother.reset(compiled.sampleRate, compiled.controlRampSeconds);
+        float initial = 0.0f;
+        if (channel < static_cast<int>(element.conditioningValues.size()))
+          initial = element.conditioningValues[static_cast<std::size_t>(channel)];
+        else if (element.type == graph::NodeType::knobInput && channel == 0)
+          initial = element.conditioningValue;
+        else if (channel == 0)
+          initial = element.conditioningX;
+        else if (channel == 1)
+          initial = element.conditioningY;
+        smoother.setCurrentAndTargetValue(initial);
+      }
     }
     runtime->hostInput = torch::empty(
         {1, compiled.inputChannels, compiled.maximumBlockSize},
@@ -3488,10 +3518,14 @@ collectRuntimeControlState(const graph::NodeGraph &graphDocument) {
       }
       controls.gainByNodeId[node.id] = graph::clampGain(gain);
     }
-    if (node.type == graph::NodeType::knobInput)
-      controls.conditioningByNodeId[node.id] = {
-          graph::clampConditioning(node.conditioningValue), 0.0f};
-    else if (node.type == graph::NodeType::xyTrackpad)
+    if (node.type == graph::NodeType::knobInput) {
+      std::vector<float> values = node.conditioningValues;
+      if (values.empty())
+        values.push_back(node.conditioningValue);
+      for (auto &value : values)
+        value = graph::clampConditioning(value);
+      controls.conditioningByNodeId[node.id] = std::move(values);
+    } else if (node.type == graph::NodeType::xyTrackpad)
       controls.conditioningByNodeId[node.id] = {
           graph::clampConditioning(node.conditioningX),
           graph::clampConditioning(node.conditioningY)};

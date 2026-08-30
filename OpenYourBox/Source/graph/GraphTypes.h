@@ -423,6 +423,33 @@ inline constexpr int maximumDilationGrowth = 16;
 inline constexpr int unlimitedPropertyMaximum = std::numeric_limits<int>::max();
 /** @brief Inclusive minimum for positive integer graph properties. */
 inline constexpr int minimumPositiveProperty = 1;
+/** @brief Default knob count on a newly placed Knob Input. */
+inline constexpr int defaultKnobCount = 1;
+/** @brief Inclusive upper bound for Knob Input knobs (and output pins). */
+inline constexpr int maximumKnobCount = 32;
+
+/**
+ * @brief Pin label for Knob Output @p index of @p count.
+ * @param index Zero-based knob index.
+ * @param count Total knobs on the element.
+ * @return `c` when @p count is 1, otherwise `c1`…`cN`.
+ */
+inline std::string knobOutputLabel(int index, int count) {
+  if (count <= 1)
+    return "c";
+  return "c" + std::to_string(index + 1);
+}
+
+/**
+ * @brief User-visible detail string for a Knob Input with @p count knobs.
+ * @param count Number of knobs (and output pins).
+ */
+inline std::string knobInputDetail(int count) {
+  const auto knobs = std::max(1, count);
+  return knobs == 1 ? std::string("1D conditioning")
+                    : std::to_string(knobs) + "D conditioning";
+}
+
 /** @brief Default Train optimization steps (steerable NAfx recipe). */
 inline constexpr int defaultTrainSteps = 2500;
 /** @brief Default RF-aware train crop length in samples. */
@@ -1334,6 +1361,8 @@ inline bool variationalBottleneckLatentIsError(int latentSize) noexcept {
 inline constexpr const char *controlPinLabel = "control";
 /** @brief User-visible label of Gold RAVE encode/decode latent pins. */
 inline constexpr const char *latentPinLabel = "latent";
+/** @brief Combined Knob/XY output that stacks every individual channel. */
+inline constexpr const char *concatPinLabel = "concat";
 /** @brief User-visible label of RAVE-capable bias input pins. */
 inline constexpr const char *biasPinLabel = "bias";
 /** @brief User-visible label of RAVE-capable scale input pins. */
@@ -1394,6 +1423,14 @@ inline bool isIrInputPin(const Pin &pin) noexcept {
  */
 inline bool isLatentPin(const Pin &pin) noexcept {
   return pin.label == latentPinLabel;
+}
+
+/**
+ * @brief Returns true for the stacked Knob/XY output that carries every channel.
+ * @param pin Endpoint to inspect.
+ */
+inline bool isConcatenatedConditioningPin(const Pin &pin) noexcept {
+  return pin.kind == PinKind::output && pin.label == concatPinLabel;
 }
 
 /**
@@ -1540,7 +1577,8 @@ inline bool propertyKeepsFixedBounds(const NodeProperty &property) noexcept {
  * @param property Node property to widen.
  */
 inline void widenIntegerPropertyBounds(NodeProperty &property) noexcept {
-  if (property.kind == PropertyKind::real || propertyKeepsFixedBounds(property))
+  if (property.kind == PropertyKind::real || propertyKeepsFixedBounds(property) ||
+      property.key == "knobs")
     return;
   property.maximum = unlimitedPropertyMaximum;
 }
@@ -1744,8 +1782,10 @@ struct GraphNode {
   std::string sourceSubgraph;
   /** @brief Persisted analysis view preference for this element. */
   AnalysisView selectedAnalysisView = AnalysisView::transfer;
-  /** @brief Current Knob Input conditioning scalar. */
+  /** @brief Current Knob Input first-knob scalar (mirrors `conditioningValues[0]`). */
   float conditioningValue = 0.0f;
+  /** @brief Per-knob conditioning scalars; length matches Knob Input outputs. */
+  std::vector<float> conditioningValues;
   /** @brief Current XY Trackpad X conditioning scalar. */
   float conditioningX = 0.0f;
   /** @brief Current XY Trackpad Y conditioning scalar. */
@@ -1835,6 +1875,39 @@ struct GraphNode {
 inline bool isExternalLoadNode(const GraphNode &node) noexcept {
   return node.type == NodeType::blackBox &&
          node.blackBoxOrigin == BlackBoxOrigin::externalLoad;
+}
+
+/**
+ * @brief Number of per-knob / per-axis outputs, excluding the concat pin.
+ * @param node Knob Input or XY Trackpad node.
+ */
+inline int individualConditioningOutputCount(const GraphNode &node) noexcept {
+  if (node.type == NodeType::xyTrackpad)
+    return 2;
+  if (node.type != NodeType::knobInput)
+    return 0;
+  int count = static_cast<int>(node.outputs.size());
+  if (count > 0 && isConcatenatedConditioningPin(node.outputs.back()))
+    --count;
+  return std::max(1, count);
+}
+
+/**
+ * @brief Channel extract for a Knob/XY source pin, or -1 to keep the full stack.
+ * @param node Conditioning source owning @p pinId.
+ * @param pinId Source pin identifier.
+ */
+inline int conditioningExtractChannel(const GraphNode &node,
+                                      std::int32_t pinId) noexcept {
+  for (int index = 0; index < static_cast<int>(node.outputs.size()); ++index) {
+    const auto &pin = node.outputs[static_cast<std::size_t>(index)];
+    if (pin.id != pinId)
+      continue;
+    if (isConcatenatedConditioningPin(pin))
+      return -1;
+    return index;
+  }
+  return -1;
 }
 
 /**
@@ -2156,8 +2229,9 @@ inline bool propertySupportsRepeatValueList(const NodeProperty &property) noexce
       property.kind != PropertyKind::real)
     return false;
   return !isBooleanPropertyKey(property.key) && property.key != "inputs" &&
-         property.key != "ports" && property.key != "expression" &&
-         property.key != "fidelity" && property.key != "priorMix";
+         property.key != "ports" && property.key != "knobs" &&
+         property.key != "expression" && property.key != "fidelity" &&
+         property.key != "priorMix";
 }
 
 /**

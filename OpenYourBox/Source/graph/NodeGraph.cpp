@@ -938,9 +938,54 @@ void normalizeConditioningPins(openyourbox::graph::GraphNode &node) {
   using openyourbox::graph::controlPinLabel;
   using openyourbox::graph::flexibleTensorShape;
   using openyourbox::graph::isControlInputPin;
-  if (openyourbox::graph::isConditioningSourceType(node.type)) {
+  using openyourbox::graph::maximumKnobCount;
+  using openyourbox::graph::minimumPositiveProperty;
+  using openyourbox::graph::NodeProperty;
+  using openyourbox::graph::NodeType;
+  if (node.type == NodeType::knobInput) {
+    int count = 0;
+    bool hasKnobsProperty = false;
+    for (auto &property : node.properties) {
+      if (property.key != "knobs")
+        continue;
+      hasKnobsProperty = true;
+      property.label = "Knobs";
+      property.kind = openyourbox::graph::PropertyKind::integer;
+      property.minimum = minimumPositiveProperty;
+      property.maximum = maximumKnobCount;
+      property.setValue(property.value);
+      count = property.value;
+      break;
+    }
+    if (!hasKnobsProperty) {
+      count = openyourbox::graph::individualConditioningOutputCount(node);
+      NodeProperty knobs;
+      knobs.key = "knobs";
+      knobs.label = "Knobs";
+      knobs.value = count;
+      knobs.minimum = minimumPositiveProperty;
+      knobs.maximum = maximumKnobCount;
+      node.properties.insert(node.properties.begin(), std::move(knobs));
+    }
+    count = std::clamp(std::max(count, 1), minimumPositiveProperty,
+                       maximumKnobCount);
+    if (node.conditioningValues.empty())
+      node.conditioningValues.push_back(
+          openyourbox::graph::clampConditioning(node.conditioningValue));
+    node.detail = openyourbox::graph::knobInputDetail(count);
     for (auto &pin : node.outputs) {
-      if (pin.shape.channels <= 0)
+      if (openyourbox::graph::isConcatenatedConditioningPin(pin))
+        pin.shape.channels = count;
+      else if (pin.shape.channels <= 0)
+        pin.shape.channels = 1;
+    }
+    return;
+  }
+  if (node.type == NodeType::xyTrackpad) {
+    for (auto &pin : node.outputs) {
+      if (openyourbox::graph::isConcatenatedConditioningPin(pin))
+        pin.shape.channels = 2;
+      else if (pin.shape.channels <= 0)
         pin.shape.channels = 1;
     }
     return;
@@ -1206,6 +1251,8 @@ int resolvePinChannels(const openyourbox::graph::NodeGraph &graph,
   }
   case NodeType::knobInput:
   case NodeType::xyTrackpad:
+    if (openyourbox::graph::isConcatenatedConditioningPin(*pin))
+      return openyourbox::graph::individualConditioningOutputCount(*node);
     return 1;
   case NodeType::pqmfAnalysis: {
     const auto nBand = readNodeProperty(*node, "n_band", defaultPqmfBands);
@@ -2750,6 +2797,12 @@ juce::ValueTree nodeToTree(const openyourbox::graph::GraphNode &node) {
   tree.setProperty("analysisView", static_cast<int>(node.selectedAnalysisView),
                    nullptr);
   tree.setProperty("conditioningValue", node.conditioningValue, nullptr);
+  if (!node.conditioningValues.empty()) {
+    juce::StringArray knobs;
+    for (const auto value : node.conditioningValues)
+      knobs.add(juce::String(value, 6));
+    tree.setProperty("conditioningValues", knobs.joinIntoString(","), nullptr);
+  }
   tree.setProperty("conditioningX", node.conditioningX, nullptr);
   tree.setProperty("conditioningY", node.conditioningY, nullptr);
   tree.setProperty("armedForTraining", node.armedForTraining, nullptr);
@@ -2917,6 +2970,20 @@ openyourbox::graph::GraphNode nodeFromTree(const juce::ValueTree &tree) {
       static_cast<int>(tree.getProperty("analysisView", 0)), 0, 3));
   node.conditioningValue = openyourbox::graph::clampConditioning(
       static_cast<float>(tree.getProperty("conditioningValue", 0.0)));
+  if (tree.hasProperty("conditioningValues")) {
+    const auto tokens = juce::StringArray::fromTokens(
+        tree.getProperty("conditioningValues").toString(), ",", "");
+    node.conditioningValues.clear();
+    node.conditioningValues.reserve(static_cast<std::size_t>(tokens.size()));
+    for (const auto &token : tokens)
+      node.conditioningValues.push_back(
+          openyourbox::graph::clampConditioning(token.getFloatValue()));
+  }
+  if (node.conditioningValues.empty())
+    node.conditioningValues.push_back(node.conditioningValue);
+  else
+    node.conditioningValue =
+        openyourbox::graph::clampConditioning(node.conditioningValues.front());
   node.conditioningX = openyourbox::graph::clampConditioning(
       static_cast<float>(tree.getProperty("conditioningX", 0.0)));
   node.conditioningY = openyourbox::graph::clampConditioning(
@@ -5684,6 +5751,8 @@ bool NodeGraph::setProperty(std::int32_t nodeId, const std::string &key,
   const auto previousRepeatValues = property->repeatIntValues;
   const auto previousPreserveIn = property->preserveInBound;
   const auto previousInvalid = property->repeatListInvalid;
+  const auto previousConditioningValues = node->conditioningValues;
+  const auto previousDetail = node->detail;
   if (key == "ports" && isGroupBoundaryType(node->type)) {
     if (!setGroupBoundaryPortCount(*node, value))
       return false;
@@ -5769,6 +5838,10 @@ bool NodeGraph::setProperty(std::int32_t nodeId, const std::string &key,
       pin.shape.channels = property->value;
   } else if (key == "inputs" && isMixerType(node->type)) {
     setMixerInputCount(*node, property->value);
+  } else if (key == "knobs" && node->type == NodeType::knobInput) {
+    property->value = std::clamp(property->value, minimumPositiveProperty,
+                                 maximumKnobCount);
+    setKnobOutputCount(*node, property->value);
   } else if (key == "inputs" && isMathExpressionType(node->type)) {
     const auto parsed = parseExpression(mathExpressionText(*node),
                                         ExpressionIdentContext::mathInputs,
@@ -5876,6 +5949,13 @@ bool NodeGraph::setProperty(std::int32_t nodeId, const std::string &key,
       updateConvTransposeDetail(*node);
     if (key == "mode" && node->type == NodeType::merge)
       updateMergeOutputShape(*this, *node);
+    if (key == "knobs" && node->type == NodeType::knobInput) {
+      setKnobOutputCount(*node, previousValue);
+      node->conditioningValues = previousConditioningValues;
+      if (!node->conditioningValues.empty())
+        node->conditioningValue = node->conditioningValues.front();
+      node->detail = previousDetail;
+    }
     refreshPropagatedPinShapes(*this);
   };
   for (const auto &candidate : nodes) {
@@ -6114,10 +6194,23 @@ bool NodeGraph::setFloatPropertyRepeatValues(std::int32_t nodeId,
 }
 
 bool NodeGraph::setConditioningValue(std::int32_t nodeId, float value) {
+  return setConditioningValue(nodeId, 0, value);
+}
+
+bool NodeGraph::setConditioningValue(std::int32_t nodeId, int index,
+                                     float value) {
   auto *node = findNode(nodeId);
   if (node == nullptr || node->type != NodeType::knobInput)
     return false;
-  node->conditioningValue = clampConditioning(value);
+  const auto count =
+      std::max(1, individualConditioningOutputCount(*node));
+  if (index < 0 || index >= count)
+    return false;
+  if (static_cast<int>(node->conditioningValues.size()) < count)
+    node->conditioningValues.resize(static_cast<std::size_t>(count), 0.0f);
+  node->conditioningValues[static_cast<std::size_t>(index)] =
+      clampConditioning(value);
+  node->conditioningValue = node->conditioningValues.front();
   return true;
 }
 
@@ -6681,6 +6774,10 @@ bool NodeGraph::restoreFromValueTree(const juce::ValueTree &tree) {
     ensureGroupBoundaryNodes(groupId, true);
   for (auto &node : nodes)
     validateAuthoredRepeatLists(node.id);
+  for (auto &node : nodes)
+    syncKnobInputNode(node);
+  for (auto &node : nodes)
+    syncXyTrackpadNode(node);
   ensureFixedHostIo();
   refreshAllMergeOutputShapes(*this);
   for (auto &node : nodes) {
@@ -6959,6 +7056,10 @@ NodeGraph::importBox(const juce::ValueTree &snapshot, juce::Point<float> positio
             });
   for (const auto groupId : importedGroupIds)
     ensureGroupBoundaryNodes(groupId, true);
+  for (auto &node : nodes)
+    syncKnobInputNode(node);
+  for (auto &node : nodes)
+    syncXyTrackpadNode(node);
   refreshAllMergeOutputShapes(*this);
   return newRoot;
 }
@@ -7256,14 +7357,20 @@ GraphNode NodeGraph::makeNode(NodeType type, juce::Point<float> position) {
     break;
   case NodeType::knobInput:
     node.label = "Knob Input";
-    node.detail = "1D conditioning";
+    node.detail = knobInputDetail(defaultKnobCount);
+    node.properties.push_back(property("knobs", "Knobs", defaultKnobCount,
+                                       minimumPositiveProperty,
+                                       maximumKnobCount));
     addOutput("c", 1);
+    addOutput(concatPinLabel, 1);
+    node.conditioningValues = {0.0f};
     break;
   case NodeType::xyTrackpad:
     node.label = "XY Trackpad";
     node.detail = "Independent X and Y outputs";
     addOutput("x", 1);
     addOutput("y", 1);
+    addOutput(concatPinLabel, 2);
     break;
   case NodeType::blackBox:
     node.label = "Frozen Selection";
@@ -7947,6 +8054,155 @@ void NodeGraph::setMixerInputCount(GraphNode &node, int inputCount,
     node.inputs[static_cast<std::size_t>(index)].label =
         mathLabels ? "x" + std::to_string(index + 1)
                    : "in " + std::to_string(index + 1);
+}
+
+void NodeGraph::setKnobOutputCount(GraphNode &node, int knobCount) {
+  if (node.type != NodeType::knobInput)
+    return;
+  const auto count =
+      std::clamp(knobCount, minimumPositiveProperty, maximumKnobCount);
+  Pin concatPin;
+  bool hadConcat = false;
+  std::vector<Pin> individuals;
+  individuals.reserve(node.outputs.size());
+  for (auto &pin : node.outputs) {
+    if (isConcatenatedConditioningPin(pin)) {
+      if (!hadConcat) {
+        concatPin = pin;
+        hadConcat = true;
+      } else {
+        const auto pinId = pin.id;
+        links.erase(std::remove_if(links.begin(), links.end(),
+                                   [pinId](const GraphLink &link) {
+                                     return link.sourcePinId == pinId ||
+                                            link.destinationPinId == pinId;
+                                   }),
+                    links.end());
+      }
+      continue;
+    }
+    individuals.push_back(std::move(pin));
+  }
+  node.outputs = std::move(individuals);
+  while (static_cast<int>(node.outputs.size()) > count) {
+    const auto pinId = node.outputs.back().id;
+    links.erase(std::remove_if(links.begin(), links.end(),
+                               [pinId](const GraphLink &link) {
+                                 return link.sourcePinId == pinId ||
+                                        link.destinationPinId == pinId;
+                               }),
+                links.end());
+    node.outputs.pop_back();
+  }
+  while (static_cast<int>(node.outputs.size()) < count)
+    node.outputs.push_back(
+        {nextPinId++, "", PinKind::output, ShapeSignature{1}});
+  for (int index = 0; index < count; ++index) {
+    auto &pin = node.outputs[static_cast<std::size_t>(index)];
+    pin.label = knobOutputLabel(index, count);
+    pin.shape.channels = 1;
+  }
+  if (hadConcat) {
+    concatPin.label = concatPinLabel;
+    concatPin.shape.channels = count;
+    node.outputs.push_back(std::move(concatPin));
+  } else {
+    node.outputs.push_back(
+        {nextPinId++, concatPinLabel, PinKind::output, ShapeSignature{count}});
+  }
+  if (node.conditioningValues.empty())
+    node.conditioningValues.push_back(clampConditioning(node.conditioningValue));
+  while (static_cast<int>(node.conditioningValues.size()) < count)
+    node.conditioningValues.push_back(0.0f);
+  if (static_cast<int>(node.conditioningValues.size()) > count)
+    node.conditioningValues.resize(static_cast<std::size_t>(count));
+  for (auto &value : node.conditioningValues)
+    value = clampConditioning(value);
+  node.conditioningValue = node.conditioningValues.front();
+  node.detail = knobInputDetail(count);
+}
+
+void NodeGraph::syncKnobInputNode(GraphNode &node) {
+  if (node.type != NodeType::knobInput)
+    return;
+  int count = readNodeProperty(node, "knobs", 0);
+  if (count < 1)
+    count = individualConditioningOutputCount(node);
+  count = std::clamp(count, minimumPositiveProperty, maximumKnobCount);
+  bool hasKnobsProperty = false;
+  for (auto &property : node.properties) {
+    if (property.key != "knobs")
+      continue;
+    hasKnobsProperty = true;
+    property.minimum = minimumPositiveProperty;
+    property.maximum = maximumKnobCount;
+    property.setValue(count);
+    break;
+  }
+  if (!hasKnobsProperty) {
+    NodeProperty knobs;
+    knobs.key = "knobs";
+    knobs.label = "Knobs";
+    knobs.value = count;
+    knobs.minimum = minimumPositiveProperty;
+    knobs.maximum = maximumKnobCount;
+    node.properties.insert(node.properties.begin(), std::move(knobs));
+  }
+  setKnobOutputCount(node, count);
+}
+
+void NodeGraph::syncXyTrackpadNode(GraphNode &node) {
+  if (node.type != NodeType::xyTrackpad)
+    return;
+  Pin concatPin;
+  bool hadConcat = false;
+  std::vector<Pin> axes;
+  axes.reserve(node.outputs.size());
+  for (auto &pin : node.outputs) {
+    if (isConcatenatedConditioningPin(pin)) {
+      if (!hadConcat) {
+        concatPin = pin;
+        hadConcat = true;
+      } else {
+        const auto pinId = pin.id;
+        links.erase(std::remove_if(links.begin(), links.end(),
+                                   [pinId](const GraphLink &link) {
+                                     return link.sourcePinId == pinId ||
+                                            link.destinationPinId == pinId;
+                                   }),
+                    links.end());
+      }
+      continue;
+    }
+    axes.push_back(std::move(pin));
+  }
+  while (axes.size() < 2)
+    axes.push_back({nextPinId++, "", PinKind::output, ShapeSignature{1}});
+  if (axes.size() > 2) {
+    for (std::size_t index = 2; index < axes.size(); ++index) {
+      const auto pinId = axes[index].id;
+      links.erase(std::remove_if(links.begin(), links.end(),
+                                 [pinId](const GraphLink &link) {
+                                   return link.sourcePinId == pinId ||
+                                          link.destinationPinId == pinId;
+                                 }),
+                  links.end());
+    }
+    axes.resize(2);
+  }
+  axes[0].label = "x";
+  axes[0].shape.channels = 1;
+  axes[1].label = "y";
+  axes[1].shape.channels = 1;
+  if (hadConcat) {
+    concatPin.label = concatPinLabel;
+    concatPin.shape.channels = 2;
+    axes.push_back(std::move(concatPin));
+  } else {
+    axes.push_back(
+        {nextPinId++, concatPinLabel, PinKind::output, ShapeSignature{2}});
+  }
+  node.outputs = std::move(axes);
 }
 
 bool NodeGraph::setGroupBoundaryPortCount(GraphNode &node, int portCount) {

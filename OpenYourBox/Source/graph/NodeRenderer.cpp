@@ -1280,20 +1280,44 @@ void NodeRenderer::renderNode(NodeGraph &graph, GraphNode &node,
 
 void NodeRenderer::renderKnobControl(NodeGraph &graph, GraphNode &node,
                                      const NodeRendererCallbacks &callbacks) {
-  auto value = node.conditioningValue;
-  ImGui::SetNextItemWidth(76.0f);
-  if (ImGui::VSliderFloat("##knob", ImVec2(28.0f, 72.0f), &value,
-                          conditioningMinimum, conditioningMaximum, "")) {
-    graph.setConditioningValue(node.id, value);
-    if (callbacks.knobChanged)
-      callbacks.knobChanged(node.id, node.conditioningValue);
+  const auto count = std::max(1, individualConditioningOutputCount(node));
+  const float columnWidth = 44.0f;
+  const auto available = std::max(columnWidth, ImGui::GetContentRegionAvail().x);
+  const auto perRow =
+      std::max(1, static_cast<int>(available / columnWidth));
+  for (int index = 0; index < count; ++index) {
+    ImGui::PushID(index);
+    if (index > 0 && (index % perRow) != 0)
+      ImGui::SameLine();
+    ImGui::BeginGroup();
+    const auto *label =
+        index < static_cast<int>(node.outputs.size())
+            ? node.outputs[static_cast<std::size_t>(index)].label.c_str()
+            : "c";
+    ImGui::TextUnformatted(label);
+    float value = 0.0f;
+    if (index < static_cast<int>(node.conditioningValues.size()))
+      value = node.conditioningValues[static_cast<std::size_t>(index)];
+    else if (index == 0)
+      value = node.conditioningValue;
+    if (ImGui::VSliderFloat("##knob", ImVec2(28.0f, 72.0f), &value,
+                            conditioningMinimum, conditioningMaximum, "")) {
+      graph.setConditioningValue(node.id, index, value);
+      if (callbacks.knobChanged)
+        callbacks.knobChanged(node.id, value);
+    }
+    if (ImGui::IsItemActive()) {
+      patchGestureHeldThisFrame = true;
+      patchGestureLabel = "Parameter edit";
+    }
+    ImGui::Text("%.2f", static_cast<double>(
+                            index < static_cast<int>(node.conditioningValues.size())
+                                ? node.conditioningValues[static_cast<std::size_t>(
+                                      index)]
+                                : node.conditioningValue));
+    ImGui::EndGroup();
+    ImGui::PopID();
   }
-  if (ImGui::IsItemActive()) {
-    patchGestureHeldThisFrame = true;
-    patchGestureLabel = "Parameter edit";
-  }
-  ImGui::SameLine();
-  ImGui::Text("%.2f", static_cast<double>(node.conditioningValue));
 }
 
 void NodeRenderer::renderXyPad(NodeGraph &graph, GraphNode &node,
@@ -3241,9 +3265,7 @@ void NodeRenderer::renderNodeParameterEditors(
     bool readOnly) {
   if (readOnly)
     ImGui::BeginDisabled();
-  if (node.type == NodeType::knobInput)
-    renderKnobControl(graph, node, callbacks);
-  else if (node.type == NodeType::xyTrackpad)
+  if (node.type == NodeType::xyTrackpad)
     renderXyPad(graph, node, callbacks);
 
   int convStride = 1;
@@ -3716,6 +3738,9 @@ void NodeRenderer::renderNodeParameterEditors(
   }
   if (frozen)
     ImGui::EndDisabled();
+
+  if (node.type == NodeType::knobInput)
+    renderKnobControl(graph, node, callbacks);
 
   if (node.type == NodeType::convolution ||
       node.type == NodeType::convTranspose) {

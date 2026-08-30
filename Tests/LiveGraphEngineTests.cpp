@@ -397,15 +397,19 @@ public:
   std::shared_ptr<torch::Tensor> lastDecode;
   /** @brief True when encode returns a unit spread instead of zero spread. */
   bool unitSpread = false;
+  /** @brief True when encode_distribution leaves σ undefined (mean-only encode). */
+  bool omitSpread = false;
 
   /**
    * @brief Adopts the shared decode probe.
    * @param decodeTap Destination for the latest decoded latent.
    * @param useUnitSpread True to return σ=1 from encode_distribution.
+   * @param leaveSpreadUndefined True to mimic typical RAVE `encode` (μ only).
    */
   TestFixedHopRaveKernel(std::shared_ptr<torch::Tensor> decodeTap,
-                         bool useUnitSpread)
-      : lastDecode(std::move(decodeTap)), unitSpread(useUnitSpread) {}
+                         bool useUnitSpread, bool leaveSpreadUndefined = false)
+      : lastDecode(std::move(decodeTap)), unitSpread(useUnitSpread),
+        omitSpread(leaveSpreadUndefined) {}
 
   /** @brief Passes complete eight-sample blocks through unchanged. */
   torch::Tensor forward(const torch::Tensor &input) override { return input; }
@@ -426,6 +430,10 @@ public:
     if (!mean.defined()) {
       std = torch::Tensor{};
       return false;
+    }
+    if (omitSpread) {
+      std = torch::Tensor{};
+      return true;
     }
     std = unitSpread ? torch::ones_like(mean) : torch::zeros_like(mean);
     return true;
@@ -455,6 +463,8 @@ public:
   std::shared_ptr<torch::Tensor> lastDecode = std::make_shared<torch::Tensor>();
   /** @brief True when kernels should expose an encoded unit spread. */
   bool unitSpread = false;
+  /** @brief True when kernels should omit σ, matching mean-only RAVE encode. */
+  bool omitSpread = false;
 
   /** @brief Returns the stereo fixture input width. */
   int getInputChannels() const noexcept override { return 2; }
@@ -480,7 +490,8 @@ public:
   /** @brief Creates one fixed-hop regression kernel. */
   std::unique_ptr<openyourbox::dsp::FrozenBlackBoxKernel>
   createKernel() const override {
-    return std::make_unique<TestFixedHopRaveKernel>(lastDecode, unitSpread);
+    return std::make_unique<TestFixedHopRaveKernel>(lastDecode, unitSpread,
+                                                    omitSpread);
   }
 };
 
@@ -1487,6 +1498,193 @@ int main() {
                        std::abs(restoredKnobNode->conditioningValue - 1.5f) <
                            1.0e-4f,
                    "Knob conditioning value must survive ValueTree recall");
+
+  {
+    openyourbox::graph::NodeGraph multiKnobGraph;
+    const auto multiInput = multiKnobGraph.addNode(
+        openyourbox::graph::NodeType::audioInput, {0.0f, 0.0f});
+    const auto multiKnob = multiKnobGraph.addNode(
+        openyourbox::graph::NodeType::knobInput, {0.0f, 80.0f});
+    const auto multiMerge =
+        multiKnobGraph.addNode(openyourbox::graph::NodeType::merge, {180.0f, 20.0f});
+    const auto multiOutput = multiKnobGraph.addNode(
+        openyourbox::graph::NodeType::audioOutput, {360.0f, 20.0f});
+    passed &= expect(multiKnobGraph.setProperty(multiKnob, "knobs", 3) &&
+                         multiKnobGraph.setProperty(multiMerge, "inputs", 2) &&
+                         multiKnobGraph.setProperty(multiMerge, "mode", 1) &&
+                         multiKnobGraph.setConditioningValue(multiKnob, 0, 1.0f) &&
+                         multiKnobGraph.setConditioningValue(multiKnob, 1, 2.0f) &&
+                         multiKnobGraph.setConditioningValue(multiKnob, 2, 3.0f),
+                     "Knob Input must accept a knobs count of 3");
+    const auto *multiKnobNode = multiKnobGraph.findNode(multiKnob);
+    const auto *multiMergeNode = multiKnobGraph.findNode(multiMerge);
+    passed &= expect(
+        multiKnobNode != nullptr && multiMergeNode != nullptr &&
+            multiKnobNode->outputs.size() == 4 &&
+            multiKnobNode->outputs.back().label == "concat" &&
+            multiKnobGraph
+                .connect(multiKnobGraph.findNode(multiInput)->outputs.front().id,
+                         multiMergeNode->inputs[0].id)
+                .accepted &&
+            multiKnobGraph
+                .connect(multiKnobNode->outputs[1].id, multiMergeNode->inputs[1].id)
+                .accepted &&
+            multiKnobGraph
+                .connect(multiMergeNode->outputs.front().id,
+                         multiKnobGraph.findNode(multiOutput)->inputs.front().id)
+                .accepted,
+        "second knob pin must wire into Utility");
+    LiveGraphCompileOptions multiOptions = options;
+    multiOptions.controlRampSeconds = 0.0;
+    const auto multiCompiled =
+        LiveGraphEngine::compile(multiKnobGraph, multiOptions);
+    LiveGraphCompileError multiError;
+    const auto multiRuntime =
+        LiveGraphEngine::prepare(multiCompiled.snapshot, multiError);
+    passed &= expect(multiCompiled.succeeded() && multiRuntime != nullptr,
+                     "three-knob graph must compile");
+    if (multiRuntime != nullptr) {
+      multiRuntime->bindControls(std::make_shared<const RuntimeControlState>(
+          collectRuntimeControlState(multiKnobGraph)));
+      auto ones = torch::ones({1, 2, 8}, torch::kFloat32);
+      const auto isolated =
+          multiRuntime->processIsolated(multiKnob, ones);
+      passed &= expect(isolated.defined() && isolated.size(1) == 3 &&
+                           std::abs(isolated[0][0][0].item<float>() - 1.0f) <
+                               1.0e-4f &&
+                           std::abs(isolated[0][1][0].item<float>() - 2.0f) <
+                               1.0e-4f &&
+                           std::abs(isolated[0][2][0].item<float>() - 3.0f) <
+                               1.0e-4f,
+                       "Knob Input with 3 knobs must emit a 3-channel tensor");
+      const auto multiplied = multiRuntime->processTensor(ones);
+      passed &= expect(multiplied.defined() &&
+                           std::abs(multiplied[0][0][0].item<float>() - 2.0f) <
+                               1.0e-4f,
+                       "wiring the second knob must extract channel 1");
+    }
+  }
+
+  {
+    openyourbox::graph::NodeGraph concatGraph;
+    const auto concatInput = concatGraph.addNode(
+        openyourbox::graph::NodeType::audioInput, {0.0f, 0.0f});
+    const auto concatPad = concatGraph.addNode(
+        openyourbox::graph::NodeType::xyTrackpad, {0.0f, 80.0f});
+    const auto concatMerge =
+        concatGraph.addNode(openyourbox::graph::NodeType::merge, {180.0f, 20.0f});
+    const auto concatOutput = concatGraph.addNode(
+        openyourbox::graph::NodeType::audioOutput, {360.0f, 20.0f});
+    concatGraph.setProperty(concatMerge, "inputs", 2);
+    concatGraph.setProperty(concatMerge, "mode", 1);
+    concatGraph.setConditioningPad(concatPad, 2.0f, 3.0f);
+    const auto *concatPadNode = concatGraph.findNode(concatPad);
+    const auto *concatMergeNode = concatGraph.findNode(concatMerge);
+    passed &= expect(
+        concatPadNode != nullptr && concatMergeNode != nullptr &&
+            concatPadNode->outputs.size() == 3 &&
+            concatPadNode->outputs.back().label == "concat" &&
+            concatPadNode->outputs.back().shape.channels == 2 &&
+            concatGraph
+                .connect(concatGraph.findNode(concatInput)->outputs.front().id,
+                         concatMergeNode->inputs[0].id)
+                .accepted &&
+            concatGraph
+                .connect(concatPadNode->outputs.back().id,
+                         concatMergeNode->inputs[1].id)
+                .accepted &&
+            concatGraph
+                .connect(concatMergeNode->outputs.front().id,
+                         concatGraph.findNode(concatOutput)->inputs.front().id)
+                .accepted,
+        "XY concat pin must wire as a 2-channel tensor");
+    LiveGraphCompileOptions concatOptions = options;
+    concatOptions.controlRampSeconds = 0.0;
+    const auto concatCompiled =
+        LiveGraphEngine::compile(concatGraph, concatOptions);
+    LiveGraphCompileError concatError;
+    const auto concatRuntime =
+        LiveGraphEngine::prepare(concatCompiled.snapshot, concatError);
+    passed &= expect(concatCompiled.succeeded() && concatRuntime != nullptr,
+                     "XY concat graph must compile");
+    if (concatRuntime != nullptr) {
+      concatRuntime->bindControls(std::make_shared<const RuntimeControlState>(
+          collectRuntimeControlState(concatGraph)));
+      auto ones = torch::ones({1, 2, 8}, torch::kFloat32);
+      const auto scaled = concatRuntime->processTensor(ones);
+      passed &= expect(scaled.defined() && scaled.size(1) == 2 &&
+                           std::abs(scaled[0][0][0].item<float>() - 2.0f) <
+                               1.0e-4f &&
+                           std::abs(scaled[0][1][0].item<float>() - 3.0f) <
+                               1.0e-4f,
+                       "XY concat pin must scale stereo audio by X and Y");
+    }
+  }
+
+  {
+    openyourbox::graph::NodeGraph knobConcatGraph;
+    const auto knobConcatInput = knobConcatGraph.addNode(
+        openyourbox::graph::NodeType::audioInput, {0.0f, 0.0f});
+    const auto knobConcatKnob = knobConcatGraph.addNode(
+        openyourbox::graph::NodeType::knobInput, {0.0f, 80.0f});
+    const auto knobConcatMerge = knobConcatGraph.addNode(
+        openyourbox::graph::NodeType::merge, {180.0f, 20.0f});
+    const auto knobConcatOutput = knobConcatGraph.addNode(
+        openyourbox::graph::NodeType::audioOutput, {360.0f, 20.0f});
+    passed &= expect(knobConcatGraph.setProperty(knobConcatKnob, "knobs", 2) &&
+                         knobConcatGraph.setProperty(knobConcatMerge, "inputs",
+                                                     2) &&
+                         knobConcatGraph.setProperty(knobConcatMerge, "mode", 1) &&
+                         knobConcatGraph.setConditioningValue(knobConcatKnob, 0,
+                                                              2.0f) &&
+                         knobConcatGraph.setConditioningValue(knobConcatKnob, 1,
+                                                              3.0f),
+                     "two knobs must expose a 2-channel concat pin");
+    const auto *knobConcatNode = knobConcatGraph.findNode(knobConcatKnob);
+    const auto *knobConcatMergeNode = knobConcatGraph.findNode(knobConcatMerge);
+    passed &= expect(
+        knobConcatNode != nullptr && knobConcatMergeNode != nullptr &&
+            knobConcatNode->outputs.size() == 3 &&
+            knobConcatNode->outputs.back().shape.channels == 2 &&
+            knobConcatGraph
+                .connect(
+                    knobConcatGraph.findNode(knobConcatInput)->outputs.front().id,
+                    knobConcatMergeNode->inputs[0].id)
+                .accepted &&
+            knobConcatGraph
+                .connect(knobConcatNode->outputs.back().id,
+                         knobConcatMergeNode->inputs[1].id)
+                .accepted &&
+            knobConcatGraph
+                .connect(knobConcatMergeNode->outputs.front().id,
+                         knobConcatGraph.findNode(knobConcatOutput)
+                             ->inputs.front()
+                             .id)
+                .accepted,
+        "knob concat pin must wire as a stacked tensor");
+    LiveGraphCompileOptions knobConcatOptions = options;
+    knobConcatOptions.controlRampSeconds = 0.0;
+    const auto knobConcatCompiled =
+        LiveGraphEngine::compile(knobConcatGraph, knobConcatOptions);
+    LiveGraphCompileError knobConcatError;
+    const auto knobConcatRuntime =
+        LiveGraphEngine::prepare(knobConcatCompiled.snapshot, knobConcatError);
+    passed &= expect(knobConcatCompiled.succeeded() && knobConcatRuntime != nullptr,
+                     "knob concat graph must compile");
+    if (knobConcatRuntime != nullptr) {
+      knobConcatRuntime->bindControls(
+          std::make_shared<const RuntimeControlState>(
+              collectRuntimeControlState(knobConcatGraph)));
+      auto ones = torch::ones({1, 2, 8}, torch::kFloat32);
+      const auto scaled = knobConcatRuntime->processTensor(ones);
+      passed &= expect(scaled.defined() && scaled.size(1) == 2 &&
+                           std::abs(scaled[0][0][0].item<float>() - 2.0f) <
+                               1.0e-4f &&
+                           std::abs(scaled[0][1][0].item<float>() - 3.0f) <
+                               1.0e-4f,
+                       "knob concat pin must scale stereo audio by each knob");
+    }
+  }
 
   openyourbox::graph::NodeGraph xyVolumeGraph;
   const auto xyVolumeInput = xyVolumeGraph.addNode(
@@ -3871,7 +4069,8 @@ int main() {
 
     auto runFixedSteering = [&](float x, float priorMix, bool steerScale,
                                 bool unitSpread,
-                                torch::Tensor &decodedLatent) {
+                                torch::Tensor &decodedLatent, int sourceMode,
+                                bool omitSpread) {
       openyourbox::graph::NodeGraph graph;
       const auto input = graph.addNode(NodeType::audioInput, {0.0f, 0.0f});
       const auto load =
@@ -3880,15 +4079,24 @@ int main() {
           graph.addNode(NodeType::audioOutput, {480.0f, 0.0f});
       const auto xy = graph.addNode(NodeType::xyTrackpad, {0.0f, 120.0f});
       const auto conv = graph.addNode(NodeType::convolution, {160.0f, 120.0f});
+      const auto merge =
+          sourceMode == 2 ? graph.addNode(NodeType::merge, {80.0f, 120.0f})
+                          : 0;
       graph.setConditioningPad(xy, x, 0.0f);
       graph.setProperty(conv, "channels", 8);
       graph.setProperty(conv, "kernel_size", 1);
+      if (merge != 0) {
+        graph.setProperty(merge, "mode", 2);
+        graph.setProperty(merge, "inputs", 2);
+      }
       graph.applyExternalCheckpointReady(load, "fixed-hop-rave.ts", 2, 2, 8,
                                          true, false, false, {}, {}, {}, "");
       graph.setFloatProperty(load, "priorMix", priorMix);
 
       const auto *loadNode = graph.findNode(load);
       const auto *xyNode = graph.findNode(xy);
+      const auto *convNode = graph.findNode(conv);
+      const auto *mergeNode = merge != 0 ? graph.findNode(merge) : nullptr;
       std::int32_t steeringIn = 0;
       if (loadNode != nullptr) {
         for (const auto &pin : loadNode->inputs) {
@@ -3897,27 +4105,38 @@ int main() {
             steeringIn = pin.id;
         }
       }
-      const bool wired =
-          loadNode != nullptr && xyNode != nullptr && steeringIn != 0 &&
-          graph
-              .connect(graph.findNode(input)->outputs.front().id,
-                       loadNode->inputs.front().id)
-              .accepted &&
-          graph
-              .connect(loadNode->outputs.front().id,
-                       graph.findNode(output)->inputs.front().id)
-              .accepted &&
-          graph
-              .connect(xyNode->outputs.front().id,
-                       graph.findNode(conv)->inputs.front().id)
-              .accepted &&
-          graph.connect(graph.findNode(conv)->outputs.front().id, steeringIn)
-              .accepted;
+      std::int32_t convInSource = 0;
+      if (sourceMode == 1 && xyNode != nullptr && !xyNode->outputs.empty())
+        convInSource = xyNode->outputs.back().id;
+      else if (sourceMode == 2 && mergeNode != nullptr)
+        convInSource = mergeNode->outputs.front().id;
+      else if (xyNode != nullptr)
+        convInSource = xyNode->outputs.front().id;
+      bool wired = loadNode != nullptr && xyNode != nullptr &&
+                   convNode != nullptr && steeringIn != 0 && convInSource != 0 &&
+                   graph
+                       .connect(graph.findNode(input)->outputs.front().id,
+                                loadNode->inputs.front().id)
+                       .accepted &&
+                   graph
+                       .connect(loadNode->outputs.front().id,
+                                graph.findNode(output)->inputs.front().id)
+                       .accepted;
+      if (sourceMode == 2 && mergeNode != nullptr && mergeNode->inputs.size() >= 2)
+        wired = wired &&
+                graph.connect(xyNode->outputs[0].id, mergeNode->inputs[0].id)
+                    .accepted &&
+                graph.connect(xyNode->outputs[1].id, mergeNode->inputs[1].id)
+                    .accepted;
+      wired = wired &&
+              graph.connect(convInSource, convNode->inputs.front().id).accepted &&
+              graph.connect(convNode->outputs.front().id, steeringIn).accepted;
       passed &= expect(wired,
                        "fixed-hop XY → Conv8 → steering graph must wire");
 
       const auto factory = std::make_shared<TestFixedHopRaveFactory>();
       factory->unitSpread = unitSpread;
+      factory->omitSpread = omitSpread;
       const auto compiled = LiveGraphEngine::compile(
           graph, options, [factory](const openyourbox::graph::GraphNode &) {
             return factory;
@@ -3942,9 +4161,9 @@ int main() {
     torch::Tensor negativeLatent;
     torch::Tensor positiveLatent;
     const auto negative =
-        runFixedSteering(-8.0f, 0.0f, false, false, negativeLatent);
+        runFixedSteering(-8.0f, 0.0f, false, false, negativeLatent, 0, false);
     const auto positive =
-        runFixedSteering(8.0f, 0.0f, false, false, positiveLatent);
+        runFixedSteering(8.0f, 0.0f, false, false, positiveLatent, 0, false);
     passed &= expect(
         negative.defined() && positive.defined() &&
             negativeLatent.defined() && positiveLatent.defined() &&
@@ -3953,17 +4172,47 @@ int main() {
 
     torch::Tensor zeroScaleLatent;
     torch::Tensor movedScaleLatent;
-    runFixedSteering(0.0f, 0.0f, true, true, zeroScaleLatent);
-    runFixedSteering(8.0f, 0.0f, true, true, movedScaleLatent);
+    runFixedSteering(0.0f, 0.0f, true, true, zeroScaleLatent, 0, false);
+    runFixedSteering(8.0f, 0.0f, true, true, movedScaleLatent, 0, false);
     passed &= expect(
         zeroScaleLatent.defined() && movedScaleLatent.defined() &&
             torch::count_nonzero(zeroScaleLatent).item<std::int64_t>() == 0 &&
             torch::count_nonzero(movedScaleLatent).item<std::int64_t>() > 0,
         "scale must rescale encoder spread at full-forward prior mix");
 
+    torch::Tensor concatZeroScale;
+    torch::Tensor concatMovedScale;
+    runFixedSteering(0.0f, 0.0f, true, true, concatZeroScale, 1, false);
+    runFixedSteering(8.0f, 0.0f, true, true, concatMovedScale, 1, false);
+    passed &= expect(
+        concatZeroScale.defined() && concatMovedScale.defined() &&
+            torch::count_nonzero(concatZeroScale).item<std::int64_t>() == 0 &&
+            torch::count_nonzero(concatMovedScale).item<std::int64_t>() > 0,
+        "XY concat → Conv8 → scale must steer at full-forward prior mix");
+
+    torch::Tensor utilityZeroScale;
+    torch::Tensor utilityMovedScale;
+    runFixedSteering(0.0f, 0.0f, true, true, utilityZeroScale, 2, false);
+    runFixedSteering(8.0f, 0.0f, true, true, utilityMovedScale, 2, false);
+    passed &= expect(
+        utilityZeroScale.defined() && utilityMovedScale.defined() &&
+            torch::count_nonzero(utilityZeroScale).item<std::int64_t>() == 0 &&
+            torch::count_nonzero(utilityMovedScale).item<std::int64_t>() > 0,
+        "XY → Utility concatenate → Conv8 → scale must steer");
+
+    torch::Tensor meanOnlyZeroScale;
+    torch::Tensor meanOnlyMovedScale;
+    runFixedSteering(0.0f, 0.0f, true, false, meanOnlyZeroScale, 1, true);
+    runFixedSteering(8.0f, 0.0f, true, false, meanOnlyMovedScale, 1, true);
+    passed &= expect(
+        meanOnlyZeroScale.defined() && meanOnlyMovedScale.defined() &&
+            torch::count_nonzero(meanOnlyZeroScale).item<std::int64_t>() == 0 &&
+            torch::count_nonzero(meanOnlyMovedScale).item<std::int64_t>() > 0,
+        "connected scale must steer mean-only RAVE encode at priorMix = 0");
+
     torch::Tensor priorLatent;
     const auto prior =
-        runFixedSteering(0.0f, 1.0f, false, false, priorLatent);
+        runFixedSteering(0.0f, 1.0f, false, false, priorLatent, 0, false);
     passed &= expect(
         prior.defined() && priorLatent.defined() &&
             priorLatent.size(1) == 8 && priorLatent.size(2) == 1,
