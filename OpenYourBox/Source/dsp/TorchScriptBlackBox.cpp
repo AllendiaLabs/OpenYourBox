@@ -299,6 +299,8 @@ public:
     }
     encodeDecode = module.find_method("encode").has_value() &&
                    module.find_method("decode").has_value();
+    hasEncodeDistribution =
+        module.find_method("encode_distribution").has_value();
     try {
       if (module.hasattr("latent_mean"))
         latentMean = module.attr("latent_mean").toTensor().contiguous();
@@ -349,6 +351,42 @@ public:
     } catch (const std::exception &) {
       return {};
     }
+  }
+
+  bool encodeDistribution(const torch::Tensor &input, torch::Tensor &mean,
+                          torch::Tensor &std) override {
+    torch::InferenceMode inferenceGuard;
+    mean = torch::Tensor{};
+    std = torch::Tensor{};
+    if (!encodeDecode)
+      return false;
+    if (requiresFixedBlock && input.size(2) != inferenceBlock)
+      return false;
+    try {
+      if (hasEncodeDistribution) {
+        auto packed = module.get_method("encode_distribution")({input});
+        if (packed.isTensor()) {
+          auto tensor = packed.toTensor();
+          if (tensor.defined() && tensor.dim() == 3 && tensor.size(1) >= 2 &&
+              tensor.size(1) % 2 == 0) {
+            const auto half = tensor.size(1) / 2;
+            mean = tensor.narrow(1, 0, half);
+            std = tensor.narrow(1, half, half);
+            return true;
+          }
+        } else if (packed.isTuple()) {
+          const auto tuple = packed.toTuple();
+          if (tuple->elements().size() >= 2) {
+            mean = tuple->elements()[0].toTensor();
+            std = tuple->elements()[1].toTensor();
+            return mean.defined();
+          }
+        }
+      }
+    } catch (const std::exception &) {
+    }
+    mean = encode(input);
+    return mean.defined();
   }
 
   bool hasEncodeDecode() const noexcept override { return encodeDecode; }
@@ -477,6 +515,8 @@ private:
   torch::Tensor pendingOutput;
   /** @brief True when encode and decode methods exist. */
   bool encodeDecode = false;
+  /** @brief Cached at load; never call `find_method` on the audio thread. */
+  bool hasEncodeDistribution = false;
   /** @brief Optional compactness mean loaded from the artifact. */
   torch::Tensor latentMean;
   /** @brief Optional compactness PCA loaded from the artifact. */
@@ -598,12 +638,29 @@ TorchScriptBlackBoxFactory::load(const std::string &artifactPath,
         module.find_method("encode").has_value() &&
         module.find_method("decode").has_value();
     int latentChannels = 0;
+    int latentFrames = 1;
     if (encodeDecode) {
-      try {
-        auto encoded = module.get_method("encode")({silence}).toTensor();
-        if (encoded.defined() && encoded.dim() >= 2 && encoded.size(1) > 0)
-          latentChannels = static_cast<int>(encoded.size(1));
-      } catch (const std::exception &) {
+      bool encodeFailedShorterLength = false;
+      for (const auto length : buildProbeLengths(artifactPath)) {
+        try {
+          auto encodeInput =
+              torch::zeros({1, inputChannels, length}, options);
+          auto encoded =
+              module.get_method("encode")({encodeInput}).toTensor();
+          if (encoded.defined() && encoded.dim() >= 2 &&
+              encoded.size(1) > 0) {
+            latentChannels = static_cast<int>(encoded.size(1));
+            if (encoded.dim() >= 3 && encoded.size(2) > 0)
+              latentFrames = static_cast<int>(encoded.size(2));
+            if (encodeFailedShorterLength) {
+              hopSamples = length;
+              requiresFixedBlock = true;
+            }
+            break;
+          }
+        } catch (const std::exception &) {
+        }
+        encodeFailedShorterLength = true;
       }
     }
 
@@ -673,8 +730,8 @@ TorchScriptBlackBoxFactory::load(const std::string &artifactPath,
         new TorchScriptBlackBoxFactory(
             artifactPath, inputChannels, static_cast<int>(output.size(1)),
             receptiveFieldSamples, parameters, preserves, conditioned,
-            resolvedCondDim, encodeDecode, latentChannels, compactnessReady,
-            std::move(latentMean), std::move(latentPca),
+            resolvedCondDim, encodeDecode, latentChannels, latentFrames,
+            compactnessReady, std::move(latentMean), std::move(latentPca),
             std::move(cumulativeVariance), std::move(rateWarning), hopSamples,
             requiresFixedBlock));
   } catch (const std::exception &exception) {
@@ -727,6 +784,18 @@ int TorchScriptBlackBoxFactory::getLatentChannels() const noexcept {
   return latentChannels;
 }
 
+int TorchScriptBlackBoxFactory::getInferenceBlockSamples() const noexcept {
+  return inferenceBlockSamples;
+}
+
+int TorchScriptBlackBoxFactory::getLatentFramesPerBlock() const noexcept {
+  return latentFramesPerBlock;
+}
+
+bool TorchScriptBlackBoxFactory::requiresFixedInferenceBlock() const noexcept {
+  return requiresFixedHop;
+}
+
 bool TorchScriptBlackBoxFactory::compactnessReady() const noexcept {
   return compactnessBuffersReady;
 }
@@ -758,7 +827,8 @@ TorchScriptBlackBoxFactory::getArtifactPath() const noexcept {
 TorchScriptBlackBoxFactory::TorchScriptBlackBoxFactory(
     std::string path, int inputs, int outputs, std::uint64_t field,
     std::uint64_t parameters, bool silence, bool conditionedModule, int condDim,
-    bool encodeDecodeMethods, int latentWidth, bool compactness,
+    bool encodeDecodeMethods, int latentWidth, int latentFrames,
+    bool compactness,
     std::vector<float> mean, std::vector<float> pca,
     std::vector<float> cumulative, std::string warning, int hopSamples,
     bool fixedHop)
@@ -768,6 +838,7 @@ TorchScriptBlackBoxFactory::TorchScriptBlackBoxFactory(
       conditioned(conditionedModule), conditioningDim(std::max(1, condDim)),
       encodeDecode(encodeDecodeMethods),
       latentChannels(std::max(0, latentWidth)),
+      latentFramesPerBlock(std::max(1, latentFrames)),
       compactnessBuffersReady(compactness), latentMean(std::move(mean)),
       latentPca(std::move(pca)), cumulativeVariance(std::move(cumulative)),
       rateWarning(std::move(warning)),

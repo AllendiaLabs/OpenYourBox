@@ -33,13 +33,13 @@ description: "Task list for RAVE Prior Mix & Insert Catalog"
 
 **Purpose**: Confirm design artifacts and inventory BlackBox prior-path / palette / library touch-points before code changes.
 
-- [ ] T001 Verify design artifact cross-links (spec clarifications → contracts → plan → data-model) in `specs/016-rave-prior-mix/plan.md`
-- [ ] T002 [P] Inventory BlackBox encode→fidelity→decode, `latentInputIndex`, `latentOutputs`, and `gatherLatentInput` in `OpenYourBox/Source/dsp/LiveGraphEngine.cpp`
-- [ ] T003 [P] Inventory `applyExternalLoadSurface`, train-autoload latent pins, fidelity `NodeProperty` / Gold edit exception in `OpenYourBox/Source/graph/NodeGraph.cpp`
-- [ ] T004 [P] Inventory `latentPinLabel`, `isLatentPin`, `fidelityPercent`, `NodeProperty` patterns in `OpenYourBox/Source/graph/GraphTypes.h`
-- [ ] T005 [P] Inventory `paletteCategories` / `forEachPaletteItem` / Pin Add / Link Insert in `OpenYourBox/Source/graph/NodeRenderer.cpp`
-- [ ] T006 [P] Inventory `UserBoxLibrary::insertBox` and expandable tree helpers in `OpenYourBox/Source/graph/UserBoxLibraryPanel.cpp`
-- [ ] T007 [P] Inventory TorchScript `encode`/`decode` and compactness path in `OpenYourBox/Source/dsp/TorchScriptBlackBox.cpp` and μ-only `VariationalBottleneck::encodeMean` in `OpenYourBox/Source/dsp/VariationalBottleneck.cpp`
+- [X] T001 Verify design artifact cross-links (spec clarifications → contracts → plan → data-model) in `specs/016-rave-prior-mix/plan.md`
+- [X] T002 [P] Inventory BlackBox encode→fidelity→decode, `latentInputIndex`, `latentOutputs`, and `gatherLatentInput` in `OpenYourBox/Source/dsp/LiveGraphEngine.cpp`
+- [X] T003 [P] Inventory `applyExternalLoadSurface`, train-autoload latent pins, fidelity `NodeProperty` / Gold edit exception in `OpenYourBox/Source/graph/NodeGraph.cpp`
+- [X] T004 [P] Inventory `latentPinLabel`, `isLatentPin`, `fidelityPercent`, `NodeProperty` patterns in `OpenYourBox/Source/graph/GraphTypes.h`
+- [X] T005 [P] Inventory `paletteCategories` / `forEachPaletteItem` / Pin Add / Link Insert in `OpenYourBox/Source/graph/NodeRenderer.cpp`
+- [X] T006 [P] Inventory `UserBoxLibrary::insertBox` and expandable tree helpers in `OpenYourBox/Source/graph/UserBoxLibraryPanel.cpp`
+- [X] T007 [P] Inventory TorchScript `encode`/`decode` and compactness path in `OpenYourBox/Source/dsp/TorchScriptBlackBox.cpp` and μ-only `VariationalBottleneck::encodeMean` in `OpenYourBox/Source/dsp/VariationalBottleneck.cpp`
 
 ---
 
@@ -49,12 +49,12 @@ description: "Task list for RAVE Prior Mix & Insert Catalog"
 
 **⚠️ CRITICAL**: No user story work can begin until this phase is complete.
 
-- [ ] T008 Add `priorMix` field helpers (range `[0,1]`, default `0`, clamp) and bias/scale pin label + `isBiasPin` / `isScalePin` helpers in `OpenYourBox/Source/graph/GraphTypes.h`
-- [ ] T009 Add `priorMix` `NodeProperty` factory (fidelity-class real prop), ValueTree serialize/restore, and allow Gold `setProperty` for `priorMix` like `fidelity` in `OpenYourBox/Source/graph/NodeGraph.cpp`
-- [ ] T010 Extend `CompiledElement` / `RuntimeControlState` with `priorMix` and bias/scale gather indices (replace latent-input decode shortcut fields as needed) in `OpenYourBox/Source/dsp/LiveGraphEngine.h`
-- [ ] T011 Add RT-safe sample helpers: softplus-std convention, preallocated `ε` noise buffers at prepare/compile (no audio-thread heap) in `OpenYourBox/Source/dsp/VariationalBottleneck.cpp` and/or `OpenYourBox/Source/dsp/LiveGraphEngine.cpp`
-- [ ] T012 Add distribution acquisition API for RAVE BlackBox: prefer `(μ, σ)`; fallback `μ←encode`, `σ←1` per `specs/016-rave-prior-mix/contracts/rave-prior-mix-runtime-contract.md` in `OpenYourBox/Source/dsp/TorchScriptBlackBox.cpp` / `.h` and call sites in `OpenYourBox/Source/dsp/LiveGraphEngine.cpp`
-- [ ] T013 Extract shared Factory palette catalog (`PaletteItem` / categories / `forEachPaletteItem` / place helpers) from `OpenYourBox/Source/graph/NodeRenderer.cpp` into `OpenYourBox/Source/graph/FactoryPalette.h` (and `.cpp` if needed); leave left Factory and context menus compiling against it
+- [X] T008 Add `priorMix` field helpers (range `[0,1]`, default `0`, clamp) and bias/scale pin label + `isBiasPin` / `isScalePin` helpers in `OpenYourBox/Source/graph/GraphTypes.h`
+- [X] T009 Add `priorMix` `NodeProperty` factory (fidelity-class real prop), ValueTree serialize/restore, and allow Gold `setProperty` for `priorMix` like `fidelity` in `OpenYourBox/Source/graph/NodeGraph.cpp`
+- [X] T010 Extend `CompiledElement` / `RuntimeControlState` with `priorMix` and bias/scale gather indices (replace latent-input decode shortcut fields as needed) in `OpenYourBox/Source/dsp/LiveGraphEngine.h`
+- [X] T011 Add RT-safe sample helpers: softplus-std convention, preallocated `ε` noise buffers at prepare/compile (no audio-thread heap) in `OpenYourBox/Source/dsp/VariationalBottleneck.cpp` and/or `OpenYourBox/Source/dsp/LiveGraphEngine.cpp`
+- [X] T012 Add distribution acquisition API for RAVE BlackBox: prefer `(μ, σ)`; fallback `μ←encode`, `σ←1` per `specs/016-rave-prior-mix/contracts/rave-prior-mix-runtime-contract.md` in `OpenYourBox/Source/dsp/TorchScriptBlackBox.cpp` / `.h` and call sites in `OpenYourBox/Source/dsp/LiveGraphEngine.cpp`
+- [X] T013 Extract shared Factory palette catalog (`PaletteItem` / categories / `forEachPaletteItem` / place helpers) from `OpenYourBox/Source/graph/NodeRenderer.cpp` into `OpenYourBox/Source/graph/FactoryPalette.h` (and `.cpp` if needed); leave left Factory and context menus compiling against it
 
 **Checkpoint**: Foundation ready — `priorMix` persists; compile state can carry mix + bias/scale indices; sample/distribution helpers exist; Factory catalog has a single source of truth.
 
@@ -68,11 +68,11 @@ description: "Task list for RAVE Prior Mix & Insert Catalog"
 
 ### Implementation for User Story 1
 
-- [ ] T014 [US1] Show `priorMix` property row on RAVE-capable Gold / encode-decode external-load boxes (hide on forward-only) in `OpenYourBox/Source/graph/NodeRenderer.cpp`
-- [ ] T015 [US1] Compile `priorMix` into runtime control state for blackBox elements in `OpenYourBox/Source/dsp/LiveGraphEngine.cpp`
-- [ ] T016 [US1] Implement blackBox prior-mix execute path per `specs/016-rave-prior-mix/contracts/rave-prior-mix-runtime-contract.md`: encode (or skip), fidelity-before-mix when compactness ready, lerp to (0,1), bias=0/scale=1 defaults, sample, decode in `OpenYourBox/Source/dsp/LiveGraphEngine.cpp`
-- [ ] T017 [US1] At `priorMix ≈ 1`, skip `kernel->encode` and use base (0,1) while still decoding in `OpenYourBox/Source/dsp/LiveGraphEngine.cpp`
-- [ ] T018 [P] [US1] Add engine tests for prior-mix lerp endpoints, intermediate continuity smoke, and encoder-skip independence from audio at full prior in `Tests/LiveGraphEngineTests.cpp`
+- [X] T014 [US1] Show `priorMix` property row on RAVE-capable Gold / encode-decode external-load boxes (hide on forward-only) in `OpenYourBox/Source/graph/NodeRenderer.cpp`
+- [X] T015 [US1] Compile `priorMix` into runtime control state for blackBox elements in `OpenYourBox/Source/dsp/LiveGraphEngine.cpp`
+- [X] T016 [US1] Implement blackBox prior-mix execute path per `specs/016-rave-prior-mix/contracts/rave-prior-mix-runtime-contract.md`: encode (or skip), fidelity-before-mix when compactness ready, lerp to (0,1), bias=0/scale=1 defaults, sample, decode in `OpenYourBox/Source/dsp/LiveGraphEngine.cpp`
+- [X] T017 [US1] At `priorMix ≈ 1`, skip `kernel->encode` and use base (0,1) while still decoding in `OpenYourBox/Source/dsp/LiveGraphEngine.cpp`
+- [X] T018 [P] [US1] Add engine tests for prior-mix lerp endpoints, intermediate continuity smoke, and encoder-skip independence from audio at full prior in `Tests/LiveGraphEngineTests.cpp`
 
 **Checkpoint**: US1 complete — `priorMix` morphs forward↔prior; full prior skips encode with neutral bias/scale.
 
@@ -86,12 +86,12 @@ description: "Task list for RAVE Prior Mix & Insert Catalog"
 
 ### Implementation for User Story 2
 
-- [ ] T019 [US2] Replace latent **input** with bias + scale inputs on external-load and train-autoload RAVE Gold pin surfaces per `specs/016-rave-prior-mix/contracts/bias-scale-pin-surface-contract.md` in `OpenYourBox/Source/graph/NodeGraph.cpp`
-- [ ] T020 [US2] Compile bias/scale pin indices; gather tensors (or constants 0/1 when disconnected) in `OpenYourBox/Source/dsp/LiveGraphEngine.cpp`
-- [ ] T021 [US2] Apply `μ += bias`, `σ ⊙= scale` after prior-mix lerp and before sample at all `priorMix` values in `OpenYourBox/Source/dsp/LiveGraphEngine.cpp`
-- [ ] T022 [US2] Shape Integrity: refuse illegal bias/scale connections vs effective latent width with existing mismatch feedback in `OpenYourBox/Source/graph/NodeGraph.cpp`
-- [ ] T023 [US2] Remove decode-from-wired-latent-in branch for RAVE-capable boxes; update any UI/docs assumptions in `OpenYourBox/Source/dsp/LiveGraphEngine.cpp` and `OpenYourBox/Source/graph/NodeRenderer.cpp`
-- [ ] T024 [P] [US2] Update/add tests for bias/scale defaults, steering, and latent-in absence in `Tests/LiveGraphEngineTests.cpp`
+- [X] T019 [US2] Replace latent **input** with bias + scale inputs on external-load and train-autoload RAVE Gold pin surfaces per `specs/016-rave-prior-mix/contracts/bias-scale-pin-surface-contract.md` in `OpenYourBox/Source/graph/NodeGraph.cpp`
+- [X] T020 [US2] Compile bias/scale pin indices; gather tensors (or constants 0/1 when disconnected) in `OpenYourBox/Source/dsp/LiveGraphEngine.cpp`
+- [X] T021 [US2] Apply `μ += bias`, `σ ⊙= scale` after prior-mix lerp and before sample at all `priorMix` values in `OpenYourBox/Source/dsp/LiveGraphEngine.cpp`
+- [X] T022 [US2] Shape Integrity: refuse illegal bias/scale connections vs effective latent width with existing mismatch feedback in `OpenYourBox/Source/graph/NodeGraph.cpp`
+- [X] T023 [US2] Remove decode-from-wired-latent-in branch for RAVE-capable boxes; update any UI/docs assumptions in `OpenYourBox/Source/dsp/LiveGraphEngine.cpp` and `OpenYourBox/Source/graph/NodeRenderer.cpp`
+- [X] T024 [P] [US2] Update/add tests for bias/scale defaults, steering, and latent-in absence in `Tests/LiveGraphEngineTests.cpp`
 
 **Checkpoint**: US2 complete — bias/scale pins steer; latent-in gone; defaults work unwired.
 
@@ -105,9 +105,9 @@ description: "Task list for RAVE Prior Mix & Insert Catalog"
 
 ### Implementation for User Story 3
 
-- [ ] T025 [US3] Ensure `runtime.latentOutputs[i]` is written with effective sampled `z` immediately before `decode` on the prior-mix path in `OpenYourBox/Source/dsp/LiveGraphEngine.cpp`
-- [ ] T026 [US3] Verify latent-out pin / `inputUseLatentTap` gather reads that buffer (not pre-mix μ) across forward, intermediate, and full prior in `OpenYourBox/Source/dsp/LiveGraphEngine.cpp`
-- [ ] T027 [P] [US3] Add instrumented checks that latent out equals decode input (≥95% buffer agreement intent from SC-005) in `Tests/LiveGraphEngineTests.cpp`
+- [X] T025 [US3] Ensure `runtime.latentOutputs[i]` is written with effective sampled `z` immediately before `decode` on the prior-mix path in `OpenYourBox/Source/dsp/LiveGraphEngine.cpp`
+- [X] T026 [US3] Verify latent-out pin / `inputUseLatentTap` gather reads that buffer (not pre-mix μ) across forward, intermediate, and full prior in `OpenYourBox/Source/dsp/LiveGraphEngine.cpp`
+- [X] T027 [P] [US3] Add instrumented checks that latent out equals decode input (≥95% buffer agreement intent from SC-005) in `Tests/LiveGraphEngineTests.cpp`
 
 **Checkpoint**: US3 complete — latent out is the effective sampled latent.
 
@@ -121,10 +121,10 @@ description: "Task list for RAVE Prior Mix & Insert Catalog"
 
 ### Implementation for User Story 4
 
-- [ ] T028 [US4] Rebuild Pin **Add** and Link **Insert** menus from shared `FactoryPalette` (categorized, filter-aware) per `specs/016-rave-prior-mix/contracts/right-click-insert-catalog-contract.md` in `OpenYourBox/Source/graph/NodeRenderer.cpp`
-- [ ] T029 [US4] Add expandable User Library submenu (folders → entries → snapshot members) reusing helpers from `OpenYourBox/Source/graph/UserBoxLibraryPanel.cpp` inside `OpenYourBox/Source/graph/NodeRenderer.cpp` context menus
-- [ ] T030 [US4] Wire library menu actions to `UserBoxLibrary::insertBox` / `placeLibraryEntryOnFocusedCanvas` (root + `nestedRootId`); best-effort pin/link wire or place-nearby per contract in `OpenYourBox/Source/graph/NodeRenderer.cpp`
-- [ ] T031 [US4] Ensure empty user library leaves Factory section complete and library section vacant (not replacing Factory) in `OpenYourBox/Source/graph/NodeRenderer.cpp`
+- [X] T028 [US4] Rebuild Pin **Add** and Link **Insert** menus from shared `FactoryPalette` (categorized, filter-aware) per `specs/016-rave-prior-mix/contracts/right-click-insert-catalog-contract.md` in `OpenYourBox/Source/graph/NodeRenderer.cpp`
+- [X] T029 [US4] Add expandable User Library submenu (folders → entries → snapshot members) reusing helpers from `OpenYourBox/Source/graph/UserBoxLibraryPanel.cpp` inside `OpenYourBox/Source/graph/NodeRenderer.cpp` context menus
+- [X] T030 [US4] Wire library menu actions to `UserBoxLibrary::insertBox` / `placeLibraryEntryOnFocusedCanvas` (root + `nestedRootId`); best-effort pin/link wire or place-nearby per contract in `OpenYourBox/Source/graph/NodeRenderer.cpp`
+- [X] T031 [US4] Ensure empty user library leaves Factory section complete and library section vacant (not replacing Factory) in `OpenYourBox/Source/graph/NodeRenderer.cpp`
 
 **Checkpoint**: US4 complete — right-click catalogs match Factory + expandable user library.
 
@@ -134,10 +134,10 @@ description: "Task list for RAVE Prior Mix & Insert Catalog"
 
 **Purpose**: OYB `(μ, σ)` fidelity, regressions, and quickstart validation across stories.
 
-- [ ] T032 [P] If needed for learned Gold scale fidelity: expose `(μ, σ)` from OYB RAVE export / bottleneck path in `Backend/train_worker.py` and consume in `OpenYourBox/Source/dsp/TorchScriptBlackBox.cpp` (keep external single-tensor fallback)
-- [ ] T033 [P] Confirm forward-only TorchScript Load still omits `priorMix` / bias / scale / latent-out in `OpenYourBox/Source/graph/NodeGraph.cpp` and `OpenYourBox/Source/graph/NodeRenderer.cpp`
-- [ ] T034 Run `specs/016-rave-prior-mix/quickstart.md` scenarios §1–§5 and fix gaps in touched `OpenYourBox/Source/` / `Tests/` files
-- [ ] T035 [P] Mark completed checklist notes / follow-ups in `specs/016-rave-prior-mix/checklists/requirements.md` if any validation notes need updating after implementation
+- [X] T032 [P] If needed for learned Gold scale fidelity: expose `(μ, σ)` from OYB RAVE export / bottleneck path in `Backend/train_worker.py` and consume in `OpenYourBox/Source/dsp/TorchScriptBlackBox.cpp` (keep external single-tensor fallback)
+- [X] T033 [P] Confirm forward-only TorchScript Load still omits `priorMix` / bias / scale / latent-out in `OpenYourBox/Source/graph/NodeGraph.cpp` and `OpenYourBox/Source/graph/NodeRenderer.cpp`
+- [X] T034 Run `specs/016-rave-prior-mix/quickstart.md` scenarios §1–§5 and fix gaps in touched `OpenYourBox/Source/` / `Tests/` files
+- [X] T035 [P] Mark completed checklist notes / follow-ups in `specs/016-rave-prior-mix/checklists/requirements.md` if any validation notes need updating after implementation
 
 ---
 

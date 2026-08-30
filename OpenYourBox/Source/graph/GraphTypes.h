@@ -610,6 +610,32 @@ inline float clampFidelity(float percent) noexcept {
   return std::clamp(percent, fidelityMinimum, fidelityMaximum);
 }
 
+/** @brief Default prior-mix (full forward / encode-driven). */
+inline constexpr float defaultPriorMix = 0.0f;
+/** @brief Inclusive lower bound for prior mix. */
+inline constexpr float priorMixMinimum = 0.0f;
+/** @brief Inclusive upper bound for prior mix (full prior). */
+inline constexpr float priorMixMaximum = 1.0f;
+/**
+ * @brief Treat values at or above this as full prior (skip encode).
+ *
+ * Matches `1 − ε_full` in the RAVE prior-mix runtime contract.
+ */
+inline constexpr float priorMixFullThreshold = 1.0f - 1.0e-5f;
+/**
+ * @brief Treat values at or below this as full forward (encode μ, skip sample).
+ */
+inline constexpr float priorMixForwardThreshold = 1.0e-5f;
+
+/**
+ * @brief Clamps a prior-mix value into `[0, 1]`.
+ * @param value Proposed mix.
+ * @return Value in `[priorMixMinimum, priorMixMaximum]`.
+ */
+inline float clampPriorMix(float value) noexcept {
+  return std::clamp(value, priorMixMinimum, priorMixMaximum);
+}
+
 /**
  * @brief Parses a persisted Train objective token.
  * @param name Objective string.
@@ -1308,6 +1334,10 @@ inline bool variationalBottleneckLatentIsError(int latentSize) noexcept {
 inline constexpr const char *controlPinLabel = "control";
 /** @brief User-visible label of Gold RAVE encode/decode latent pins. */
 inline constexpr const char *latentPinLabel = "latent";
+/** @brief User-visible label of RAVE-capable bias input pins. */
+inline constexpr const char *biasPinLabel = "bias";
+/** @brief User-visible label of RAVE-capable scale input pins. */
+inline constexpr const char *scalePinLabel = "scale";
 
 /** @brief A stable endpoint belonging to one graph node. */
 struct Pin {
@@ -1364,6 +1394,30 @@ inline bool isIrInputPin(const Pin &pin) noexcept {
  */
 inline bool isLatentPin(const Pin &pin) noexcept {
   return pin.label == latentPinLabel;
+}
+
+/**
+ * @brief Returns true for the RAVE bias input (added to post-mix mean).
+ * @param pin Endpoint to inspect.
+ */
+inline bool isBiasPin(const Pin &pin) noexcept {
+  return pin.kind == PinKind::input && pin.label == biasPinLabel;
+}
+
+/**
+ * @brief Returns true for the RAVE scale input (multiplies post-mix spread).
+ * @param pin Endpoint to inspect.
+ */
+inline bool isScalePin(const Pin &pin) noexcept {
+  return pin.kind == PinKind::input && pin.label == scalePinLabel;
+}
+
+/**
+ * @brief Returns true for bias or scale RAVE steering inputs.
+ * @param pin Endpoint to inspect.
+ */
+inline bool isRaveSteeringPin(const Pin &pin) noexcept {
+  return isBiasPin(pin) || isScalePin(pin);
 }
 
 /** @brief Value type accepted by an inline graph property. */
@@ -1447,6 +1501,21 @@ struct NodeProperty {
     floatValue = std::clamp(proposed, floatMinimum, floatMaximum);
   }
 };
+
+/**
+ * @brief Builds the RAVE prior-mix real property (Gold-editable).
+ * @param value Initial mix in `[0, 1]`.
+ */
+inline NodeProperty makePriorMixProperty(float value = defaultPriorMix) {
+  NodeProperty property;
+  property.key = "priorMix";
+  property.label = "Prior mix";
+  property.kind = PropertyKind::real;
+  property.floatValue = clampPriorMix(value);
+  property.floatMinimum = priorMixMinimum;
+  property.floatMaximum = priorMixMaximum;
+  return property;
+}
 
 /**
  * @brief Returns true for 0/1 flag properties drawn as checkboxes.
@@ -1738,6 +1807,8 @@ struct GraphNode {
   std::string sampleRateWarning;
   /** @brief Live fidelity percent applied inside bottleneck/Gold encode. */
   float fidelityPercent = defaultFidelityPercent;
+  /** @brief Forward↔prior mix in `[0, 1]` for RAVE-capable Gold boxes. */
+  float priorMix = defaultPriorMix;
   /** @brief True when compactness PCA buffers are present on the artifact. */
   bool compactnessReady = false;
   /** @brief Validation-PCA mean `[latent]`, empty until compactness is ready. */
@@ -1764,6 +1835,27 @@ struct GraphNode {
 inline bool isExternalLoadNode(const GraphNode &node) noexcept {
   return node.type == NodeType::blackBox &&
          node.blackBoxOrigin == BlackBoxOrigin::externalLoad;
+}
+
+/**
+ * @brief Returns true when a Gold box exposes prior-mix / bias / scale / latent-out.
+ *
+ * External loads use the encode/decode probe flag. Train-autoload RAVE boxes
+ * advertise a latent output pin after absorb.
+ * @param node Graph node to inspect.
+ */
+inline bool isRaveCapableBox(const GraphNode &node) noexcept {
+  if (node.type != NodeType::blackBox)
+    return false;
+  if (node.blackBoxOrigin == BlackBoxOrigin::externalLoad)
+    return node.externalHasEncodeDecode;
+  if (node.blackBoxOrigin == BlackBoxOrigin::trainAutoload) {
+    for (const auto &pin : node.outputs) {
+      if (isLatentPin(pin))
+        return true;
+    }
+  }
+  return false;
 }
 
 /**
@@ -2054,13 +2146,18 @@ inline void ensureRepeatSlotCount(GraphNode &node, int count) {
 /**
  * @brief Returns true when a property can store one numeric value per repeat.
  * @param property Candidate inline property.
+ *
+ * Fidelity and prior-mix are live runtime controls (published through
+ * `RuntimeControlState`). Listing them as per-repeat fields would rebuild the
+ * graph on every drag and flush RAVE hop buffers.
  */
 inline bool propertySupportsRepeatValueList(const NodeProperty &property) noexcept {
   if (property.kind != PropertyKind::integer &&
       property.kind != PropertyKind::real)
     return false;
   return !isBooleanPropertyKey(property.key) && property.key != "inputs" &&
-         property.key != "ports" && property.key != "expression";
+         property.key != "ports" && property.key != "expression" &&
+         property.key != "fidelity" && property.key != "priorMix";
 }
 
 /**

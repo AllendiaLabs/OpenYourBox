@@ -96,6 +96,23 @@ public:
     return {};
   }
 
+  /**
+   * @brief Encodes audio into a mean/spread pair when available.
+   *
+   * Default: `encode` as μ and an undefined σ so the caller substitutes 1
+   * using a preallocated buffer (no audio-thread `ones_like`).
+   * @param input Contiguous CPU float tensor for the current audio block.
+   * @param mean Receives μ when encoding succeeds.
+   * @param std Receives σ when the artifact exposes spread; otherwise undefined.
+   * @return True when @p mean is a defined latent tensor.
+   */
+  virtual bool encodeDistribution(const torch::Tensor &input, torch::Tensor &mean,
+                                  torch::Tensor &std) {
+    mean = encode(input);
+    std = torch::Tensor{};
+    return mean.defined();
+  }
+
   /** @brief True when encode and decode methods were validated on the artifact. */
   [[nodiscard]] virtual bool hasEncodeDecode() const noexcept { return false; }
 
@@ -168,6 +185,30 @@ public:
   [[nodiscard]] virtual int getLatentChannels() const noexcept { return 0; }
 
   /**
+   * @brief Returns the audio-frame count used by one validated inference call.
+   * @return Positive probe block size, or 1 when the artifact is unrestricted.
+   */
+  [[nodiscard]] virtual int getInferenceBlockSamples() const noexcept {
+    return 1;
+  }
+
+  /**
+   * @brief Returns latent frames produced by encoding one inference block.
+   * @return Positive latent-frame count, or 1 when unknown.
+   */
+  [[nodiscard]] virtual int getLatentFramesPerBlock() const noexcept {
+    return 1;
+  }
+
+  /**
+   * @brief Reports whether encode/decode require complete inference blocks.
+   * @return True when host blocks must be accumulated before encoding.
+   */
+  [[nodiscard]] virtual bool requiresFixedInferenceBlock() const noexcept {
+    return false;
+  }
+
+  /**
    * @brief Reports whether compactness PCA attrs were present on the artifact.
    */
   [[nodiscard]] virtual bool compactnessReady() const noexcept { return false; }
@@ -220,6 +261,8 @@ struct RuntimeControlState {
   std::unordered_map<std::int32_t, std::array<float, 2>> conditioningByNodeId;
   /** @brief Per-node fidelity percent for bottleneck and Gold RAVE. */
   std::unordered_map<std::int32_t, float> fidelityByNodeId;
+  /** @brief Per-node prior-mix in `[0, 1]` for RAVE-capable Gold boxes. */
+  std::unordered_map<std::int32_t, float> priorMixByNodeId;
 };
 
 /** @brief Signal source used to compute a static analysis snapshot. */
@@ -559,6 +602,16 @@ public:
    */
   torch::Tensor processTensorTapped(const torch::Tensor &input,
                                     std::int32_t nodeId);
+
+  /**
+   * @brief Returns the last sampled RAVE latent `z` for one compiled node.
+   *
+   * This is the tensor stored in `latentOutputs` immediately before decode
+   * (post prior-mix, bias, scale, and sample), or an undefined tensor when
+   * the node is absent or has no encode/decode path.
+   * @param nodeId Stable graph node to inspect.
+   */
+  [[nodiscard]] torch::Tensor getLatentOutput(std::int32_t nodeId) const;
 
   /**
    * @brief Runs one compiled element in isolation with a probe at its input.

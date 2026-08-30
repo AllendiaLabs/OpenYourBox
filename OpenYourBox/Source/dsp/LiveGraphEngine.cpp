@@ -42,6 +42,13 @@ struct CompiledElement {
   int inputChannels = 0;
   /** @brief Exact output channels, or zero for Audio Output. */
   int outputChannels = 0;
+  /**
+   * @brief RAVE latent-out width when this BlackBox has encode/decode.
+   *
+   * Downstream nodes that tap the latent pin use this instead of
+   * @ref outputChannels (the audio decode width).
+   */
+  int latentOutputChannels = 0;
   /** @brief Kernel size for Conv1D or TCN elements. */
   int kernelSize = 1;
   /** @brief Dilation for Conv1D elements. */
@@ -105,12 +112,31 @@ struct CompiledElement {
   int filmExtractChannel = -1;
   /**
    * @brief Compiled index of a Gold RAVE latent-in source, or -1 when unused.
+   *
+   * Retained for compile diagnostics; RAVE-capable boxes no longer drive decode
+   * from a wired latent input.
    */
   std::int64_t latentInputIndex = -1;
   /**
    * @brief Channel extracted from the latent-in source, or -1 for the full tensor.
    */
   int latentExtractChannel = -1;
+  /** @brief Compiled index of the RAVE bias source, or -1 when disconnected. */
+  std::int64_t biasInputIndex = -1;
+  /** @brief Channel extracted from the bias source, or -1 for the full tensor. */
+  int biasExtractChannel = -1;
+  /** @brief True when bias should prefer an upstream Gold latent tap. */
+  bool biasUsesLatentTap = false;
+  /** @brief Compiled index of the RAVE scale source, or -1 when disconnected. */
+  std::int64_t scaleInputIndex = -1;
+  /** @brief Channel extracted from the scale source, or -1 for the full tensor. */
+  int scaleExtractChannel = -1;
+  /** @brief True when scale should prefer an upstream Gold latent tap. */
+  bool scaleUsesLatentTap = false;
+  /** @brief True when the corresponding compiled input is a RAVE bias pin. */
+  std::vector<char> inputIsBias;
+  /** @brief True when the corresponding compiled input is a RAVE scale pin. */
+  std::vector<char> inputIsScale;
   /** @brief Control width for per-layer FiLM adaptors, or 0 when unwired. */
   int condDim = 0;
   /** @brief Per-layer FiLM Linear weights shaped `[2 * hidden, condDim]`. */
@@ -127,6 +153,14 @@ struct CompiledElement {
   std::shared_ptr<openyourbox::dsp::PqmfBank> pqmf;
   /** @brief Bottleneck/Gold fidelity percent. */
   float fidelityPercent = 99.0f;
+  /** @brief RAVE prior-mix in `[0, 1]`; 1 skips encode. */
+  float priorMix = 0.0f;
+  /** @brief Audio samples consumed by one validated RAVE encode/decode call. */
+  int inferenceBlockSamples = 1;
+  /** @brief Latent frames produced for one validated inference block. */
+  int latentFramesPerBlock = 1;
+  /** @brief True when RAVE encode/decode require complete inference blocks. */
+  bool requiresFixedInferenceBlock = false;
   /** @brief True when compactness PCA tensors are present. */
   bool compactnessReady = false;
   /** @brief Compactness mean `[latent]`. */
@@ -148,6 +182,8 @@ struct CompiledElement {
   std::vector<std::int64_t> mathPinSources;
   /** @brief Per-pin extract channel for Math Expression inputs, or -1. */
   std::vector<int> mathPinExtract;
+  /** @brief True when a Math Expression pin should read a Gold latent tap. */
+  std::vector<char> mathPinUseLatentTap;
   /** @brief IR frequency bins per output channel (Noise Synth). */
   int noiseBands = openyourbox::graph::defaultNoiseBands;
   /** @brief IR / hop length in samples (Noise Synth). */
@@ -670,12 +706,15 @@ bool channelsAreBroadcastCompatible(int left, int right) noexcept {
  * @brief Channel count contributed by one compiled Utility input.
  * @param source Upstream compiled element.
  * @param extractChannel Extracted source channel, or -1 for the full tensor.
+ * @param useLatentTap True when the cable reads the RAVE latent-out pin.
  * @return Positive channel count used at the Utility input.
  */
-int compiledSlotChannels(const CompiledElement &source,
-                         int extractChannel) noexcept {
+int compiledSlotChannels(const CompiledElement &source, int extractChannel,
+                         bool useLatentTap = false) noexcept {
   if (extractChannel >= 0)
     return 1;
+  if (useLatentTap && source.latentOutputChannels > 0)
+    return source.latentOutputChannels;
   return source.outputChannels;
 }
 
@@ -708,8 +747,16 @@ int compiledMainInputChannels(const std::vector<CompiledElement> &elements,
   const auto sourceIndex = static_cast<std::size_t>(element.inputIndex);
   if (sourceIndex >= elements.size())
     return element.inputChannels;
+  bool useLatentTap = false;
+  for (std::size_t index = 0; index < element.inputIndices.size(); ++index) {
+    if (element.inputIndices[index] != element.inputIndex)
+      continue;
+    useLatentTap = index < element.inputUseLatentTap.size() &&
+                   element.inputUseLatentTap[index] != 0;
+    break;
+  }
   return compiledSlotChannels(elements[sourceIndex],
-                              compiledExtractForInput(element));
+                              compiledExtractForInput(element), useLatentTap);
 }
 
 /**
@@ -923,8 +970,22 @@ struct LiveGraphRuntime::Impl {
   std::vector<int> delayWriteHeads;
   /** @brief Per-element frozen kernels created outside the audio callback. */
   std::vector<std::unique_ptr<FrozenBlackBoxKernel>> blackBoxKernels;
-  /** @brief Optional Gold encode taps, parallel to `outputs`. */
+  /** @brief Post-mix, post-bias/scale, sampled `z` parallel to `outputs`. */
   std::vector<torch::Tensor> latentOutputs;
+  /** @brief Preallocated unit-Gaussian ε for RAVE prior-mix sampling. */
+  std::vector<torch::Tensor> priorEpsilon;
+  /** @brief Preallocated ones work buffer for prior-mix σ=1 fallback. */
+  std::vector<torch::Tensor> priorStdWork;
+  /** @brief Preallocated zeros work buffer for prior-mix μ=0. */
+  std::vector<torch::Tensor> priorMeanWork;
+  /** @brief Fixed-hop RAVE audio waiting for a complete encode block. */
+  std::vector<torch::Tensor> ravePendingAudio;
+  /** @brief Fixed-hop RAVE bias trajectories waiting with pending audio. */
+  std::vector<torch::Tensor> ravePendingBias;
+  /** @brief Fixed-hop RAVE scale trajectories waiting with pending audio. */
+  std::vector<torch::Tensor> ravePendingScale;
+  /** @brief Fixed-hop decoded audio waiting to be emitted to host blocks. */
+  std::vector<torch::Tensor> ravePendingOutput;
   /** @brief Reusable planar-to-tensor host input storage. */
   torch::Tensor hostInput;
   /** @brief Lock-free latest per-element inference durations in milliseconds.
@@ -1100,6 +1161,20 @@ torch::Tensor matchTimeLength(const torch::Tensor &value, std::int64_t samples) 
                  .value(0.0));
 }
 
+/**
+ * @brief Appends two rank-3 tensors along their time dimension.
+ * @param head Existing queued frames, or an undefined tensor.
+ * @param tail New frames, or an undefined tensor.
+ * @return Concatenated frames, or whichever input is defined.
+ */
+torch::Tensor appendTime(const torch::Tensor &head, const torch::Tensor &tail) {
+  if (!head.defined() || head.dim() != 3 || head.size(2) < 1)
+    return tail;
+  if (!tail.defined() || tail.dim() != 3 || tail.size(2) < 1)
+    return head;
+  return torch::cat({head, tail}, 2);
+}
+
 torch::Tensor gatherUpstream(const std::vector<torch::Tensor> &outputs,
                              const CompiledElement &element,
                              const std::vector<torch::Tensor> *latentOutputs =
@@ -1115,27 +1190,18 @@ torch::Tensor gatherUpstream(const std::vector<torch::Tensor> &outputs,
   return extractCompiledInput(value, compiledExtractForInput(element));
 }
 
-/**
- * @brief Tensor wired to a Gold RAVE latent input, when that pin is connected.
- *
- * Prefers a source encode tap when the upstream Gold box stored one; otherwise
- * uses the source's main output (Knob/XY → Linear → latent in).
- * @param outputs Compiled element audio/main outputs.
- * @param element Gold box whose @c latentInputIndex is set.
- * @param latentOutputs Optional encode taps parallel to @p outputs.
- * @return Latent tensor, or undefined when no latent input is compiled.
- */
-torch::Tensor gatherLatentInput(
-    const std::vector<torch::Tensor> &outputs, const CompiledElement &element,
+torch::Tensor gatherOptionalCompiled(
+    const std::vector<torch::Tensor> &outputs, std::int64_t sourceIndex,
+    int extractChannel, bool useLatentTap,
     const std::vector<torch::Tensor> *latentOutputs) {
-  if (element.latentInputIndex < 0)
+  if (sourceIndex < 0)
     return {};
-  const auto source = static_cast<std::size_t>(element.latentInputIndex);
+  const auto source = static_cast<std::size_t>(sourceIndex);
   auto value = source < outputs.size() ? outputs[source] : torch::Tensor{};
-  if (latentOutputs != nullptr && source < latentOutputs->size() &&
+  if (useLatentTap && latentOutputs != nullptr && source < latentOutputs->size() &&
       (*latentOutputs)[source].defined())
     value = (*latentOutputs)[source];
-  return extractCompiledInput(value, element.latentExtractChannel);
+  return extractCompiledInput(value, extractChannel);
 }
 
 std::vector<torch::Tensor>
@@ -1376,6 +1442,13 @@ void LiveGraphRuntime::executeElement(std::size_t index,
         continue;
       auto value =
           runtime.outputs[static_cast<std::size_t>(source)];
+      if (pin < element.mathPinUseLatentTap.size() &&
+          element.mathPinUseLatentTap[pin] != 0) {
+        const auto slot = static_cast<std::size_t>(source);
+        if (slot < runtime.latentOutputs.size() &&
+            runtime.latentOutputs[slot].defined())
+          value = runtime.latentOutputs[slot];
+      }
       const auto extract =
           pin < element.mathPinExtract.size() ? element.mathPinExtract[pin]
                                               : -1;
@@ -1538,37 +1611,273 @@ void LiveGraphRuntime::executeElement(std::size_t index,
       output = upstream;
       break;
     }
-    const bool decodeFromLatent =
-        kernel != nullptr && kernel->hasEncodeDecode() &&
-        element.latentInputIndex >= 0;
-    if (decodeFromLatent) {
-      auto latent = gatherLatentInput(runtime.outputs, element,
-                                       &runtime.latentOutputs);
-      runtime.latentOutputs[index] = latent;
-      if (latent.defined())
-        output = kernel->decode(latent);
-      else
-        output = torch::zeros({1, element.outputChannels, samples},
-                              blockInput.options());
-    } else if (kernel != nullptr && kernel->hasEncodeDecode()) {
-      auto extended =
-          extendCausalInput(upstream, runtime.histories[index], historyLength);
-      auto latent = kernel->encode(extended);
+    if (kernel != nullptr && kernel->hasEncodeDecode()) {
       float fidelity = element.fidelityPercent;
+      float priorMix = element.priorMix;
       if (controls != nullptr) {
-        const auto found = controls->fidelityByNodeId.find(element.nodeId);
-        if (found != controls->fidelityByNodeId.end())
-          fidelity = found->second;
+        const auto foundFid = controls->fidelityByNodeId.find(element.nodeId);
+        if (foundFid != controls->fidelityByNodeId.end())
+          fidelity = foundFid->second;
+        const auto foundMix = controls->priorMixByNodeId.find(element.nodeId);
+        if (foundMix != controls->priorMixByNodeId.end())
+          priorMix = foundMix->second;
       }
-      if (latent.defined() && kernel->compactnessReady())
-        latent = VariationalBottleneck::applyFidelity(
-            latent, fidelity, kernel->compactnessMean(), kernel->compactnessPca(),
-            kernel->compactnessCumulative());
-      runtime.latentOutputs[index] = latent;
-      if (latent.defined())
-        output = kernel->decode(latent);
-      else
-        output = kernel->forward(extended);
+      priorMix = openyourbox::graph::clampPriorMix(priorMix);
+      const bool skipEncode =
+          priorMix >= openyourbox::graph::priorMixFullThreshold;
+      const bool fullForward =
+          priorMix <= openyourbox::graph::priorMixForwardThreshold;
+      const bool hasBias = element.biasInputIndex >= 0;
+      const bool hasScale = element.scaleInputIndex >= 0;
+      const bool useFixedRavePath =
+          element.requiresFixedInferenceBlock &&
+          (element.filmInputIndex < 0 || hasBias || hasScale || !fullForward);
+      if (useFixedRavePath) {
+        auto bias = gatherOptionalCompiled(
+            runtime.outputs, element.biasInputIndex, element.biasExtractChannel,
+            element.biasUsesLatentTap, &runtime.latentOutputs);
+        auto scale = gatherOptionalCompiled(
+            runtime.outputs, element.scaleInputIndex, element.scaleExtractChannel,
+            element.scaleUsesLatentTap, &runtime.latentOutputs);
+        runtime.ravePendingAudio[index] =
+            appendTime(runtime.ravePendingAudio[index], upstream);
+        if (bias.defined())
+          runtime.ravePendingBias[index] =
+              appendTime(runtime.ravePendingBias[index], bias);
+        if (scale.defined())
+          runtime.ravePendingScale[index] =
+              appendTime(runtime.ravePendingScale[index], scale);
+
+        const auto hop =
+            static_cast<std::int64_t>(element.inferenceBlockSamples);
+        while (runtime.ravePendingAudio[index].defined() &&
+               runtime.ravePendingAudio[index].size(2) >= hop) {
+          auto audioChunk =
+              runtime.ravePendingAudio[index].narrow(2, 0, hop).contiguous();
+          torch::Tensor muEnc;
+          torch::Tensor stdEnc;
+          if (!skipEncode) {
+            torch::Tensor stdRaw;
+            if (kernel->encodeDistribution(audioChunk, muEnc, stdRaw) &&
+                stdRaw.defined())
+              stdEnc = stdRaw;
+            if (muEnc.defined() && kernel->compactnessReady())
+              muEnc = VariationalBottleneck::applyFidelity(
+                  muEnc, fidelity, kernel->compactnessMean(),
+                  kernel->compactnessPca(), kernel->compactnessCumulative());
+          }
+
+          torch::Tensor decoded;
+          if (!skipEncode && !muEnc.defined()) {
+            decoded = kernel->forward(audioChunk);
+          } else {
+            const auto latentChannels =
+                muEnc.defined()
+                    ? muEnc.size(1)
+                    : std::max(1, element.latentOutputChannels);
+            const auto latentTime =
+                muEnc.defined()
+                    ? muEnc.size(2)
+                    : std::max(1, element.latentFramesPerBlock);
+            const auto ensureWork = [&](torch::Tensor &work, float fill) {
+              if (!work.defined() || work.dim() != 3 ||
+                  work.size(1) < latentChannels ||
+                  work.size(2) < latentTime) {
+                work = torch::full({1, latentChannels, latentTime}, fill,
+                                   audioChunk.options());
+              }
+              return work.narrow(1, 0, latentChannels)
+                  .narrow(2, 0, latentTime);
+            };
+
+            torch::Tensor mu;
+            torch::Tensor std;
+            if (skipEncode) {
+              mu = ensureWork(runtime.priorMeanWork[index], 0.0f);
+              mu.fill_(0.0f);
+              std = ensureWork(runtime.priorStdWork[index], 1.0f);
+              std.fill_(1.0f);
+            } else {
+              mu = priorMix <= 0.0f ? muEnc
+                                     : muEnc.mul(1.0f - priorMix);
+              if (stdEnc.defined())
+                std = stdEnc.mul(1.0f - priorMix).add(priorMix);
+              else {
+                // Mean-only encode (typical RAVE `encode`): σ_e = 0 so
+                // σ = α. Disconnected scale stays 1 and reconstruction
+                // stays deterministic at priorMix = 0.
+                std = ensureWork(runtime.priorStdWork[index], priorMix);
+                std.fill_(priorMix);
+              }
+            }
+
+            const auto applySteer = [](const torch::Tensor &base,
+                                       const torch::Tensor &steer, bool add) {
+              if (!base.defined() || !steer.defined())
+                return base;
+              auto aligned = matchTimeLength(steer, base.size(2));
+              if (!aligned.defined() || aligned.dim() != 3 ||
+                  (aligned.size(1) != base.size(1) &&
+                   aligned.size(1) != 1))
+                return base;
+              return add ? base + aligned : base * aligned;
+            };
+            mu = applySteer(mu, runtime.ravePendingBias[index], true);
+            std = applySteer(std, runtime.ravePendingScale[index], false);
+
+            auto epsilon = ensureWork(runtime.priorEpsilon[index], 0.0f);
+            VariationalBottleneck::fillUnitGaussian(epsilon);
+            auto latent =
+                VariationalBottleneck::reparameterize(mu, std, epsilon);
+            runtime.latentOutputs[index] = latent;
+            decoded = kernel->decode(latent);
+          }
+          runtime.ravePendingOutput[index] =
+              appendTime(runtime.ravePendingOutput[index], decoded);
+
+          const auto consume = [hop](torch::Tensor &pending) {
+            if (!pending.defined())
+              return;
+            const auto remain = pending.size(2) - hop;
+            pending = remain > 0
+                          ? pending.narrow(2, hop, remain).contiguous()
+                          : torch::Tensor{};
+          };
+          consume(runtime.ravePendingAudio[index]);
+          consume(runtime.ravePendingBias[index]);
+          consume(runtime.ravePendingScale[index]);
+        }
+
+        const auto outChannels =
+            runtime.ravePendingOutput[index].defined()
+                ? runtime.ravePendingOutput[index].size(1)
+                : element.outputChannels;
+        output = torch::zeros({1, outChannels, samples}, blockInput.options());
+        if (runtime.ravePendingOutput[index].defined()) {
+          const auto available =
+              std::min<std::int64_t>(samples,
+                                     runtime.ravePendingOutput[index].size(2));
+          if (available > 0)
+            output.narrow(2, 0, available)
+                .copy_(runtime.ravePendingOutput[index].narrow(2, 0, available));
+          const auto remain =
+              runtime.ravePendingOutput[index].size(2) - available;
+          runtime.ravePendingOutput[index] =
+              remain > 0
+                  ? runtime.ravePendingOutput[index]
+                        .narrow(2, available, remain)
+                        .contiguous()
+                  : torch::Tensor{};
+        }
+      } else {
+      torch::Tensor muEnc;
+      torch::Tensor stdEnc;
+      torch::Tensor extended;
+      if (!skipEncode) {
+        extended =
+            extendCausalInput(upstream, runtime.histories[index], historyLength);
+        torch::Tensor stdRaw;
+        if (kernel->encodeDistribution(extended, muEnc, stdRaw) &&
+            muEnc.defined()) {
+          if (stdRaw.defined())
+            stdEnc = stdRaw;
+        } else {
+          muEnc = kernel->encode(extended);
+        }
+        if (muEnc.defined() && kernel->compactnessReady())
+          muEnc = VariationalBottleneck::applyFidelity(
+              muEnc, fidelity, kernel->compactnessMean(),
+              kernel->compactnessPca(), kernel->compactnessCumulative());
+      }
+
+      if (!skipEncode && !muEnc.defined()) {
+        torch::Tensor cond = resolveFilmConditioning(runtime.outputs, element);
+        if (cond.defined())
+          cond = extendCausalControl(cond, runtime.conditioningHistories[index],
+                                     historyLength);
+        output = kernel->forwardWithConditioning(extended, cond);
+      } else {
+        std::int64_t latentChannels = 0;
+        std::int64_t latentTime = samples;
+        if (muEnc.defined() && muEnc.dim() == 3) {
+          latentChannels = muEnc.size(1);
+          latentTime = muEnc.size(2);
+        } else if (element.blackBoxFactory != nullptr) {
+          latentChannels = element.blackBoxFactory->getLatentChannels();
+          if (upstream.defined() && upstream.dim() == 3) {
+            const auto audioFrames =
+                std::max(1, element.inferenceBlockSamples);
+            const auto latentFrames =
+                std::max(1, element.latentFramesPerBlock);
+            latentTime = std::max<std::int64_t>(
+                1, (upstream.size(2) * latentFrames + audioFrames - 1) /
+                       audioFrames);
+          }
+        }
+        if (latentChannels < 1)
+          latentChannels = 1;
+
+        const auto ensureWork = [&](torch::Tensor &work, float fill) {
+          if (!work.defined() || work.dim() != 3 ||
+              work.size(1) < latentChannels || work.size(2) < latentTime) {
+            work = torch::full({1, latentChannels, latentTime}, fill,
+                               torch::TensorOptions()
+                                   .dtype(torch::kFloat32)
+                                   .device(torch::kCPU));
+          }
+          return work.narrow(1, 0, latentChannels).narrow(2, 0, latentTime);
+        };
+
+        const auto alpha = priorMix;
+        torch::Tensor mu;
+        torch::Tensor std;
+        if (skipEncode || !muEnc.defined()) {
+          mu = ensureWork(runtime.priorMeanWork[index], 0.0f);
+          mu.fill_(0.0f);
+          std = ensureWork(runtime.priorStdWork[index], 1.0f);
+          std.fill_(1.0f);
+        } else {
+          mu = alpha <= 0.0f ? muEnc : muEnc.mul(1.0f - alpha);
+          if (stdEnc.defined())
+            std = stdEnc.mul(1.0f - alpha).add(alpha);
+          else {
+            std = ensureWork(runtime.priorStdWork[index], alpha);
+            std.fill_(alpha);
+          }
+        }
+
+        auto bias = gatherOptionalCompiled(
+            runtime.outputs, element.biasInputIndex, element.biasExtractChannel,
+            element.biasUsesLatentTap, &runtime.latentOutputs);
+        auto scale = gatherOptionalCompiled(
+            runtime.outputs, element.scaleInputIndex, element.scaleExtractChannel,
+            element.scaleUsesLatentTap, &runtime.latentOutputs);
+        const auto applySteer = [](const torch::Tensor &base,
+                                   const torch::Tensor &steer, bool add) {
+          if (!base.defined() || !steer.defined())
+            return base;
+          auto aligned = matchTimeLength(steer, base.size(2));
+          if (!aligned.defined() || aligned.dim() != 3)
+            return base;
+          if (aligned.size(1) != base.size(1) && aligned.size(1) != 1)
+            return base;
+          return add ? base + aligned : base * aligned;
+        };
+        mu = applySteer(mu, bias, true);
+        std = applySteer(std, scale, false);
+
+        auto epsilon = ensureWork(runtime.priorEpsilon[index], 0.0f);
+        VariationalBottleneck::fillUnitGaussian(epsilon);
+        auto latent =
+            VariationalBottleneck::reparameterize(mu, std, epsilon);
+        runtime.latentOutputs[index] = latent;
+        if (latent.defined())
+          output = kernel->decode(latent);
+        else
+          output = torch::zeros({1, element.outputChannels, samples},
+                                blockInput.options());
+      }
+      }
     } else {
       auto extended =
           extendCausalInput(upstream, runtime.histories[index], historyLength);
@@ -1584,8 +1893,7 @@ void LiveGraphRuntime::executeElement(std::size_t index,
       throw std::runtime_error(
           "Frozen BlackBox returned an invalid tensor shape or type");
     const auto targetTime =
-        decodeFromLatent ? samples
-                         : (upstream.defined() ? upstream.size(2) : samples);
+        upstream.defined() ? upstream.size(2) : samples;
     output = matchTimeLength(output, targetTime);
     const auto elapsed = std::chrono::duration<double, std::milli>(
         std::chrono::steady_clock::now() - started);
@@ -1731,6 +2039,18 @@ LiveGraphRuntime::processTensorTapped(const torch::Tensor &input,
   for (std::size_t index = 0; index < elements.size(); ++index) {
     if (elements[index].nodeId == nodeId)
       return implementation->outputs[index];
+  }
+  return {};
+}
+
+torch::Tensor LiveGraphRuntime::getLatentOutput(std::int32_t nodeId) const {
+  const auto &elements = implementation->snapshot->implementation->elements;
+  for (std::size_t index = 0; index < elements.size(); ++index) {
+    if (elements[index].nodeId != nodeId)
+      continue;
+    if (index < implementation->latentOutputs.size())
+      return implementation->latentOutputs[index];
+    return {};
   }
   return {};
 }
@@ -2178,6 +2498,8 @@ LiveGraphEngine::compile(const graph::NodeGraph &graphDocument,
           element.inputExtractChannels.assign(element.inputIndices.size(), -1);
           element.inputIsConditioning.assign(element.inputIndices.size(), 0);
           element.inputUseLatentTap.assign(element.inputIndices.size(), 0);
+          element.inputIsBias.assign(element.inputIndices.size(), 0);
+          element.inputIsScale.assign(element.inputIndices.size(), 0);
           std::size_t compiledInput = 0;
           for (const auto &pin : inputNodeForPins->inputs) {
             const auto source = sourceNodeByDestinationPin.find(pin.id);
@@ -2203,6 +2525,10 @@ LiveGraphEngine::compile(const graph::NodeGraph &graphDocument,
               element.inputUseLatentTap[compiledInput] = 1;
             element.inputIsConditioning[compiledInput] =
                 graph::isControlInputPin(pin) ? 1 : 0;
+            element.inputIsBias[compiledInput] =
+                graph::isBiasPin(pin) ? 1 : 0;
+            element.inputIsScale[compiledInput] =
+                graph::isScalePin(pin) ? 1 : 0;
             ++compiledInput;
           }
           element.inputChannels =
@@ -2503,7 +2829,11 @@ LiveGraphEngine::compile(const graph::NodeGraph &graphDocument,
               index < element.inputExtractChannels.size()
                   ? element.inputExtractChannels[index]
                   : -1;
-          const auto channels = compiledSlotChannels(source, extract);
+          const auto useLatentTap =
+              index < element.inputUseLatentTap.size() &&
+              element.inputUseLatentTap[index] != 0;
+          const auto channels =
+              compiledSlotChannels(source, extract, useLatentTap);
           if (channels < 1)
             return failure(LiveGraphErrorCode::invalidShape, node.id,
                            "Utility inputs must have positive channel counts");
@@ -2544,6 +2874,7 @@ LiveGraphEngine::compile(const graph::NodeGraph &graphDocument,
         element.mathAst = parsed.ast;
         element.mathPinSources.assign(node.inputs.size(), -1);
         element.mathPinExtract.assign(node.inputs.size(), -1);
+        element.mathPinUseLatentTap.assign(node.inputs.size(), 0);
         int width = 0;
         std::size_t compiledInput = 0;
         for (std::size_t pinIndex = 0; pinIndex < node.inputs.size();
@@ -2568,10 +2899,21 @@ LiveGraphEngine::compile(const graph::NodeGraph &graphDocument,
           if (compiledInput < element.inputExtractChannels.size())
             element.mathPinExtract[pinIndex] =
                 element.inputExtractChannels[compiledInput];
+          const auto sourcePin = sourcePinIdByDestinationPin.find(pin.id);
+          if (sourcePin != sourcePinIdByDestinationPin.end()) {
+            const auto *sourceGraphNode = nodesById.at(source->second);
+            for (const auto &outPin : sourceGraphNode->outputs) {
+              if (outPin.id == sourcePin->second && graph::isLatentPin(outPin))
+                element.mathPinUseLatentTap[pinIndex] = 1;
+            }
+          }
           const auto &sourceElement =
               compiled->elements[compiledSource->second];
+          const auto useLatentTap =
+              pinIndex < element.mathPinUseLatentTap.size() &&
+              element.mathPinUseLatentTap[pinIndex] != 0;
           const auto channels = compiledSlotChannels(
-              sourceElement, element.mathPinExtract[pinIndex]);
+              sourceElement, element.mathPinExtract[pinIndex], useLatentTap);
           if (graph::mathExpressionReferencesInput(
                   parsed.ast, static_cast<int>(pinIndex) + 1)) {
             if (channels < 1)
@@ -2615,6 +2957,12 @@ LiveGraphEngine::compile(const graph::NodeGraph &graphDocument,
         element.filmExtractChannel = -1;
         element.latentInputIndex = -1;
         element.latentExtractChannel = -1;
+        element.biasInputIndex = -1;
+        element.biasExtractChannel = -1;
+        element.biasUsesLatentTap = false;
+        element.scaleInputIndex = -1;
+        element.scaleExtractChannel = -1;
+        element.scaleUsesLatentTap = false;
         bool haveAudioInput = false;
         for (std::size_t index = 0; index < element.inputIsConditioning.size();
              ++index) {
@@ -2624,13 +2972,24 @@ LiveGraphEngine::compile(const graph::NodeGraph &graphDocument,
               index < element.inputExtractChannels.size()
                   ? element.inputExtractChannels[index]
                   : -1;
+          const bool useTap =
+              index < element.inputUseLatentTap.size() &&
+              element.inputUseLatentTap[index] != 0;
           if (element.inputIsConditioning[index] != 0) {
             element.filmInputIndex = element.inputIndices[index];
             element.filmExtractChannel = extract;
-          } else if (index < element.inputUseLatentTap.size() &&
-                     element.inputUseLatentTap[index] != 0) {
-            element.latentInputIndex = element.inputIndices[index];
-            element.latentExtractChannel = extract;
+          } else if (index < element.inputIsBias.size() &&
+                     element.inputIsBias[index] != 0) {
+            element.biasInputIndex = element.inputIndices[index];
+            element.biasExtractChannel = extract;
+            element.biasUsesLatentTap = useTap;
+          } else if (index < element.inputIsScale.size() &&
+                     element.inputIsScale[index] != 0) {
+            element.scaleInputIndex = element.inputIndices[index];
+            element.scaleExtractChannel = extract;
+            element.scaleUsesLatentTap = useTap;
+          } else if (useTap) {
+            // Former latent-in cables are ignored (no decode-from-z shortcut).
           } else {
             element.inputIndex = element.inputIndices[index];
             element.inputChannels = compiledSlotChannels(
@@ -2666,6 +3025,15 @@ LiveGraphEngine::compile(const graph::NodeGraph &graphDocument,
                          "Frozen hook metadata is absent, shape-incompatible, "
                          "or not silence-preserving");
         element.outputChannels = element.blackBoxFactory->getOutputChannels();
+        if (element.blackBoxFactory->hasEncodeDecode())
+          element.latentOutputChannels =
+              std::max(0, element.blackBoxFactory->getLatentChannels());
+        element.inferenceBlockSamples =
+            std::max(1, element.blackBoxFactory->getInferenceBlockSamples());
+        element.latentFramesPerBlock =
+            std::max(1, element.blackBoxFactory->getLatentFramesPerBlock());
+        element.requiresFixedInferenceBlock =
+            element.blackBoxFactory->requiresFixedInferenceBlock();
         if ((node.blackBoxOrigin == graph::BlackBoxOrigin::trainAutoload ||
              node.blackBoxOrigin == graph::BlackBoxOrigin::externalLoad) &&
             haveAudioInput && element.inputChannels > 0)
@@ -2678,6 +3046,9 @@ LiveGraphEngine::compile(const graph::NodeGraph &graphDocument,
         element.parameterCount = element.blackBoxFactory->getParameterCount();
         readFloatProperty(node, "fidelity", element.fidelityPercent);
         element.fidelityPercent = graph::clampFidelity(element.fidelityPercent);
+        element.priorMix = graph::clampPriorMix(node.priorMix);
+        readFloatProperty(node, "priorMix", element.priorMix);
+        element.priorMix = graph::clampPriorMix(element.priorMix);
         break;
       }
       case NodeType::pqmfAnalysis: {
@@ -2968,6 +3339,13 @@ LiveGraphEngine::prepare(std::shared_ptr<const LiveGraphSnapshot> snapshot,
     const auto &compiled = *snapshot->implementation;
     runtime->outputs.resize(compiled.elements.size());
     runtime->latentOutputs.resize(compiled.elements.size());
+    runtime->priorEpsilon.resize(compiled.elements.size());
+    runtime->priorStdWork.resize(compiled.elements.size());
+    runtime->priorMeanWork.resize(compiled.elements.size());
+    runtime->ravePendingAudio.resize(compiled.elements.size());
+    runtime->ravePendingBias.resize(compiled.elements.size());
+    runtime->ravePendingScale.resize(compiled.elements.size());
+    runtime->ravePendingOutput.resize(compiled.elements.size());
     runtime->histories.resize(compiled.elements.size());
     runtime->conditioningHistories.resize(compiled.elements.size());
     runtime->recurrentHidden.resize(compiled.elements.size());
@@ -3052,6 +3430,33 @@ LiveGraphEngine::prepare(std::shared_ptr<const LiveGraphSnapshot> snapshot,
             error.message = "Frozen BlackBox kernel could not be prepared";
             return {};
           }
+          if (runtime->blackBoxKernels[index]->hasEncodeDecode()) {
+            const auto latentChannels = std::max(
+                1, element.blackBoxFactory != nullptr
+                       ? element.blackBoxFactory->getLatentChannels()
+                       : 1);
+            const auto audioFrames =
+                std::max(1, element.inferenceBlockSamples);
+            const auto latentFrames =
+                std::max(1, element.latentFramesPerBlock);
+            const auto latentTime = element.requiresFixedInferenceBlock
+                                        ? latentFrames
+                                        : std::max<std::int64_t>(
+                                              1, (compiled.maximumBlockSize *
+                                                      latentFrames +
+                                                  audioFrames - 1) /
+                                                     audioFrames);
+            const auto opts =
+                torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCPU);
+            runtime->priorEpsilon[index] =
+                torch::empty({1, latentChannels, latentTime}, opts);
+            runtime->priorStdWork[index] =
+                torch::ones({1, latentChannels, latentTime}, opts);
+            runtime->priorMeanWork[index] =
+                torch::zeros({1, latentChannels, latentTime}, opts);
+            VariationalBottleneck::fillUnitGaussian(
+                runtime->priorEpsilon[index]);
+          }
         }
       }
     }
@@ -3091,9 +3496,12 @@ collectRuntimeControlState(const graph::NodeGraph &graphDocument) {
           graph::clampConditioning(node.conditioningX),
           graph::clampConditioning(node.conditioningY)};
     if (node.type == graph::NodeType::variationalBottleneck ||
-        node.type == graph::NodeType::blackBox)
+        node.type == graph::NodeType::blackBox) {
       controls.fidelityByNodeId[node.id] =
           graph::clampFidelity(node.fidelityPercent);
+      controls.priorMixByNodeId[node.id] =
+          graph::clampPriorMix(node.priorMix);
+    }
   }
   return controls;
 }

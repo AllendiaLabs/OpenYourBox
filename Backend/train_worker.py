@@ -1678,6 +1678,22 @@ class RaveGraphModule(nn.Module):
             return audio
         return self._run(audio, stop_at=self.bottleneck_id)
 
+    def encode_distribution(self, audio: torch.Tensor) -> torch.Tensor:
+        """Return concatenated ``(μ, σ)`` along the channel axis.
+
+        Spread uses the acids-rave softplus-std convention. When no bottleneck
+        is present, σ is ones so the live prior-mix fallback stays defined.
+        """
+        if self.bottleneck_id is None:
+            mean = self._run(audio)
+            return torch.cat((mean, torch.ones_like(mean)), dim=1)
+        mean = self._run(audio, stop_at=self.bottleneck_id)
+        layer = self.layers.get(self.bottleneck_id)
+        std = getattr(layer, "last_std", None)
+        if std is None:
+            std = torch.ones_like(mean)
+        return torch.cat((mean, std), dim=1)
+
     def decode(self, latent: torch.Tensor) -> torch.Tensor:
         """Run the decoder starting after the bottleneck."""
         if self.bottleneck_id is None:
@@ -2483,7 +2499,11 @@ def _export_rave_scripted(module: RaveGraphModule, input_channels: int, path: Pa
         def encode(self, audio: torch.Tensor) -> torch.Tensor:
             return self.inner.encode(audio)
 
+        def encode_distribution(self, audio: torch.Tensor) -> torch.Tensor:
+            return self.inner.encode_distribution(audio)
+
         def decode(self, latent: torch.Tensor) -> torch.Tensor:
+            return self.inner.decode(latent)
             return self.inner.decode(latent)
 
         def forward(self, audio: torch.Tensor) -> torch.Tensor:
@@ -2493,7 +2513,12 @@ def _export_rave_scripted(module: RaveGraphModule, input_channels: int, path: Pa
     with torch.inference_mode():
         scripted = torch.jit.trace_module(
             wrapped,
-            {"forward": example, "encode": example, "decode": latent_example},
+            {
+                "forward": example,
+                "encode": example,
+                "encode_distribution": example,
+                "decode": latent_example,
+            },
             strict=False,
             check_trace=False,
         )

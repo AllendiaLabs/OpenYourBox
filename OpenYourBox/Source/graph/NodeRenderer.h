@@ -325,6 +325,14 @@ private:
   void handleContextMenus(NodeGraph &graph,
                           const NodeRendererCallbacks &callbacks);
   /**
+   * @brief Draws Factory categories plus an expandable User Library submenu.
+   * @param fromPin True for Pin Add; false for Link Insert (applies insert filters).
+   * @param targetId Pin or link identifier.
+   * @param position Canvas spawn position.
+   */
+  void renderContextInsertCatalog(bool fromPin, std::int32_t targetId,
+                                  juce::Point<float> position);
+  /**
    * @brief Renders an active property combobox in screen coordinates.
    * @param graph Message-thread graph document.
    * @param callbacks Runtime actions owned by the plug-in editor.
@@ -489,6 +497,12 @@ private:
     juce::Point<float> position{};
     /** @brief Whether an attach action is queued. */
     bool pending = false;
+    /** @brief True when the action inserts a user-library box. */
+    bool fromLibrary = false;
+    /** @brief Catalog UUID when @ref fromLibrary is true. */
+    juce::String libraryEntryId;
+    /** @brief Snapshot nested root id; 0 inserts the saved root. */
+    std::int32_t nestedRootId = 0;
   } pendingPinAttach;
   /** @brief Link insert action queued from the context menu. */
   struct PendingLinkInsert {
@@ -500,6 +514,12 @@ private:
     juce::Point<float> position{};
     /** @brief Whether an insert action is queued. */
     bool pending = false;
+    /** @brief True when the action inserts a user-library box. */
+    bool fromLibrary = false;
+    /** @brief Catalog UUID when @ref fromLibrary is true. */
+    juce::String libraryEntryId;
+    /** @brief Snapshot nested root id; 0 inserts the saved root. */
+    std::int32_t nestedRootId = 0;
   } pendingLinkInsert;
   /** @brief Session Parameters-tab binding. */
   SelectionContext selectionContext;

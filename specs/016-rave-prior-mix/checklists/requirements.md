@@ -35,3 +35,4 @@
 - Product terms “TorchScript”, “Gold”, and “RAVE” are retained as user-facing OpenYourBox vocabulary from prior specs, not as implementation prescriptions.
 - Scope explicitly limited to RAVE-capable Gold / externally loaded boxes for prior-mix/bias/scale; Blue modular rebuild of the same surface is out of scope.
 - No `hooks.after_specify` registered (no `.specify/extensions.yml`).
+- Implementation (2026-08-30): engine tests cover prior-mix lerp and encoder skip, bias/scale pin surface (including illegal-shape refusal), and latent-out identity with decode input. Right-click Factory + User Library catalog is in the editor (`NodeRenderer`); confirm quickstart §5 in the plug-in UI.

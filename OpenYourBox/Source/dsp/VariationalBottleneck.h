@@ -62,5 +62,28 @@ public:
    */
   [[nodiscard]] static int keptRank(float fidelityPercent,
                                     const torch::Tensor &cumulativeVariance);
+
+  /**
+   * @brief Maps a variance-head pre-activation to a positive spread.
+   * @param scale Grouped-head scale tensor.
+   * @return `softplus(scale) + softplusEpsilon`.
+   */
+  [[nodiscard]] static torch::Tensor softplusStd(const torch::Tensor &scale);
+
+  /**
+   * @brief Fills @p buffer in-place with N(0,1) samples (no heap growth).
+   * @param buffer Preallocated CPU float tensor.
+   */
+  static void fillUnitGaussian(torch::Tensor &buffer);
+
+  /**
+   * @brief Reparameterizes `z = μ + σ ⊙ ε`.
+   * @param mean Latent mean.
+   * @param std Latent spread (same shape as @p mean).
+   * @param epsilon Unit-Gaussian noise (same shape as @p mean).
+   */
+  [[nodiscard]] static torch::Tensor
+  reparameterize(const torch::Tensor &mean, const torch::Tensor &std,
+                 const torch::Tensor &epsilon);
 };
 } // namespace openyourbox::dsp

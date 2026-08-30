@@ -69,6 +69,15 @@ public:
   /** @brief Encode output width, or 0 when encode/decode is absent. */
   [[nodiscard]] int getLatentChannels() const noexcept override;
 
+  /** @brief Audio samples accepted by one validated inference call. */
+  [[nodiscard]] int getInferenceBlockSamples() const noexcept override;
+
+  /** @brief Latent frames produced by one validated encode call. */
+  [[nodiscard]] int getLatentFramesPerBlock() const noexcept override;
+
+  /** @brief True when encode/decode require complete inference blocks. */
+  [[nodiscard]] bool requiresFixedInferenceBlock() const noexcept override;
+
   /** @brief True when compactness PCA attrs were copied from the artifact. */
   [[nodiscard]] bool compactnessReady() const noexcept override;
 
@@ -101,6 +110,7 @@ private:
    * @param condDim Validated FiLM control width.
    * @param encodeDecode True when encode and decode methods exist.
    * @param latentChannels Encode output width, or 0.
+   * @param latentFrames Encode output time length for one probe block.
    * @param compactnessReady True when PCA attrs were present.
    * @param latentMean Compactness mean buffer.
    * @param latentPca Compactness PCA buffer.
@@ -113,6 +123,7 @@ private:
                              std::uint64_t field, std::uint64_t parameters,
                              bool silence, bool conditioned, int condDim,
                              bool encodeDecode, int latentChannels,
+                             int latentFrames,
                              bool compactnessReady,
                              std::vector<float> latentMean,
                              std::vector<float> latentPca,
@@ -140,6 +151,8 @@ private:
   bool encodeDecode = false;
   /** @brief Encode output channel count, or 0. */
   int latentChannels = 0;
+  /** @brief Encode output frames for one validated inference block. */
+  int latentFramesPerBlock = 1;
   /** @brief True when compactness attrs were copied. */
   bool compactnessBuffersReady = false;
   /** @brief Compactness mean `[latent]`. */

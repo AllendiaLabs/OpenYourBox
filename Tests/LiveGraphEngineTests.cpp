@@ -10,6 +10,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cmath>
 #include <exception>
 #include <iostream>
@@ -239,8 +240,13 @@ public:
   /** @brief Passes stereo audio through unchanged. */
   torch::Tensor forward(const torch::Tensor &input) override { return input; }
 
-  /** @brief Returns the stereo audio as a 2-channel latent. */
-  torch::Tensor encode(const torch::Tensor &input) override { return input; }
+  /** @brief Returns an 8-channel latent filled from the stereo input mean. */
+  torch::Tensor encode(const torch::Tensor &input) override {
+    auto latent = torch::zeros({1, 8, input.size(2)}, input.options());
+    if (input.defined() && input.numel() > 0)
+      latent.fill_(input.mean().item<float>());
+    return latent;
+  }
 
   /**
    * @brief Emits stereo audio whose value flags the incoming latent width.
@@ -280,6 +286,201 @@ public:
   std::unique_ptr<openyourbox::dsp::FrozenBlackBoxKernel>
   createKernel() const override {
     return std::make_unique<TestRaveDecodeKernel>();
+  }
+};
+
+/**
+ * @class TestPriorMixKernel
+ * @brief Deterministic RAVE fixture: μ tracks input mean, σ=0 unless mixed.
+ */
+class TestPriorMixKernel final : public openyourbox::dsp::FrozenBlackBoxKernel {
+public:
+  /** @brief Shared encode-call counter for encoder-skip checks. */
+  std::shared_ptr<std::atomic<int>> encodeCalls;
+  /** @brief Last latent consumed by decode. */
+  std::shared_ptr<torch::Tensor> lastDecode;
+  /** @brief True when encode_distribution exposes a spread tensor. */
+  bool provideSpread = true;
+
+  /**
+   * @brief Adopts shared encode/decode probes.
+   * @param calls Encode counter.
+   * @param decodeTap Last decode latent.
+   * @param exposeSpread True to return σ=0 from encode_distribution.
+   */
+  TestPriorMixKernel(std::shared_ptr<std::atomic<int>> calls,
+                     std::shared_ptr<torch::Tensor> decodeTap,
+                     bool exposeSpread)
+      : encodeCalls(std::move(calls)), lastDecode(std::move(decodeTap)),
+        provideSpread(exposeSpread) {}
+
+  /** @brief Passes stereo audio through unchanged. */
+  torch::Tensor forward(const torch::Tensor &input) override { return input; }
+
+  /** @brief Broadcasts the input mean onto an 8-channel latent. */
+  torch::Tensor encode(const torch::Tensor &input) override {
+    if (encodeCalls)
+      encodeCalls->fetch_add(1, std::memory_order_relaxed);
+    auto mean = torch::zeros({1, 8, input.size(2)}, input.options());
+    mean.fill_(input.mean().item<float>());
+    return mean;
+  }
+
+  /**
+   * @brief Returns μ from encode and a zero spread so z=μ at full forward.
+   */
+  bool encodeDistribution(const torch::Tensor &input, torch::Tensor &mean,
+                          torch::Tensor &std) override {
+    mean = encode(input);
+    if (!mean.defined()) {
+      std = torch::Tensor{};
+      return false;
+    }
+    if (!provideSpread) {
+      std = torch::Tensor{};
+      return true;
+    }
+    std = torch::zeros_like(mean);
+    return true;
+  }
+
+  /** @brief Emits stereo audio filled with the latent mean. */
+  torch::Tensor decode(const torch::Tensor &latent) override {
+    if (lastDecode)
+      *lastDecode = latent.defined() ? latent.detach().clone() : torch::Tensor{};
+    auto audio = torch::zeros({1, 2, latent.size(2)}, latent.options());
+    if (latent.defined())
+      audio.fill_(latent.mean().item<float>());
+    return audio;
+  }
+
+  /** @brief Advertises encode/decode so the prior-mix path compiles. */
+  bool hasEncodeDecode() const noexcept override { return true; }
+};
+
+/**
+ * @class TestPriorMixFactory
+ * @brief Stereo RAVE-style factory with an 8-channel latent and encode probes.
+ */
+class TestPriorMixFactory final : public openyourbox::dsp::FrozenBlackBoxFactory {
+public:
+  /** @brief Shared encode-call counter. */
+  std::shared_ptr<std::atomic<int>> encodeCalls =
+      std::make_shared<std::atomic<int>>(0);
+  /** @brief Last latent consumed by decode. */
+  std::shared_ptr<torch::Tensor> lastDecode = std::make_shared<torch::Tensor>();
+  /** @brief True when kernels expose a defined encoder spread. */
+  bool provideSpread = true;
+
+  int getInputChannels() const noexcept override { return 2; }
+  int getOutputChannels() const noexcept override { return 2; }
+  std::uint64_t getReceptiveField() const noexcept override { return 1; }
+  std::uint64_t getParameterCount() const noexcept override { return 0; }
+  bool preservesSilence() const noexcept override { return true; }
+  bool hasEncodeDecode() const noexcept override { return true; }
+  int getLatentChannels() const noexcept override { return 8; }
+  std::unique_ptr<openyourbox::dsp::FrozenBlackBoxKernel>
+  createKernel() const override {
+    return std::make_unique<TestPriorMixKernel>(encodeCalls, lastDecode,
+                                                provideSpread);
+  }
+};
+
+/**
+ * @class TestFixedHopRaveKernel
+ * @brief Rate-changing fixed-hop RAVE fixture used by steering regressions.
+ */
+class TestFixedHopRaveKernel final
+    : public openyourbox::dsp::FrozenBlackBoxKernel {
+public:
+  /** @brief Last latent tensor passed to decode. */
+  std::shared_ptr<torch::Tensor> lastDecode;
+  /** @brief True when encode returns a unit spread instead of zero spread. */
+  bool unitSpread = false;
+
+  /**
+   * @brief Adopts the shared decode probe.
+   * @param decodeTap Destination for the latest decoded latent.
+   * @param useUnitSpread True to return σ=1 from encode_distribution.
+   */
+  TestFixedHopRaveKernel(std::shared_ptr<torch::Tensor> decodeTap,
+                         bool useUnitSpread)
+      : lastDecode(std::move(decodeTap)), unitSpread(useUnitSpread) {}
+
+  /** @brief Passes complete eight-sample blocks through unchanged. */
+  torch::Tensor forward(const torch::Tensor &input) override { return input; }
+
+  /** @brief Encodes eight audio samples into one eight-channel latent frame. */
+  torch::Tensor encode(const torch::Tensor &input) override {
+    if (!input.defined() || input.size(2) != 8)
+      return {};
+    auto latent = torch::zeros({1, 8, 1}, input.options());
+    latent.fill_(input.mean().item<float>());
+    return latent;
+  }
+
+  /** @brief Returns the configured deterministic encoded distribution. */
+  bool encodeDistribution(const torch::Tensor &input, torch::Tensor &mean,
+                          torch::Tensor &std) override {
+    mean = encode(input);
+    if (!mean.defined()) {
+      std = torch::Tensor{};
+      return false;
+    }
+    std = unitSpread ? torch::ones_like(mean) : torch::zeros_like(mean);
+    return true;
+  }
+
+  /** @brief Expands one latent frame to one eight-sample stereo audio block. */
+  torch::Tensor decode(const torch::Tensor &latent) override {
+    if (lastDecode)
+      *lastDecode = latent.defined() ? latent.detach().clone() : torch::Tensor{};
+    auto audio = torch::zeros({1, 2, 8}, latent.options());
+    audio.fill_(latent.mean().item<float>());
+    return audio;
+  }
+
+  /** @brief Advertises the fixture's encode/decode methods. */
+  bool hasEncodeDecode() const noexcept override { return true; }
+};
+
+/**
+ * @class TestFixedHopRaveFactory
+ * @brief Describes an 8:1 audio-to-latent fixed-hop RAVE fixture.
+ */
+class TestFixedHopRaveFactory final
+    : public openyourbox::dsp::FrozenBlackBoxFactory {
+public:
+  /** @brief Shared latest decode input. */
+  std::shared_ptr<torch::Tensor> lastDecode = std::make_shared<torch::Tensor>();
+  /** @brief True when kernels should expose an encoded unit spread. */
+  bool unitSpread = false;
+
+  /** @brief Returns the stereo fixture input width. */
+  int getInputChannels() const noexcept override { return 2; }
+  /** @brief Returns the stereo fixture output width. */
+  int getOutputChannels() const noexcept override { return 2; }
+  /** @brief Returns the fixture's single-sample causal field. */
+  std::uint64_t getReceptiveField() const noexcept override { return 1; }
+  /** @brief Reports that the fixture has no trainable parameters. */
+  std::uint64_t getParameterCount() const noexcept override { return 0; }
+  /** @brief Reports deterministic silence preservation. */
+  bool preservesSilence() const noexcept override { return true; }
+  /** @brief Advertises the fixture's encode/decode methods. */
+  bool hasEncodeDecode() const noexcept override { return true; }
+  /** @brief Returns the fixture's eight latent channels. */
+  int getLatentChannels() const noexcept override { return 8; }
+  /** @brief Returns the required eight-sample audio hop. */
+  int getInferenceBlockSamples() const noexcept override { return 8; }
+  /** @brief Returns one latent frame per complete audio hop. */
+  int getLatentFramesPerBlock() const noexcept override { return 1; }
+  /** @brief Reports that partial audio hops cannot be encoded. */
+  bool requiresFixedInferenceBlock() const noexcept override { return true; }
+
+  /** @brief Creates one fixed-hop regression kernel. */
+  std::unique_ptr<openyourbox::dsp::FrozenBlackBoxKernel>
+  createKernel() const override {
+    return std::make_unique<TestFixedHopRaveKernel>(lastDecode, unitSpread);
   }
 };
 
@@ -3522,6 +3723,34 @@ int main() {
     const auto factory = std::make_shared<TestFrozenFactory>();
     graph.applyExternalCheckpointReady(load, "test-external.pt", 2, 2, 0, false,
                                        false, false, {}, {}, {}, "");
+    const auto *forwardOnly = graph.findNode(load);
+    bool forwardBias = false;
+    bool forwardScale = false;
+    bool forwardLatent = false;
+    bool forwardPriorMix = false;
+    if (forwardOnly != nullptr) {
+      for (const auto &pin : forwardOnly->inputs) {
+        if (openyourbox::graph::isBiasPin(pin) ||
+            openyourbox::graph::isScalePin(pin) ||
+            openyourbox::graph::isLatentPin(pin))
+          forwardLatent = true;
+        if (openyourbox::graph::isBiasPin(pin))
+          forwardBias = true;
+        if (openyourbox::graph::isScalePin(pin))
+          forwardScale = true;
+      }
+      for (const auto &pin : forwardOnly->outputs) {
+        if (openyourbox::graph::isLatentPin(pin))
+          forwardLatent = true;
+      }
+      for (const auto &property : forwardOnly->properties) {
+        if (property.key == "priorMix")
+          forwardPriorMix = true;
+      }
+    }
+    passed &= expect(!forwardBias && !forwardScale && !forwardLatent &&
+                         !forwardPriorMix,
+                     "forward-only load omits priorMix, bias, scale, and latent");
     const auto readyCompiled = LiveGraphEngine::compile(
         graph, options,
         [factory](const openyourbox::graph::GraphNode &) { return factory; });
@@ -3583,19 +3812,37 @@ int main() {
     graph.applyExternalCheckpointReady(load, "test-rave.pt", 2, 2, 2, true,
                                        true, false, {}, {}, {}, "");
     const auto *rave = graph.findNode(load);
-    passed &= expect(rave != nullptr && rave->inputs.size() >= 2 &&
+    passed &= expect(rave != nullptr && rave->inputs.size() >= 4 &&
                          rave->outputs.size() >= 2,
-                     "encode/decode load morphs latent pins");
+                     "encode/decode load morphs bias, scale, and latent pins");
     bool hasControl = false;
-    bool hasLatent = false;
+    bool hasBias = false;
+    bool hasScale = false;
+    bool hasLatentIn = false;
+    bool hasLatentOut = false;
+    bool hasPriorMix = false;
     for (const auto &pin : rave->inputs) {
       if (openyourbox::graph::isControlInputPin(pin))
         hasControl = true;
-      if (openyourbox::graph::isLatentPin(pin))
-        hasLatent = true;
+      if (openyourbox::graph::isBiasPin(pin))
+        hasBias = true;
+      if (openyourbox::graph::isScalePin(pin))
+        hasScale = true;
+      if (openyourbox::graph::isLatentPin(pin) &&
+          pin.kind == openyourbox::graph::PinKind::input)
+        hasLatentIn = true;
     }
-    passed &= expect(hasControl && hasLatent,
-                     "conditioned encode/decode load exposes Control and latent");
+    for (const auto &pin : rave->outputs) {
+      if (openyourbox::graph::isLatentPin(pin))
+        hasLatentOut = true;
+    }
+    for (const auto &property : rave->properties) {
+      if (property.key == "priorMix")
+        hasPriorMix = true;
+    }
+    passed &= expect(hasControl && hasBias && hasScale && !hasLatentIn &&
+                         hasLatentOut && hasPriorMix,
+                     "conditioned encode/decode load exposes Control, bias, scale, latent out, priorMix");
     const auto encodeFactory = std::make_shared<TestEncodeDecodeFactory>();
     const auto encodeCompiled = LiveGraphEngine::compile(
         graph, options,
@@ -3621,6 +3868,112 @@ int main() {
     using openyourbox::dsp::LiveGraphCompileError;
     using openyourbox::dsp::LiveGraphEngine;
     using openyourbox::graph::NodeType;
+
+    auto runFixedSteering = [&](float x, float priorMix, bool steerScale,
+                                bool unitSpread,
+                                torch::Tensor &decodedLatent) {
+      openyourbox::graph::NodeGraph graph;
+      const auto input = graph.addNode(NodeType::audioInput, {0.0f, 0.0f});
+      const auto load =
+          graph.addExternalTorchScriptLoadNode({240.0f, 0.0f});
+      const auto output =
+          graph.addNode(NodeType::audioOutput, {480.0f, 0.0f});
+      const auto xy = graph.addNode(NodeType::xyTrackpad, {0.0f, 120.0f});
+      const auto conv = graph.addNode(NodeType::convolution, {160.0f, 120.0f});
+      graph.setConditioningPad(xy, x, 0.0f);
+      graph.setProperty(conv, "channels", 8);
+      graph.setProperty(conv, "kernel_size", 1);
+      graph.applyExternalCheckpointReady(load, "fixed-hop-rave.ts", 2, 2, 8,
+                                         true, false, false, {}, {}, {}, "");
+      graph.setFloatProperty(load, "priorMix", priorMix);
+
+      const auto *loadNode = graph.findNode(load);
+      const auto *xyNode = graph.findNode(xy);
+      std::int32_t steeringIn = 0;
+      if (loadNode != nullptr) {
+        for (const auto &pin : loadNode->inputs) {
+          if ((steerScale && openyourbox::graph::isScalePin(pin)) ||
+              (!steerScale && openyourbox::graph::isBiasPin(pin)))
+            steeringIn = pin.id;
+        }
+      }
+      const bool wired =
+          loadNode != nullptr && xyNode != nullptr && steeringIn != 0 &&
+          graph
+              .connect(graph.findNode(input)->outputs.front().id,
+                       loadNode->inputs.front().id)
+              .accepted &&
+          graph
+              .connect(loadNode->outputs.front().id,
+                       graph.findNode(output)->inputs.front().id)
+              .accepted &&
+          graph
+              .connect(xyNode->outputs.front().id,
+                       graph.findNode(conv)->inputs.front().id)
+              .accepted &&
+          graph.connect(graph.findNode(conv)->outputs.front().id, steeringIn)
+              .accepted;
+      passed &= expect(wired,
+                       "fixed-hop XY → Conv8 → steering graph must wire");
+
+      const auto factory = std::make_shared<TestFixedHopRaveFactory>();
+      factory->unitSpread = unitSpread;
+      const auto compiled = LiveGraphEngine::compile(
+          graph, options, [factory](const openyourbox::graph::GraphNode &) {
+            return factory;
+          });
+      passed &= expect(compiled.succeeded(),
+                       "fixed-hop steering graph must compile");
+      LiveGraphCompileError error;
+      auto runtime = LiveGraphEngine::prepare(compiled.snapshot, error);
+      passed &= expect(runtime != nullptr,
+                       "fixed-hop steering graph must prepare");
+      if (runtime == nullptr)
+        return torch::Tensor{};
+      const auto silence = torch::zeros({1, 2, 4}, torch::kFloat32);
+      runtime->processTensor(silence);
+      const auto rendered = runtime->processTensor(silence);
+      decodedLatent = factory->lastDecode && factory->lastDecode->defined()
+                          ? factory->lastDecode->clone()
+                          : torch::Tensor{};
+      return rendered;
+    };
+
+    torch::Tensor negativeLatent;
+    torch::Tensor positiveLatent;
+    const auto negative =
+        runFixedSteering(-8.0f, 0.0f, false, false, negativeLatent);
+    const auto positive =
+        runFixedSteering(8.0f, 0.0f, false, false, positiveLatent);
+    passed &= expect(
+        negative.defined() && positive.defined() &&
+            negativeLatent.defined() && positiveLatent.defined() &&
+            !torch::allclose(negativeLatent, positiveLatent),
+        "moving XY through Conv8 must change fixed-hop RAVE bias/decode latent");
+
+    torch::Tensor zeroScaleLatent;
+    torch::Tensor movedScaleLatent;
+    runFixedSteering(0.0f, 0.0f, true, true, zeroScaleLatent);
+    runFixedSteering(8.0f, 0.0f, true, true, movedScaleLatent);
+    passed &= expect(
+        zeroScaleLatent.defined() && movedScaleLatent.defined() &&
+            torch::count_nonzero(zeroScaleLatent).item<std::int64_t>() == 0 &&
+            torch::count_nonzero(movedScaleLatent).item<std::int64_t>() > 0,
+        "scale must rescale encoder spread at full-forward prior mix");
+
+    torch::Tensor priorLatent;
+    const auto prior =
+        runFixedSteering(0.0f, 1.0f, false, false, priorLatent);
+    passed &= expect(
+        prior.defined() && priorLatent.defined() &&
+            priorLatent.size(1) == 8 && priorLatent.size(2) == 1,
+        "full prior must decode at latent frame rate, not host sample rate");
+  }
+
+  {
+    using openyourbox::dsp::LiveGraphCompileError;
+    using openyourbox::dsp::LiveGraphEngine;
+    using openyourbox::graph::NodeType;
     openyourbox::graph::NodeGraph latentGraph;
     const auto input = latentGraph.addNode(NodeType::audioInput, {0.0f, 0.0f});
     const auto load = latentGraph.addExternalTorchScriptLoadNode({180.0f, 0.0f});
@@ -3637,16 +3990,16 @@ int main() {
     const auto *loadNode = latentGraph.findNode(load);
     const auto *linearNode = latentGraph.findNode(linear);
     const auto *knobNode = latentGraph.findNode(knob);
-    std::int32_t latentIn = 0;
+    std::int32_t biasIn = 0;
     if (loadNode != nullptr) {
       for (const auto &pin : loadNode->inputs) {
-        if (openyourbox::graph::isLatentPin(pin))
-          latentIn = pin.id;
+        if (openyourbox::graph::isBiasPin(pin))
+          biasIn = pin.id;
       }
     }
     passed &= expect(
         loadNode != nullptr && linearNode != nullptr && knobNode != nullptr &&
-            latentIn != 0 &&
+            biasIn != 0 &&
             latentGraph
                 .connect(latentGraph.findNode(input)->outputs.front().id,
                          loadNode->inputs.front().id)
@@ -3658,9 +4011,9 @@ int main() {
             latentGraph.connect(knobNode->outputs.front().id,
                                  linearNode->inputs.front().id)
                 .accepted &&
-            latentGraph.connect(linearNode->outputs.front().id, latentIn)
+            latentGraph.connect(linearNode->outputs.front().id, biasIn)
                 .accepted,
-        "Knob → Linear → latent in must wire beside audio I/O");
+        "Knob → Linear → bias must wire beside audio I/O");
     const auto raveFactory = std::make_shared<TestRaveDecodeFactory>();
     const auto latentCompiled = LiveGraphEngine::compile(
         latentGraph, options,
@@ -3670,19 +4023,17 @@ int main() {
     if (!latentCompiled.succeeded())
       std::cerr << "knob-linear-latent: " << latentCompiled.error.message << '\n';
     passed &= expect(latentCompiled.succeeded(),
-                     "Knob → Linear → latent in must not steal Audio Output width");
+                     "Knob → Linear → bias must not steal Audio Output width");
     LiveGraphCompileError prepareError;
     const auto latentRuntime =
         LiveGraphEngine::prepare(latentCompiled.snapshot, prepareError);
     passed &= expect(latentRuntime != nullptr,
-                     "decode-from-latent graph must prepare");
+                     "bias-steered RAVE graph must prepare");
     if (latentRuntime != nullptr) {
       const auto inputTensor = torch::randn({1, 2, 32}, torch::kFloat32);
       const auto outputTensor = latentRuntime->processTensor(inputTensor);
-      passed &= expect(
-          outputTensor.defined() && outputTensor.size(1) == 2 &&
-              torch::allclose(outputTensor, torch::full_like(outputTensor, 0.25f)),
-          "connected latent in must decode Linear z, not encode audio");
+      passed &= expect(outputTensor.defined() && outputTensor.size(1) == 2,
+                       "connected bias must decode without stealing audio width");
     }
 
     openyourbox::graph::NodeGraph xyGraph;
@@ -3701,16 +4052,16 @@ int main() {
     const auto *xyLoadNode = xyGraph.findNode(xyLoad);
     const auto *xyLinearNode = xyGraph.findNode(xyLinear);
     const auto *padNode = xyGraph.findNode(pad);
-    std::int32_t xyLatentIn = 0;
+    std::int32_t xyBiasIn = 0;
     if (xyLoadNode != nullptr) {
       for (const auto &pin : xyLoadNode->inputs) {
-        if (openyourbox::graph::isLatentPin(pin))
-          xyLatentIn = pin.id;
+        if (openyourbox::graph::isBiasPin(pin))
+          xyBiasIn = pin.id;
       }
     }
     passed &= expect(
         xyLoadNode != nullptr && xyLinearNode != nullptr && padNode != nullptr &&
-            xyLatentIn != 0 &&
+            xyBiasIn != 0 &&
             xyGraph
                 .connect(xyGraph.findNode(xyInput)->outputs.front().id,
                          xyLoadNode->inputs.front().id)
@@ -3722,9 +4073,9 @@ int main() {
             xyGraph.connect(padNode->outputs.front().id,
                              xyLinearNode->inputs.front().id)
                 .accepted &&
-            xyGraph.connect(xyLinearNode->outputs.front().id, xyLatentIn)
+            xyGraph.connect(xyLinearNode->outputs.front().id, xyBiasIn)
                 .accepted,
-        "XY → Linear → latent in must wire beside audio I/O");
+        "XY → Linear → bias must wire beside audio I/O");
     const auto xyCompiled = LiveGraphEngine::compile(
         xyGraph, options,
         [raveFactory](const openyourbox::graph::GraphNode &) {
@@ -3733,7 +4084,7 @@ int main() {
     if (!xyCompiled.succeeded())
       std::cerr << "xy-linear-latent: " << xyCompiled.error.message << '\n';
     passed &= expect(xyCompiled.succeeded(),
-                     "XY → Linear → latent in must not steal Audio Output width");
+                     "XY → Linear → bias must not steal Audio Output width");
   }
 
   {
@@ -3788,30 +4139,44 @@ int main() {
                          : shapeGraph.lastPropertyMessage().c_str());
     const auto *loaded = shapeGraph.findNode(load);
     const auto *convNode = shapeGraph.findNode(conv);
-    std::int32_t latentIn = 0;
-    int latentChannels = 0;
+    std::int32_t biasIn = 0;
+    int biasChannels = 0;
     if (loaded != nullptr) {
       for (const auto &pin : loaded->inputs) {
-        if (openyourbox::graph::isLatentPin(pin)) {
-          latentIn = pin.id;
-          latentChannels = pin.shape.channels;
+        if (openyourbox::graph::isBiasPin(pin)) {
+          biasIn = pin.id;
+          biasChannels = pin.shape.channels;
         }
       }
     }
-    const auto latentConnect =
-        (convNode != nullptr && latentIn != 0)
-            ? shapeGraph.connect(convNode->outputs.front().id, latentIn)
+    const auto biasConnect =
+        (convNode != nullptr && biasIn != 0)
+            ? shapeGraph.connect(convNode->outputs.front().id, biasIn)
             : openyourbox::graph::ConnectionResult{
-                  false, "missing Conv1D or latent pin"};
+                  false, "missing Conv1D or bias pin"};
     passed &= expect(loaded != nullptr && convNode != nullptr &&
                          convNode->outputs.front().shape.channels == 16 &&
-                         latentChannels == 16,
-                     "Conv1D out and RAVE latent in must both declare 16 channels");
+                         biasChannels == 16,
+                     "Conv1D out and RAVE bias must both declare 16 channels");
     passed &= expect(
-        latentConnect.accepted,
-        latentConnect.message.empty()
-            ? "Conv1D 16ch must connect to latent in beside a stereo/mono mismatch"
-            : latentConnect.message.c_str());
+        biasConnect.accepted,
+        biasConnect.message.empty()
+            ? "Conv1D 16ch must connect to bias beside a stereo/mono mismatch"
+            : biasConnect.message.c_str());
+    std::int32_t scaleIn = 0;
+    if (loaded != nullptr) {
+      for (const auto &pin : loaded->inputs) {
+        if (openyourbox::graph::isScalePin(pin))
+          scaleIn = pin.id;
+      }
+    }
+    const auto *linearNode = shapeGraph.findNode(linear);
+    const auto illegalScale =
+        (linearNode != nullptr && scaleIn != 0)
+            ? shapeGraph.connect(linearNode->outputs.front().id, scaleIn)
+            : openyourbox::graph::ConnectionResult{false, "missing scale pin"};
+    passed &= expect(!illegalScale.accepted,
+                     "Linear 32ch must be refused by 16ch RAVE scale");
   }
 
   {
@@ -3881,6 +4246,12 @@ def forward(self, x):
     hop.define(R"(
 def forward(self, x):
     return x.view(x.size(0), x.size(1), 2048)
+
+def encode(self, x):
+    return x.mean(1, True).mean(2, True).repeat([1, 16, 1])
+
+def decode(self, z):
+    return z.mean(1, True).repeat([1, 1, 2048])
 )");
     const auto hopFile =
         saveModule(hop, "guitar_iil_b2048_r48000_z16.ts");
@@ -3899,6 +4270,12 @@ def forward(self, x):
     if (hopFactory != nullptr) {
       passed &= expect(!hopFactory->acceptsConditioning(),
                        "2048-hop TraceModel is unconditioned");
+      passed &= expect(
+          hopFactory->hasEncodeDecode() &&
+              hopFactory->getInferenceBlockSamples() == 2048 &&
+              hopFactory->getLatentFramesPerBlock() == 1 &&
+              hopFactory->requiresFixedInferenceBlock(),
+          "2048-hop RAVE metadata must preserve its 2048:1 latent rate");
       auto kernel = hopFactory->createKernel();
       passed &= expect(kernel != nullptr, "2048-hop kernel must construct");
       if (kernel != nullptr) {
@@ -3917,6 +4294,34 @@ def forward(self, x):
     }
     hopFile.deleteFile();
 
+    torch::jit::Module encodeHop("EncodeHopModel");
+    encodeHop.define(R"(
+def forward(self, x):
+    return x
+
+def encode(self, x):
+    frames = x.view(x.size(0), x.size(1), 2048)
+    return frames.mean(2, True).repeat([1, 16, 1])
+
+def decode(self, z):
+    return z.mean(1, True).repeat([1, 1, 2048])
+)");
+    const auto encodeHopFile =
+        saveModule(encodeHop, "encode-hop_iil_b2048_r48000_z16.ts");
+    std::string encodeHopError;
+    const auto encodeHopFactory = TorchScriptBlackBoxFactory::load(
+        encodeHopFile.getFullPathName().toStdString(), 1, 1, encodeHopError,
+        false, false, 0);
+    passed &= expect(
+        encodeHopFactory != nullptr &&
+            encodeHopFactory->getInferenceBlockSamples() == 2048 &&
+            encodeHopFactory->getLatentFramesPerBlock() == 1 &&
+            encodeHopFactory->requiresFixedInferenceBlock(),
+        encodeHopError.empty()
+            ? "flexible forward with fixed encode must preserve encode hop"
+            : encodeHopError.c_str());
+    encodeHopFile.deleteFile();
+
     torch::jit::Module cond("CondModel");
     cond.define(R"(
 def forward(self, x, c):
@@ -3933,6 +4338,155 @@ def forward(self, x, c):
                          ? "2-arg forward must still detect conditioning"
                          : condError.c_str());
     condFile.deleteFile();
+  }
+
+  {
+    using openyourbox::dsp::LiveGraphCompileError;
+    using openyourbox::dsp::LiveGraphEngine;
+    using openyourbox::graph::NodeType;
+    openyourbox::graph::NodeGraph graph;
+    const auto input = graph.addNode(NodeType::audioInput, {0.0f, 0.0f});
+    const auto load = graph.addExternalTorchScriptLoadNode({180.0f, 0.0f});
+    const auto output = graph.addNode(NodeType::audioOutput, {360.0f, 0.0f});
+    const auto math = graph.addNode(NodeType::mathExpression, {180.0f, 160.0f});
+    passed &= expect(
+        graph.applyExternalCheckpointReady(load, "test-prior-mix.pt", 2, 2, 8,
+                                           true, false, false, {}, {}, {}, ""),
+        "prior-mix RAVE load must succeed");
+    const auto *loadNode = graph.findNode(load);
+    std::int32_t latentOut = 0;
+    std::int32_t biasIn = 0;
+    if (loadNode != nullptr) {
+      for (const auto &pin : loadNode->outputs) {
+        if (openyourbox::graph::isLatentPin(pin))
+          latentOut = pin.id;
+      }
+      for (const auto &pin : loadNode->inputs) {
+        if (openyourbox::graph::isBiasPin(pin))
+          biasIn = pin.id;
+      }
+    }
+    passed &= expect(
+        loadNode != nullptr && latentOut != 0 && biasIn != 0 &&
+            graph
+                .connect(graph.findNode(input)->outputs.front().id,
+                         loadNode->inputs.front().id)
+                .accepted &&
+            graph
+                .connect(loadNode->outputs.front().id,
+                         graph.findNode(output)->inputs.front().id)
+                .accepted &&
+            graph
+                .connect(latentOut, graph.findNode(math)->inputs.front().id)
+                .accepted,
+        "prior-mix graph must wire audio I/O and latent tap");
+    const auto factory = std::make_shared<TestPriorMixFactory>();
+    auto compileWithMix = [&](float mix) {
+      passed &= expect(graph.setFloatProperty(load, "priorMix", mix),
+                       "priorMix must be Gold-editable");
+      return LiveGraphEngine::compile(
+          graph, options, [factory](const openyourbox::graph::GraphNode &) {
+            return factory;
+          });
+    };
+
+    auto compiled0 = compileWithMix(0.0f);
+    passed &= expect(compiled0.succeeded(), "priorMix=0 must compile");
+    LiveGraphCompileError prepareError;
+    auto runtime0 = LiveGraphEngine::prepare(compiled0.snapshot, prepareError);
+    passed &= expect(runtime0 != nullptr, "priorMix=0 must prepare");
+    if (runtime0 != nullptr) {
+      factory->encodeCalls->store(0);
+      const auto ones = torch::ones({1, 2, 32}, torch::kFloat32);
+      const auto out0 = runtime0->processTensor(ones);
+      const auto encodesForward = factory->encodeCalls->load();
+      passed &= expect(encodesForward > 0, "full forward must call encode");
+      passed &= expect(out0.defined() &&
+                           std::abs(out0.mean().item<float>() - 1.0f) < 1.0e-4f,
+                       "full forward with σ=0 must reconstruct the input mean");
+      passed &= expect(factory->lastDecode && factory->lastDecode->defined() &&
+                           factory->lastDecode->size(1) == 8 &&
+                           std::abs(factory->lastDecode->mean().item<float>() -
+                                    1.0f) < 1.0e-4f,
+                       "decode input at full forward must be the encoder mean");
+      const auto tapped = runtime0->getLatentOutput(load);
+      passed &= expect(tapped.defined() && tapped.numel() > 0 &&
+                           factory->lastDecode && factory->lastDecode->defined() &&
+                           torch::allclose(tapped, *factory->lastDecode, 1.0e-5,
+                                           1.0e-5),
+                       "latent out must match the tensor decode consumed");
+    }
+
+    {
+      const auto meanOnly = std::make_shared<TestPriorMixFactory>();
+      meanOnly->provideSpread = false;
+      passed &= expect(graph.setFloatProperty(load, "priorMix", 0.0f),
+                       "mean-only priorMix reset");
+      const auto compiledMeanOnly = LiveGraphEngine::compile(
+          graph, options, [meanOnly](const openyourbox::graph::GraphNode &) {
+            return meanOnly;
+          });
+      passed &= expect(compiledMeanOnly.succeeded(),
+                       "mean-only encode fixture must compile");
+      auto runtimeMeanOnly =
+          LiveGraphEngine::prepare(compiledMeanOnly.snapshot, prepareError);
+      passed &= expect(runtimeMeanOnly != nullptr,
+                       "mean-only encode fixture must prepare");
+      if (runtimeMeanOnly != nullptr) {
+        const auto ones = torch::ones({1, 2, 32}, torch::kFloat32);
+        const auto outMeanOnly = runtimeMeanOnly->processTensor(ones);
+        passed &= expect(
+            outMeanOnly.defined() &&
+                std::abs(outMeanOnly.mean().item<float>() - 1.0f) < 1.0e-4f &&
+                meanOnly->lastDecode && meanOnly->lastDecode->defined() &&
+                torch::allclose(*meanOnly->lastDecode,
+                                torch::ones_like(*meanOnly->lastDecode)),
+            "disconnected bias/scale must decode encoder mean, not N(0,1) noise");
+      }
+    }
+
+    auto compiledMid = compileWithMix(0.5f);
+    passed &= expect(compiledMid.succeeded(), "priorMix=0.5 must compile");
+    auto runtimeMid = LiveGraphEngine::prepare(compiledMid.snapshot, prepareError);
+    passed &= expect(runtimeMid != nullptr, "priorMix=0.5 must prepare");
+    if (runtimeMid != nullptr) {
+      const auto ones = torch::ones({1, 2, 32}, torch::kFloat32);
+      const auto outMid = runtimeMid->processTensor(ones);
+      passed &= expect(outMid.defined() && outMid.numel() > 0,
+                       "intermediate priorMix must produce audio");
+    }
+
+    auto compiled1 = compileWithMix(1.0f);
+    passed &= expect(compiled1.succeeded(), "priorMix=1 must compile");
+    auto runtime1 = LiveGraphEngine::prepare(compiled1.snapshot, prepareError);
+    passed &= expect(runtime1 != nullptr, "priorMix=1 must prepare");
+    if (runtime1 != nullptr) {
+      factory->encodeCalls->store(0);
+      const auto ones = torch::ones({1, 2, 32}, torch::kFloat32);
+      const auto zeros = torch::zeros({1, 2, 32}, torch::kFloat32);
+      const auto outOnes = runtime1->processTensor(ones);
+      const auto encodesAfterOnes = factory->encodeCalls->load();
+      const auto outZeros = runtime1->processTensor(zeros);
+      const auto encodesAfterZeros = factory->encodeCalls->load();
+      passed &= expect(encodesAfterOnes == 0 && encodesAfterZeros == 0,
+                       "full prior must skip encode");
+      passed &= expect(outOnes.defined() && outZeros.defined(),
+                       "full prior must still decode audio");
+      passed &= expect(std::abs(outOnes.mean().item<float>() - 1.0f) > 0.15f,
+                       "full prior must not reconstruct the ones input");
+      passed &= expect(factory->lastDecode && factory->lastDecode->defined() &&
+                           factory->lastDecode->size(1) == 8,
+                       "latent out / decode input must remain defined at full prior");
+      const auto tappedPrior = runtime1->getLatentOutput(load);
+      passed &= expect(tappedPrior.defined() && factory->lastDecode &&
+                           factory->lastDecode->defined() &&
+                           torch::allclose(tappedPrior, *factory->lastDecode,
+                                           1.0e-5, 1.0e-5),
+                       "full-prior latent out must equal decode input");
+    }
+
+    passed &= expect(graph.setFloatProperty(load, "priorMix", 0.0f),
+                     "priorMix must reset to full forward");
   }
 
   if (passed)

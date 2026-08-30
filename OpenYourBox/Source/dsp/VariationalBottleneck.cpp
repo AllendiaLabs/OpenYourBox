@@ -76,4 +76,25 @@ torch::Tensor VariationalBottleneck::encodeMean(
                            cumulativeVariance);
   return latent;
 }
+
+torch::Tensor VariationalBottleneck::softplusStd(const torch::Tensor &scale) {
+  if (!scale.defined())
+    return {};
+  return torch::softplus(scale) + softplusEpsilon;
+}
+
+void VariationalBottleneck::fillUnitGaussian(torch::Tensor &buffer) {
+  if (buffer.defined() && buffer.numel() > 0)
+    buffer.normal_();
+}
+
+torch::Tensor VariationalBottleneck::reparameterize(const torch::Tensor &mean,
+                                                    const torch::Tensor &std,
+                                                    const torch::Tensor &epsilon) {
+  if (!mean.defined())
+    return {};
+  if (!std.defined() || !epsilon.defined())
+    return mean;
+  return mean + std * epsilon;
+}
 } // namespace openyourbox::dsp
