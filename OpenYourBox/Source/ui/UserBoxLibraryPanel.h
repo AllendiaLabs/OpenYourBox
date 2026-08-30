@@ -100,18 +100,6 @@ public:
   [[nodiscard]] bool isFactorySelected() const noexcept;
 
   /**
-   * @brief Draws an expandable User Library submenu for Pin Add / Link Insert.
-   * @param library Catalog to list.
-   * @param loadSnapshot Loads a catalog entry snapshot for nested members.
-   * @param onInsert Called with `(entryId, nestedRootId)` when a row is chosen.
-   */
-  static void renderInsertMenu(
-      library::UserBoxLibrary &library,
-      const std::function<juce::ValueTree(const juce::String &, juce::String &)>
-          &loadSnapshot,
-      const std::function<void(const juce::String &, std::int32_t)> &onInsert);
-
-  /**
    * @brief Folder currently selected for new saves, or empty for User Library root.
    *
    * Factory selection maps to the User Library root so saves never target Factory.

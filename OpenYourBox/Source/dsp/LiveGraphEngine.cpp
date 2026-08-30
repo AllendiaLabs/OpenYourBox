@@ -104,27 +104,13 @@ struct CompiledElement {
    */
   int filmExtractChannel = -1;
   /**
-   * @brief Compiled index of a RAVE bias source, or -1 when disconnected.
+   * @brief Compiled index of a Gold RAVE latent-in source, or -1 when unused.
    */
-  std::int64_t biasInputIndex = -1;
+  std::int64_t latentInputIndex = -1;
   /**
-   * @brief Channel extracted from the bias source, or -1 for the full tensor.
+   * @brief Channel extracted from the latent-in source, or -1 for the full tensor.
    */
-  int biasExtractChannel = -1;
-  /** @brief True when bias should prefer a Gold latent-out tap. */
-  char biasUseLatentTap = 0;
-  /**
-   * @brief Compiled index of a RAVE scale source, or -1 when disconnected.
-   */
-  std::int64_t scaleInputIndex = -1;
-  /**
-   * @brief Channel extracted from the scale source, or -1 for the full tensor.
-   */
-  int scaleExtractChannel = -1;
-  /** @brief True when scale should prefer a Gold latent-out tap. */
-  char scaleUseLatentTap = 0;
-  /** @brief Artifact latent width used to size prior-mix work buffers. */
-  int latentChannels = 0;
+  int latentExtractChannel = -1;
   /** @brief Control width for per-layer FiLM adaptors, or 0 when unwired. */
   int condDim = 0;
   /** @brief Per-layer FiLM Linear weights shaped `[2 * hidden, condDim]`. */
@@ -141,8 +127,6 @@ struct CompiledElement {
   std::shared_ptr<openyourbox::dsp::PqmfBank> pqmf;
   /** @brief Bottleneck/Gold fidelity percent. */
   float fidelityPercent = 99.0f;
-  /** @brief Prior mix in `[0, 1]` for RAVE-capable Gold boxes. */
-  float priorMix = 0.0f;
   /** @brief True when compactness PCA tensors are present. */
   bool compactnessReady = false;
   /** @brief Compactness mean `[latent]`. */
@@ -941,22 +925,6 @@ struct LiveGraphRuntime::Impl {
   std::vector<std::unique_ptr<FrozenBlackBoxKernel>> blackBoxKernels;
   /** @brief Optional Gold encode taps, parallel to `outputs`. */
   std::vector<torch::Tensor> latentOutputs;
-  /**
-   * @brief Per-element preallocated N(0,1) noise for RAVE prior-mix sampling.
-   *
-   * Filled with `randn_out` so the audio thread does not grow the heap.
-   */
-  std::vector<torch::Tensor> priorMixNoise;
-  /** @brief Per-element preallocated mean work buffer for prior mix. */
-  std::vector<torch::Tensor> priorMixMean;
-  /** @brief Per-element preallocated spread work buffer for prior mix. */
-  std::vector<torch::Tensor> priorMixStd;
-  /** @brief Per-element preallocated sampled latent `z`. */
-  std::vector<torch::Tensor> priorMixSample;
-  /** @brief Per-element ones tensor used as disconnected scale / prior spread. */
-  std::vector<torch::Tensor> priorMixOnes;
-  /** @brief Per-element zeros tensor used as disconnected bias / prior mean. */
-  std::vector<torch::Tensor> priorMixZeros;
   /** @brief Reusable planar-to-tensor host input storage. */
   torch::Tensor hostInput;
   /** @brief Lock-free latest per-element inference durations in milliseconds.
@@ -1148,74 +1116,26 @@ torch::Tensor gatherUpstream(const std::vector<torch::Tensor> &outputs,
 }
 
 /**
- * @brief Tensor wired to a compiled gather index, preferring a latent tap.
+ * @brief Tensor wired to a Gold RAVE latent input, when that pin is connected.
  *
+ * Prefers a source encode tap when the upstream Gold box stored one; otherwise
+ * uses the source's main output (Knob/XY → Linear → latent in).
  * @param outputs Compiled element audio/main outputs.
- * @param index Compiled source index, or -1 when disconnected.
- * @param extractChannel Channel extract, or -1 for the full tensor.
- * @param useLatentTap True when the cable targets a Gold latent-out pin.
+ * @param element Gold box whose @c latentInputIndex is set.
  * @param latentOutputs Optional encode taps parallel to @p outputs.
- * @return Gathered tensor, or undefined when @p index is unused.
+ * @return Latent tensor, or undefined when no latent input is compiled.
  */
-torch::Tensor gatherIndexedInput(
-    const std::vector<torch::Tensor> &outputs, std::int64_t index,
-    int extractChannel, bool useLatentTap,
+torch::Tensor gatherLatentInput(
+    const std::vector<torch::Tensor> &outputs, const CompiledElement &element,
     const std::vector<torch::Tensor> *latentOutputs) {
-  if (index < 0)
+  if (element.latentInputIndex < 0)
     return {};
-  const auto source = static_cast<std::size_t>(index);
+  const auto source = static_cast<std::size_t>(element.latentInputIndex);
   auto value = source < outputs.size() ? outputs[source] : torch::Tensor{};
-  if (useLatentTap && latentOutputs != nullptr && source < latentOutputs->size() &&
+  if (latentOutputs != nullptr && source < latentOutputs->size() &&
       (*latentOutputs)[source].defined())
     value = (*latentOutputs)[source];
-  return extractCompiledInput(value, extractChannel);
-}
-
-/**
- * @brief Broadcasts or time-aligns @p value onto @p like when shapes allow.
- * @param value Incoming bias/scale tensor.
- * @param like Post-mix mean or spread to match.
- * @return Tensor matching @p like, or undefined when the cable cannot apply.
- */
-torch::Tensor matchLatentConditioning(const torch::Tensor &value,
-                                      const torch::Tensor &like) {
-  if (!value.defined() || !like.defined() || value.dim() != 3 || like.dim() != 3)
-    return {};
-  auto aligned = matchTimeLength(value, like.size(2));
-  if (aligned.size(0) != like.size(0))
-    return {};
-  if (aligned.size(1) == 1 && like.size(1) > 1)
-    aligned = aligned.expand({aligned.size(0), like.size(1), aligned.size(2)});
-  if (aligned.sizes() != like.sizes())
-    return {};
-  return aligned;
-}
-
-/**
- * @brief Copies @p source into a leading `[1, C, T]` view of a prepared buffer.
- *
- * When @p source is larger than @p buffer, only the leading prepared region is
- * used so the audio thread never reallocates.
- * @param buffer Preallocated `[1, Cmax, Tmax]` storage.
- * @param source Tensor to copy, or undefined.
- * @return Narrowed view matching the copied (or buffer) shape.
- */
-torch::Tensor copyIntoPrepared(torch::Tensor &buffer,
-                               const torch::Tensor &source) {
-  if (!buffer.defined())
-    return source;
-  if (!source.defined() || source.dim() != 3)
-    return buffer;
-  const auto channels =
-      std::min(buffer.size(1), std::max<std::int64_t>(1, source.size(1)));
-  const auto time =
-      std::min(buffer.size(2), std::max<std::int64_t>(1, source.size(2)));
-  auto view = buffer.narrow(1, 0, channels).narrow(2, 0, time);
-  if (source.size(1) == channels && source.size(2) == time)
-    view.copy_(source);
-  else
-    view.copy_(source.narrow(1, 0, channels).narrow(2, 0, time));
-  return view;
+  return extractCompiledInput(value, element.latentExtractChannel);
 }
 
 std::vector<torch::Tensor>
@@ -1618,91 +1538,37 @@ void LiveGraphRuntime::executeElement(std::size_t index,
       output = upstream;
       break;
     }
-    const bool raveCapable = kernel != nullptr && kernel->hasEncodeDecode();
-    if (raveCapable) {
-      float priorMix = element.priorMix;
+    const bool decodeFromLatent =
+        kernel != nullptr && kernel->hasEncodeDecode() &&
+        element.latentInputIndex >= 0;
+    if (decodeFromLatent) {
+      auto latent = gatherLatentInput(runtime.outputs, element,
+                                       &runtime.latentOutputs);
+      runtime.latentOutputs[index] = latent;
+      if (latent.defined())
+        output = kernel->decode(latent);
+      else
+        output = torch::zeros({1, element.outputChannels, samples},
+                              blockInput.options());
+    } else if (kernel != nullptr && kernel->hasEncodeDecode()) {
+      auto extended =
+          extendCausalInput(upstream, runtime.histories[index], historyLength);
+      auto latent = kernel->encode(extended);
+      float fidelity = element.fidelityPercent;
       if (controls != nullptr) {
-        const auto found = controls->priorMixByNodeId.find(element.nodeId);
-        if (found != controls->priorMixByNodeId.end())
-          priorMix = found->second;
+        const auto found = controls->fidelityByNodeId.find(element.nodeId);
+        if (found != controls->fidelityByNodeId.end())
+          fidelity = found->second;
       }
-      priorMix = graph::clampPriorMix(priorMix);
-      const bool skipEncode = priorMix >= graph::priorMixFullPriorThreshold;
-      torch::Tensor mean;
-      torch::Tensor std;
-      torch::Tensor extended;
-      if (!skipEncode) {
-        extended =
-            extendCausalInput(upstream, runtime.histories[index], historyLength);
-        auto distribution = kernel->encodeDistribution(extended);
-        mean = distribution.mean;
-        std = distribution.std;
-        float fidelity = element.fidelityPercent;
-        if (controls != nullptr) {
-          const auto found = controls->fidelityByNodeId.find(element.nodeId);
-          if (found != controls->fidelityByNodeId.end())
-            fidelity = found->second;
-        }
-        if (mean.defined() && kernel->compactnessReady())
-          mean = VariationalBottleneck::applyFidelity(
-              mean, fidelity, kernel->compactnessMean(),
-              kernel->compactnessPca(), kernel->compactnessCumulative());
-      }
-      if (!mean.defined() && runtime.priorMixZeros[index].defined())
-        mean = runtime.priorMixZeros[index];
-      if (!mean.defined()) {
-        if (!extended.defined())
-          extended = extendCausalInput(upstream, runtime.histories[index],
-                                       historyLength);
+      if (latent.defined() && kernel->compactnessReady())
+        latent = VariationalBottleneck::applyFidelity(
+            latent, fidelity, kernel->compactnessMean(), kernel->compactnessPca(),
+            kernel->compactnessCumulative());
+      runtime.latentOutputs[index] = latent;
+      if (latent.defined())
+        output = kernel->decode(latent);
+      else
         output = kernel->forward(extended);
-      } else {
-        auto workMean = copyIntoPrepared(runtime.priorMixMean[index], mean);
-        torch::Tensor workStd;
-        if (std.defined())
-          workStd = copyIntoPrepared(runtime.priorMixStd[index], std);
-        else if (runtime.priorMixOnes[index].defined())
-          workStd = copyIntoPrepared(
-              runtime.priorMixStd[index],
-              runtime.priorMixOnes[index]
-                  .narrow(1, 0, workMean.size(1))
-                  .narrow(2, 0, workMean.size(2)));
-        else {
-          workStd = copyIntoPrepared(runtime.priorMixStd[index], workMean);
-          workStd.fill_(1.0f);
-        }
-        const auto alpha = static_cast<double>(priorMix);
-        workMean.mul_(1.0 - alpha);
-        workStd.mul_(1.0 - alpha).add_(alpha);
-        auto bias = matchLatentConditioning(
-            gatherIndexedInput(runtime.outputs, element.biasInputIndex,
-                               element.biasExtractChannel,
-                               element.biasUseLatentTap != 0,
-                               &runtime.latentOutputs),
-            workMean);
-        if (bias.defined())
-          workMean.add_(bias);
-        auto scale = matchLatentConditioning(
-            gatherIndexedInput(runtime.outputs, element.scaleInputIndex,
-                               element.scaleExtractChannel,
-                               element.scaleUseLatentTap != 0,
-                               &runtime.latentOutputs),
-            workStd);
-        if (scale.defined())
-          workStd.mul_(scale);
-        auto &noise = runtime.priorMixNoise[index];
-        auto noiseView =
-            noise.defined() ? noise.narrow(1, 0, workMean.size(1))
-                                  .narrow(2, 0, workMean.size(2))
-                            : workMean;
-        if (noise.defined() && noiseView.sizes() == workMean.sizes())
-          noiseView.normal_();
-        else
-          noiseView.fill_(0.0f);
-        auto sample = copyIntoPrepared(runtime.priorMixSample[index], workMean);
-        sample.addcmul_(workStd, noiseView);
-        runtime.latentOutputs[index] = sample;
-        output = kernel->decode(sample);
-      }
     } else {
       auto extended =
           extendCausalInput(upstream, runtime.histories[index], historyLength);
@@ -1718,7 +1584,8 @@ void LiveGraphRuntime::executeElement(std::size_t index,
       throw std::runtime_error(
           "Frozen BlackBox returned an invalid tensor shape or type");
     const auto targetTime =
-        upstream.defined() ? upstream.size(2) : samples;
+        decodeFromLatent ? samples
+                         : (upstream.defined() ? upstream.size(2) : samples);
     output = matchTimeLength(output, targetTime);
     const auto elapsed = std::chrono::duration<double, std::milli>(
         std::chrono::steady_clock::now() - started);
@@ -2746,51 +2613,31 @@ LiveGraphEngine::compile(const graph::NodeGraph &graphDocument,
         element.blackBoxFactory = blackBoxResolver(node);
         element.filmInputIndex = -1;
         element.filmExtractChannel = -1;
-        element.biasInputIndex = -1;
-        element.biasExtractChannel = -1;
-        element.biasUseLatentTap = 0;
-        element.scaleInputIndex = -1;
-        element.scaleExtractChannel = -1;
-        element.scaleUseLatentTap = 0;
+        element.latentInputIndex = -1;
+        element.latentExtractChannel = -1;
         bool haveAudioInput = false;
-        const auto *inputNodeForPins = nodesById.at(node.id);
-        std::size_t compiledPin = 0;
-        for (const auto &pin : inputNodeForPins->inputs) {
-          const auto source = sourceNodeByDestinationPin.find(pin.id);
-          if (source == sourceNodeByDestinationPin.end())
+        for (std::size_t index = 0; index < element.inputIsConditioning.size();
+             ++index) {
+          if (index >= element.inputIndices.size())
             continue;
-          const auto compiledSource = compiledIndex.find(source->second);
-          if (compiledSource == compiledIndex.end())
-            continue;
-          if (compiledPin >= element.inputIndices.size())
-            break;
           const auto extract =
-              compiledPin < element.inputExtractChannels.size()
-                  ? element.inputExtractChannels[compiledPin]
+              index < element.inputExtractChannels.size()
+                  ? element.inputExtractChannels[index]
                   : -1;
-          const auto useTap =
-              compiledPin < element.inputUseLatentTap.size() &&
-              element.inputUseLatentTap[compiledPin] != 0;
-          if (element.inputIsConditioning.size() > compiledPin &&
-              element.inputIsConditioning[compiledPin] != 0) {
-            element.filmInputIndex = element.inputIndices[compiledPin];
+          if (element.inputIsConditioning[index] != 0) {
+            element.filmInputIndex = element.inputIndices[index];
             element.filmExtractChannel = extract;
-          } else if (graph::isBiasPin(pin)) {
-            element.biasInputIndex = element.inputIndices[compiledPin];
-            element.biasExtractChannel = extract;
-            element.biasUseLatentTap = useTap ? 1 : 0;
-          } else if (graph::isScalePin(pin)) {
-            element.scaleInputIndex = element.inputIndices[compiledPin];
-            element.scaleExtractChannel = extract;
-            element.scaleUseLatentTap = useTap ? 1 : 0;
+          } else if (index < element.inputUseLatentTap.size() &&
+                     element.inputUseLatentTap[index] != 0) {
+            element.latentInputIndex = element.inputIndices[index];
+            element.latentExtractChannel = extract;
           } else {
-            element.inputIndex = element.inputIndices[compiledPin];
+            element.inputIndex = element.inputIndices[index];
             element.inputChannels = compiledSlotChannels(
                 compiled->elements[static_cast<std::size_t>(element.inputIndex)],
                 extract);
             haveAudioInput = true;
           }
-          ++compiledPin;
         }
         if (node.blackBoxOrigin == graph::BlackBoxOrigin::externalLoad &&
             !element.blackBoxFactory) {
@@ -2829,14 +2676,8 @@ LiveGraphEngine::compile(const graph::NodeGraph &graphDocument,
           return failure(LiveGraphErrorCode::invalidBlackBox, node.id,
                          "Frozen receptive field exceeds the history limit");
         element.parameterCount = element.blackBoxFactory->getParameterCount();
-        if (element.blackBoxFactory->hasEncodeDecode())
-          element.latentChannels =
-              std::max(0, element.blackBoxFactory->getLatentChannels());
         readFloatProperty(node, "fidelity", element.fidelityPercent);
         element.fidelityPercent = graph::clampFidelity(element.fidelityPercent);
-        element.priorMix = graph::clampPriorMix(node.priorMix);
-        readFloatProperty(node, "priorMix", element.priorMix);
-        element.priorMix = graph::clampPriorMix(element.priorMix);
         break;
       }
       case NodeType::pqmfAnalysis: {
@@ -3127,12 +2968,6 @@ LiveGraphEngine::prepare(std::shared_ptr<const LiveGraphSnapshot> snapshot,
     const auto &compiled = *snapshot->implementation;
     runtime->outputs.resize(compiled.elements.size());
     runtime->latentOutputs.resize(compiled.elements.size());
-    runtime->priorMixNoise.resize(compiled.elements.size());
-    runtime->priorMixMean.resize(compiled.elements.size());
-    runtime->priorMixStd.resize(compiled.elements.size());
-    runtime->priorMixSample.resize(compiled.elements.size());
-    runtime->priorMixOnes.resize(compiled.elements.size());
-    runtime->priorMixZeros.resize(compiled.elements.size());
     runtime->histories.resize(compiled.elements.size());
     runtime->conditioningHistories.resize(compiled.elements.size());
     runtime->recurrentHidden.resize(compiled.elements.size());
@@ -3217,36 +3052,6 @@ LiveGraphEngine::prepare(std::shared_ptr<const LiveGraphSnapshot> snapshot,
             error.message = "Frozen BlackBox kernel could not be prepared";
             return {};
           }
-          auto *kernel = runtime->blackBoxKernels[index].get();
-          if (kernel != nullptr && kernel->hasEncodeDecode()) {
-            const auto options =
-                torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCPU);
-            const auto inChannels = std::max(1, element.inputChannels);
-            auto dummy = torch::zeros(
-                {1, inChannels, compiled.maximumBlockSize}, options);
-            torch::Tensor encoded;
-            try {
-              encoded = kernel->encodeDistribution(dummy).mean;
-              if (!encoded.defined())
-                encoded = kernel->encode(dummy);
-            } catch (const std::exception &) {
-              encoded = torch::Tensor{};
-            }
-            const auto latentChannels = encoded.defined()
-                                            ? encoded.size(1)
-                                            : std::max(1, element.latentChannels);
-            const auto latentTime = encoded.defined()
-                                        ? std::max<std::int64_t>(1, encoded.size(2))
-                                        : compiled.maximumBlockSize;
-            const std::vector<std::int64_t> shape{1, latentChannels, latentTime};
-            runtime->priorMixNoise[index] = torch::empty(shape, options);
-            runtime->priorMixMean[index] = torch::zeros(shape, options);
-            runtime->priorMixStd[index] = torch::ones(shape, options);
-            runtime->priorMixSample[index] = torch::zeros(shape, options);
-            runtime->priorMixOnes[index] = torch::ones(shape, options);
-            runtime->priorMixZeros[index] = torch::zeros(shape, options);
-            runtime->priorMixNoise[index].normal_();
-          }
         }
       }
     }
@@ -3289,8 +3094,6 @@ collectRuntimeControlState(const graph::NodeGraph &graphDocument) {
         node.type == graph::NodeType::blackBox)
       controls.fidelityByNodeId[node.id] =
           graph::clampFidelity(node.fidelityPercent);
-    if (node.type == graph::NodeType::blackBox)
-      controls.priorMixByNodeId[node.id] = graph::clampPriorMix(node.priorMix);
   }
   return controls;
 }

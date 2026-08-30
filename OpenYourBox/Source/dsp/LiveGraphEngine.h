@@ -87,32 +87,6 @@ public:
   }
 
   /**
-   * @struct LatentDistribution
-   * @brief Encoder mean and spread used by RAVE prior-mix sampling.
-   *
-   * When @c std is undefined, callers treat spread as 1 (broadcast to @c mean).
-   */
-  struct LatentDistribution {
-    /** @brief Encoder mean `μ`. */
-    torch::Tensor mean;
-    /** @brief Encoder spread `σ`, or undefined to use 1. */
-    torch::Tensor std;
-  };
-
-  /**
-   * @brief Encodes audio into `(μ, σ)` when the artifact can expose spread.
-   *
-   * Default: `mean = encode(input)` and undefined `std` (engine uses 1).
-   * @param input Contiguous CPU float tensor for the current audio block.
-   * @return Distribution; @c mean may be undefined when encode is absent.
-   */
-  virtual LatentDistribution encodeDistribution(const torch::Tensor &input) {
-    LatentDistribution distribution;
-    distribution.mean = encode(input);
-    return distribution;
-  }
-
-  /**
    * @brief Decodes a full-width latent trajectory when exported.
    * @param latent Contiguous CPU float latent tensor.
    * @return Audio tensor, or an undefined tensor when the method is absent.
@@ -246,8 +220,6 @@ struct RuntimeControlState {
   std::unordered_map<std::int32_t, std::array<float, 2>> conditioningByNodeId;
   /** @brief Per-node fidelity percent for bottleneck and Gold RAVE. */
   std::unordered_map<std::int32_t, float> fidelityByNodeId;
-  /** @brief Per-node prior-mix in `[0, 1]` for RAVE-capable Gold boxes. */
-  std::unordered_map<std::int32_t, float> priorMixByNodeId;
 };
 
 /** @brief Signal source used to compute a static analysis snapshot. */

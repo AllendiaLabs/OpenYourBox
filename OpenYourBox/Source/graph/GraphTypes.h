@@ -493,18 +493,6 @@ inline constexpr float defaultFidelityPercent = 99.0f;
 inline constexpr float fidelityMinimum = 0.0f;
 /** @brief Inclusive upper bound for fidelity. */
 inline constexpr float fidelityMaximum = 100.0f;
-/** @brief Default prior-mix (0 = full forward / encode). */
-inline constexpr float defaultPriorMix = 0.0f;
-/** @brief Inclusive lower bound for prior-mix. */
-inline constexpr float priorMixMinimum = 0.0f;
-/** @brief Inclusive upper bound for prior-mix (full prior / encoder skipped). */
-inline constexpr float priorMixMaximum = 1.0f;
-/**
- * @brief Treat prior-mix at or above this as full prior (skip encode).
- *
- * `1 - 1e-4` matches the runtime contract epsilon for “full prior”.
- */
-inline constexpr float priorMixFullPriorThreshold = 1.0f - 1.0e-4f;
 /**
  * @brief Default IR frequency bins per output channel (acids-rave v1).
  *
@@ -620,23 +608,6 @@ inline float clampGain(float gain) noexcept {
  */
 inline float clampFidelity(float percent) noexcept {
   return std::clamp(percent, fidelityMinimum, fidelityMaximum);
-}
-
-/**
- * @brief Clamps a prior-mix value into `[0, 1]`.
- * @param mix Proposed mix (0 = forward, 1 = prior).
- * @return Value in `[priorMixMinimum, priorMixMaximum]`.
- */
-inline float clampPriorMix(float mix) noexcept {
-  return std::clamp(mix, priorMixMinimum, priorMixMaximum);
-}
-
-/**
- * @brief Returns true when a real property may be edited on frozen Gold.
- * @param key Property key.
- */
-inline bool isGoldEditablePropertyKey(const std::string &key) noexcept {
-  return key == "fidelity" || key == "priorMix";
 }
 
 /**
@@ -1337,10 +1308,6 @@ inline bool variationalBottleneckLatentIsError(int latentSize) noexcept {
 inline constexpr const char *controlPinLabel = "control";
 /** @brief User-visible label of Gold RAVE encode/decode latent pins. */
 inline constexpr const char *latentPinLabel = "latent";
-/** @brief User-visible label of RAVE bias (mean-shift) input pins. */
-inline constexpr const char *biasPinLabel = "bias";
-/** @brief User-visible label of RAVE scale (spread-multiply) input pins. */
-inline constexpr const char *scalePinLabel = "scale";
 
 /** @brief A stable endpoint belonging to one graph node. */
 struct Pin {
@@ -1397,30 +1364,6 @@ inline bool isIrInputPin(const Pin &pin) noexcept {
  */
 inline bool isLatentPin(const Pin &pin) noexcept {
   return pin.label == latentPinLabel;
-}
-
-/**
- * @brief Returns true for the RAVE bias input (added to post-mix mean).
- * @param pin Endpoint to inspect.
- */
-inline bool isBiasPin(const Pin &pin) noexcept {
-  return pin.kind == PinKind::input && pin.label == biasPinLabel;
-}
-
-/**
- * @brief Returns true for the RAVE scale input (multiplies post-mix spread).
- * @param pin Endpoint to inspect.
- */
-inline bool isScalePin(const Pin &pin) noexcept {
-  return pin.kind == PinKind::input && pin.label == scalePinLabel;
-}
-
-/**
- * @brief Returns true for latent-domain RAVE steering inputs (bias or scale).
- * @param pin Endpoint to inspect.
- */
-inline bool isBiasOrScalePin(const Pin &pin) noexcept {
-  return isBiasPin(pin) || isScalePin(pin);
 }
 
 /** @brief Value type accepted by an inline graph property. */
@@ -1795,12 +1738,6 @@ struct GraphNode {
   std::string sampleRateWarning;
   /** @brief Live fidelity percent applied inside bottleneck/Gold encode. */
   float fidelityPercent = defaultFidelityPercent;
-  /**
-   * @brief Prior mix in `[0, 1]` for RAVE-capable Gold / external-load boxes.
-   *
-   * 0 is full forward (encode from audio); 1 is full prior (encoder skipped).
-   */
-  float priorMix = defaultPriorMix;
   /** @brief True when compactness PCA buffers are present on the artifact. */
   bool compactnessReady = false;
   /** @brief Validation-PCA mean `[latent]`, empty until compactness is ready. */

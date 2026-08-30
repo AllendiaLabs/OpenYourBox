@@ -1618,7 +1618,7 @@ class RaveGraphModule(nn.Module):
         self.compactness_ready = False
         self.fidelity = 0.99
 
-    def _run(self, audio: torch.Tensor, stop_at: int | None = None, start_from: tuple[int, torch.Tensor] | None = None, stop_before: int | None = None) -> torch.Tensor:
+    def _run(self, audio: torch.Tensor, stop_at: int | None = None, start_from: tuple[int, torch.Tensor] | None = None) -> torch.Tensor:
         """Evaluate nodes in topological order."""
         values: dict[int, torch.Tensor] = {}
         if start_from is not None:
@@ -1648,8 +1648,6 @@ class RaveGraphModule(nn.Module):
                 current = stacked[0]
                 for extra in stacked[1:]:
                     current = combine_pair(current, extra, 0)
-            if stop_before is not None and node_id == stop_before:
-                return current
             if layer is not None and node_type not in _UTILITY_TYPES:
                 if node_type == "math_expression":
                     n_in = int(getattr(layer, "n_inputs", 1))
@@ -1679,20 +1677,6 @@ class RaveGraphModule(nn.Module):
         if self.bottleneck_id is None:
             return audio
         return self._run(audio, stop_at=self.bottleneck_id)
-
-    def encode_distribution(
-        self, audio: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Return encoder ``(μ, σ)`` using the bottleneck softplus-std head.
-
-        When the graph has no variational bottleneck, spread falls back to 1.
-        """
-        if self.bottleneck_id is None:
-            latent = self.encode(audio)
-            return latent, torch.ones_like(latent)
-        features = self._run(audio, stop_before=self.bottleneck_id)
-        layer = self.layers[str(self.bottleneck_id)]
-        return layer._project(features)
 
     def decode(self, latent: torch.Tensor) -> torch.Tensor:
         """Run the decoder starting after the bottleneck."""
@@ -2499,11 +2483,6 @@ def _export_rave_scripted(module: RaveGraphModule, input_channels: int, path: Pa
         def encode(self, audio: torch.Tensor) -> torch.Tensor:
             return self.inner.encode(audio)
 
-        def encode_distribution(
-            self, audio: torch.Tensor
-        ) -> tuple[torch.Tensor, torch.Tensor]:
-            return self.inner.encode_distribution(audio)
-
         def decode(self, latent: torch.Tensor) -> torch.Tensor:
             return self.inner.decode(latent)
 
@@ -2514,12 +2493,7 @@ def _export_rave_scripted(module: RaveGraphModule, input_channels: int, path: Pa
     with torch.inference_mode():
         scripted = torch.jit.trace_module(
             wrapped,
-            {
-                "forward": example,
-                "encode": example,
-                "decode": latent_example,
-                "encode_distribution": example,
-            },
+            {"forward": example, "encode": example, "decode": latent_example},
             strict=False,
             check_trace=False,
         )
