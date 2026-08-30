@@ -12,7 +12,7 @@ Extend the existing JUCE + Dear ImGui plug-in with Phase 2.2 capabilities: per-e
 
 **Language/Version**: C++17 for plug-in/runtime code, Python 3 for the embedded freeze worker
 
-**Primary Dependencies**: JUCE 9, Dear ImGui, `imgui-node-editor`, LibTorch, embedded Python worker for freeze compilation
+**Primary Dependencies**: JUCE 8, Dear ImGui, `imgui-node-editor`, LibTorch, embedded Python worker for freeze compilation
 
 **Storage**: JUCE `ValueTree` graph document for topology, node properties, viewport, seeds, conditioning element state (Knob/XY values, positions), and per-node analysis view preferences; local TorchScript artifacts for frozen nodes
 

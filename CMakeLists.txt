@@ -8,14 +8,19 @@ set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
 include(FetchContent)
 
-set(OPENYOURBOX_JUCE_PATH "" CACHE PATH "Path to a JUCE 9.x source tree")
+# JUCE 8.0.15 under a JUCE 8 Indie licence. Prefer the vendored tree, then an
+# explicit override, else fetch the 8.0.15 tag (not JUCE 9).
+set(OPENYOURBOX_JUCE_PATH "" CACHE PATH "Optional path to a JUCE 8.x source tree")
+set(_oyb_juce_vendored "${CMAKE_CURRENT_SOURCE_DIR}/modules/JUCE")
 if(OPENYOURBOX_JUCE_PATH)
     add_subdirectory("${OPENYOURBOX_JUCE_PATH}" "${CMAKE_BINARY_DIR}/JUCE")
+elseif(EXISTS "${_oyb_juce_vendored}/CMakeLists.txt")
+    add_subdirectory("${_oyb_juce_vendored}" "${CMAKE_BINARY_DIR}/JUCE")
 else()
     FetchContent_Declare(
         JUCE
         GIT_REPOSITORY https://github.com/juce-framework/JUCE.git
-        GIT_TAG 9.0.1
+        GIT_TAG 8.0.15
         GIT_SHALLOW TRUE)
     FetchContent_MakeAvailable(JUCE)
 endif()

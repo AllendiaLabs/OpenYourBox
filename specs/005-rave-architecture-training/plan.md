@@ -21,7 +21,7 @@ Mapping recipe and Pair capture remain Phase 3.
 
 **Language/Version**: C++17 (JUCE plug-in / live engine), Python 3 (freeze + train worker)
 
-**Primary Dependencies**: JUCE 9, Dear ImGui, imgui-node-editor, LibTorch (live + TorchScript), PyTorch in train/freeze workers; auraloss remains for mapping; reconstruction spectral distance implemented in-worker (RAVE `AudioDistanceV1` equivalent) plus train-only discriminators
+**Primary Dependencies**: JUCE 8, Dear ImGui, imgui-node-editor, LibTorch (live + TorchScript), PyTorch in train/freeze workers; auraloss remains for mapping; reconstruction spectral distance implemented in-worker (RAVE `AudioDistanceV1` equivalent) plus train-only discriminators
 
 **Storage**: ValueTree graph (new node types, fidelity, last-used objective); Training Library user-data (pair + clip files, tags); copyright log (unchanged); `.pt` artifacts with compactness buffers
 

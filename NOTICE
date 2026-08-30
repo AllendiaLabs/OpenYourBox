@@ -1,6 +1,22 @@
 OpenYourBox
 Copyright 2026 Allendia
 
+This product includes the JUCE 8 framework (version 8.0.15):
+
+Copyright (c) Raw Material Software Limited
+https://juce.com
+https://github.com/juce-framework/JUCE
+
+OpenYourBox uses JUCE 8 under a JUCE 8 Indie commercial licence from
+Raw Material Software Limited, not under the AGPLv3. JUCE remains the
+property of Raw Material Software Limited and is not relicensed as
+Apache 2.0 with the rest of this product. See
+https://juce.com/legal/juce-8-licence/ and modules/JUCE/LICENSE.md.
+
+JUCE is provided "AS IS" without any warranty. All warranties, whether
+expressed or implied, including warranty of merchantability or fitness
+for a particular purpose, are disclaimed.
+
 This product includes design patterns adapted from ML Forge:
 
 MIT License

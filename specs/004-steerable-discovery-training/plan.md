@@ -21,7 +21,7 @@ Other armed architectures allowed; users can build steerable-nafx-equivalent TCN
 
 **Language/Version**: C++17 (JUCE plug-in / live engine), Python 3 (freeze + train worker)
 
-**Primary Dependencies**: JUCE 9, Dear ImGui, `imgui-node-editor`, LibTorch (live + TorchScript Gold), PyTorch + **auraloss** (or equivalent MR-STFT matching specified sizes) in train worker; `FreezeCoordinator` ChildProcess IPC pattern
+**Primary Dependencies**: JUCE 8, Dear ImGui, `imgui-node-editor`, LibTorch (live + TorchScript Gold), PyTorch + **auraloss** (or equivalent MR-STFT matching specified sizes) in train worker; `FreezeCoordinator` ChildProcess IPC pattern
 
 **Storage**: JUCE `ValueTree` graph (topology, arm, Weights, FiLM/residual/PReLU/`dilationGrowth`); Training Library under plugin user data (pair audio + metadata index); copyright acknowledgment log; trained `.pt` artifacts; localhost pairing registry/IPC
 
