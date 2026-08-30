@@ -2405,10 +2405,28 @@ void applyNodePinShapes(openyourbox::graph::NodeGraph &graph,
 }
 
 /**
- * @brief Returns a tooltip when any committed cable is now illegal.
- * @param graph Graph document to inspect.
+ * @brief Returns whether @p link is attached to @p nodeId.
+ * @param graph Graph used to resolve pin owners.
+ * @param link Cable to inspect.
+ * @param nodeId Node that must be an endpoint.
  */
-std::string firstIncompatibleLinkMessage(const openyourbox::graph::NodeGraph &graph) {
+bool linkTouchesNode(const openyourbox::graph::NodeGraph &graph,
+                      const openyourbox::graph::GraphLink &link,
+                      std::int32_t nodeId) {
+  const auto source = graph.findNodeForPin(link.sourcePinId);
+  const auto destination = graph.findNodeForPin(link.destinationPinId);
+  return (source.has_value() && *source == nodeId) ||
+         (destination.has_value() && *destination == nodeId);
+}
+
+/**
+ * @brief Explains why one committed cable is illegal, or empty when it is legal.
+ * @param graph Graph document to inspect.
+ * @param link Cable to validate after shape propagation.
+ */
+std::string incompatibilityMessageForLink(
+    const openyourbox::graph::NodeGraph &graph,
+    const openyourbox::graph::GraphLink &link) {
   using openyourbox::graph::convolutionRateIsError;
   using openyourbox::graph::convolutionRateMessage;
   using openyourbox::graph::defaultPqmfBands;
@@ -2419,7 +2437,90 @@ std::string firstIncompatibleLinkMessage(const openyourbox::graph::NodeGraph &gr
   using openyourbox::graph::pqmfSynthesisChannelMessage;
   using openyourbox::graph::variationalBottleneckChannelIsError;
   using openyourbox::graph::variationalBottleneckChannelMessage;
+  const auto *source = graph.findPin(link.sourcePinId);
+  const auto *destination = graph.findPin(link.destinationPinId);
+  if (source == nullptr || destination == nullptr)
+    return {};
+  const auto sourceShape = outgoingShapeOf(graph, *source);
+  if (!sourceShape.isCompatibleWith(destination->shape)) {
+    auto message = sourceShape.incompatibilityMessage(destination->shape);
+    if (message.empty())
+      message = "Shape mismatch: channel counts are incompatible";
+    return message;
+  }
+  const auto destNode = graph.findNodeForPin(destination->id);
+  if (!destNode.has_value())
+    return {};
+  const auto *node = graph.findNode(*destNode);
+  if (node == nullptr)
+    return {};
+  if (openyourbox::graph::isExternalLoadNode(*node) &&
+      node->externalShapeIncomplete && !openyourbox::graph::isLatentPin(*destination) &&
+      !openyourbox::graph::isControlInputPin(*destination))
+    return "Enter channel overrides before connecting this checkpoint";
+  if (node->type == NodeType::pqmfSynthesis &&
+      pqmfSynthesisChannelIsError(sourceShape.channels,
+                                  std::max(2, readNodeProperty(
+                                                  *node, "n_band",
+                                                  defaultPqmfBands))))
+    return pqmfSynthesisChannelMessage(
+        sourceShape.channels,
+        std::max(2, readNodeProperty(*node, "n_band", defaultPqmfBands)));
+  if (node->type == NodeType::variationalBottleneck &&
+      variationalBottleneckChannelIsError(sourceShape.channels))
+    return variationalBottleneckChannelMessage(sourceShape.channels);
+  if (node->type == NodeType::noiseSynthesizer) {
+    const auto noiseBands = std::max(
+        1, readNodeProperty(*node, "noise_bands",
+                            openyourbox::graph::defaultNoiseBands));
+    const auto windowSize = std::max(
+        1, readNodeProperty(*node, "window_size",
+                            openyourbox::graph::defaultNoiseWindowSize));
+    if (openyourbox::graph::noiseSynthChannelIsError(sourceShape.channels,
+                                                     noiseBands))
+      return openyourbox::graph::noiseSynthChannelMessage(sourceShape.channels,
+                                                         noiseBands);
+    if (openyourbox::graph::noiseSynthWindowIsError(windowSize, noiseBands))
+      return openyourbox::graph::noiseSynthWindowMessage(windowSize, noiseBands);
+    if (convolutionRateIsError(windowSize, true, sourceShape.temporalRate))
+      return convolutionRateMessage(windowSize, true, sourceShape.temporalRate);
+    return {};
+  }
+  if (!isConvolutionType(node->type) && !isConvTransposeType(node->type))
+    return {};
+  const auto stride = std::max(1, readNodeProperty(*node, "stride", 1));
+  const auto upsample = isConvTransposeType(node->type);
+  if (convolutionRateIsError(stride, upsample, sourceShape.temporalRate))
+    return convolutionRateMessage(stride, upsample, sourceShape.temporalRate);
+  return {};
+}
+
+/**
+ * @brief Collects identifiers of cables that currently fail shape or rate checks.
+ * @param graph Graph document to inspect.
+ */
+std::unordered_set<std::int32_t>
+incompatibleLinkIds(const openyourbox::graph::NodeGraph &graph) {
+  std::unordered_set<std::int32_t> ids;
+  for (const auto &link : graph.getLinks()) {
+    if (!incompatibilityMessageForLink(graph, link).empty())
+      ids.insert(link.id);
+  }
+  return ids;
+}
+
+/**
+ * @brief Returns a tooltip when a committed cable is now illegal.
+ * @param graph Graph document to inspect.
+ * @param focusNodeId When non-zero, ignore cables and property errors that do
+ *        not involve this node so unrelated edits are not blocked by a
+ *        pre-existing mismatch (for example Audio In vs a mono RAVE load).
+ */
+std::string firstIncompatibleLinkMessage(
+    const openyourbox::graph::NodeGraph &graph, std::int32_t focusNodeId = 0) {
   for (const auto &node : graph.getNodes()) {
+    if (focusNodeId != 0 && node.id != focusNodeId)
+      continue;
     for (const auto &property : node.properties) {
       if (property.repeatListInvalid && !property.repeatListInvalidMessage.empty())
         return property.repeatListInvalidMessage;
@@ -2431,64 +2532,11 @@ std::string firstIncompatibleLinkMessage(const openyourbox::graph::NodeGraph &gr
     }
   }
   for (const auto &link : graph.getLinks()) {
-    const auto *source = graph.findPin(link.sourcePinId);
-    const auto *destination = graph.findPin(link.destinationPinId);
-    if (source == nullptr || destination == nullptr)
+    if (focusNodeId != 0 && !linkTouchesNode(graph, link, focusNodeId))
       continue;
-    const auto sourceShape = outgoingShapeOf(graph, *source);
-    if (!sourceShape.isCompatibleWith(destination->shape)) {
-      auto message = sourceShape.incompatibilityMessage(destination->shape);
-      if (message.empty())
-        message = "Shape mismatch: channel counts are incompatible";
+    if (const auto message = incompatibilityMessageForLink(graph, link);
+        !message.empty())
       return message;
-    }
-    const auto destNode = graph.findNodeForPin(destination->id);
-    if (!destNode.has_value())
-      continue;
-    const auto *node = graph.findNode(*destNode);
-    if (node == nullptr)
-      continue;
-    if (openyourbox::graph::isExternalLoadNode(*node) &&
-        node->externalShapeIncomplete && !openyourbox::graph::isLatentPin(*destination) &&
-        !openyourbox::graph::isControlInputPin(*destination))
-      return "Enter channel overrides before connecting this checkpoint";
-    if (node->type == NodeType::pqmfSynthesis &&
-        pqmfSynthesisChannelIsError(sourceShape.channels,
-                                    std::max(2, readNodeProperty(
-                                                    *node, "n_band",
-                                                    defaultPqmfBands))))
-      return pqmfSynthesisChannelMessage(
-          sourceShape.channels,
-          std::max(2, readNodeProperty(*node, "n_band", defaultPqmfBands)));
-    if (node->type == NodeType::variationalBottleneck &&
-        variationalBottleneckChannelIsError(sourceShape.channels))
-      return variationalBottleneckChannelMessage(sourceShape.channels);
-    if (node->type == NodeType::noiseSynthesizer) {
-      const auto noiseBands = std::max(
-          1, readNodeProperty(*node, "noise_bands",
-                              openyourbox::graph::defaultNoiseBands));
-      const auto windowSize = std::max(
-          1, readNodeProperty(*node, "window_size",
-                              openyourbox::graph::defaultNoiseWindowSize));
-      if (openyourbox::graph::noiseSynthChannelIsError(sourceShape.channels,
-                                                       noiseBands))
-        return openyourbox::graph::noiseSynthChannelMessage(
-            sourceShape.channels, noiseBands);
-      if (openyourbox::graph::noiseSynthWindowIsError(windowSize, noiseBands))
-        return openyourbox::graph::noiseSynthWindowMessage(windowSize,
-                                                           noiseBands);
-      if (convolutionRateIsError(windowSize, true, sourceShape.temporalRate))
-        return convolutionRateMessage(windowSize, true,
-                                      sourceShape.temporalRate);
-      continue;
-    }
-    if (!isConvolutionType(node->type) && !isConvTransposeType(node->type))
-      continue;
-    const auto stride = std::max(1, readNodeProperty(*node, "stride", 1));
-    const auto upsample = isConvTransposeType(node->type);
-    if (convolutionRateIsError(stride, upsample, sourceShape.temporalRate))
-      return convolutionRateMessage(stride, upsample,
-                                    sourceShape.temporalRate);
   }
   return {};
 }
@@ -5590,13 +5638,16 @@ ConnectionResult NodeGraph::connect(std::int32_t firstPinId,
   if (occupied)
     return {false, "This input already has a connection"};
 
+  const auto previouslyIllegal = incompatibleLinkIds(*this);
   links.push_back({nextLinkId++, source->id, destination->id});
   refreshPropagatedPinShapes(*this);
-  const auto incompatible = firstIncompatibleLinkMessage(*this);
-  if (!incompatible.empty()) {
+  for (const auto &link : links) {
+    auto message = incompatibilityMessageForLink(*this, link);
+    if (message.empty() || previouslyIllegal.count(link.id) != 0)
+      continue;
     links.pop_back();
     refreshPropagatedPinShapes(*this);
-    return {false, incompatible};
+    return {false, message};
   }
   return {true, {}};
 }
@@ -5824,6 +5875,14 @@ bool NodeGraph::setProperty(std::int32_t nodeId, const std::string &key,
   for (const auto &candidate : nodes) {
     if (!isMixerType(candidate.type) && !isMathExpressionType(candidate.type))
       continue;
+    if (candidate.id != node->id &&
+        !std::any_of(links.begin(), links.end(),
+                     [this, editedId = node->id,
+                      mixerId = candidate.id](const GraphLink &link) {
+                       return linkTouchesNode(*this, link, editedId) &&
+                              linkTouchesNode(*this, link, mixerId);
+                     }))
+      continue;
     if (const auto message =
             utilityInputsIncompatibilityMessage(*this, candidate);
         !message.empty()) {
@@ -5832,9 +5891,10 @@ bool NodeGraph::setProperty(std::int32_t nodeId, const std::string &key,
       return false;
     }
   }
-  const auto incompatible = firstIncompatibleLinkMessage(*this);
+  const auto incompatible = firstIncompatibleLinkMessage(*this, node->id);
   if (!incompatible.empty()) {
     rollbackProperty();
+    lastPropertyError = incompatible;
     return false;
   }
   syncRepeatValues();
@@ -5985,13 +6045,14 @@ bool NodeGraph::setPropertyPreserveIn(std::int32_t nodeId, const std::string &ke
   property->repeatIntValues.assign(static_cast<std::size_t>(std::max(1, authoredLength)),
                                  0);
   refreshPropagatedPinShapes(*this);
-  const auto incompatible = firstIncompatibleLinkMessage(*this);
+  const auto incompatible = firstIncompatibleLinkMessage(*this, nodeId);
   if (!incompatible.empty()) {
     property->value = previousValue;
     property->repeatIntValues = previousRepeatValues;
     property->preserveInBound = previousPreserveIn;
     property->repeatListInvalid = previousInvalid;
     refreshPropagatedPinShapes(*this);
+    lastPropertyError = incompatible;
     return false;
   }
   return true;
@@ -7795,7 +7856,7 @@ bool NodeGraph::setExternalChannelOverride(std::int32_t nodeId, const char *whic
       (node->externalHasEncodeDecode && effectiveLatentChannels(*node) < 1);
   applyExternalLoadSurface(*node);
   refreshPropagatedPinShapes(*this);
-  const auto incompatible = firstIncompatibleLinkMessage(*this);
+  const auto incompatible = firstIncompatibleLinkMessage(*this, nodeId);
   if (!incompatible.empty()) {
     *target = previous;
     node->externalShapeIncomplete = previousIncomplete;

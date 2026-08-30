@@ -103,6 +103,14 @@ struct CompiledElement {
    * @brief Channel extracted from the FiLM source, or -1 for the full tensor.
    */
   int filmExtractChannel = -1;
+  /**
+   * @brief Compiled index of a Gold RAVE latent-in source, or -1 when unused.
+   */
+  std::int64_t latentInputIndex = -1;
+  /**
+   * @brief Channel extracted from the latent-in source, or -1 for the full tensor.
+   */
+  int latentExtractChannel = -1;
   /** @brief Control width for per-layer FiLM adaptors, or 0 when unwired. */
   int condDim = 0;
   /** @brief Per-layer FiLM Linear weights shaped `[2 * hidden, condDim]`. */
@@ -1107,6 +1115,29 @@ torch::Tensor gatherUpstream(const std::vector<torch::Tensor> &outputs,
   return extractCompiledInput(value, compiledExtractForInput(element));
 }
 
+/**
+ * @brief Tensor wired to a Gold RAVE latent input, when that pin is connected.
+ *
+ * Prefers a source encode tap when the upstream Gold box stored one; otherwise
+ * uses the source's main output (Knob/XY → Linear → latent in).
+ * @param outputs Compiled element audio/main outputs.
+ * @param element Gold box whose @c latentInputIndex is set.
+ * @param latentOutputs Optional encode taps parallel to @p outputs.
+ * @return Latent tensor, or undefined when no latent input is compiled.
+ */
+torch::Tensor gatherLatentInput(
+    const std::vector<torch::Tensor> &outputs, const CompiledElement &element,
+    const std::vector<torch::Tensor> *latentOutputs) {
+  if (element.latentInputIndex < 0)
+    return {};
+  const auto source = static_cast<std::size_t>(element.latentInputIndex);
+  auto value = source < outputs.size() ? outputs[source] : torch::Tensor{};
+  if (latentOutputs != nullptr && source < latentOutputs->size() &&
+      (*latentOutputs)[source].defined())
+    value = (*latentOutputs)[source];
+  return extractCompiledInput(value, element.latentExtractChannel);
+}
+
 std::vector<torch::Tensor>
 gatherAllInputs(const std::vector<torch::Tensor> &outputs,
                 const CompiledElement &element) {
@@ -1508,9 +1539,17 @@ void LiveGraphRuntime::executeElement(std::size_t index,
       break;
     }
     const bool decodeFromLatent =
-        !element.inputUseLatentTap.empty() && element.inputUseLatentTap.front() != 0;
-    if (kernel != nullptr && kernel->hasEncodeDecode() && decodeFromLatent) {
-      output = kernel->decode(upstream);
+        kernel != nullptr && kernel->hasEncodeDecode() &&
+        element.latentInputIndex >= 0;
+    if (decodeFromLatent) {
+      auto latent = gatherLatentInput(runtime.outputs, element,
+                                       &runtime.latentOutputs);
+      runtime.latentOutputs[index] = latent;
+      if (latent.defined())
+        output = kernel->decode(latent);
+      else
+        output = torch::zeros({1, element.outputChannels, samples},
+                              blockInput.options());
     } else if (kernel != nullptr && kernel->hasEncodeDecode()) {
       auto extended =
           extendCausalInput(upstream, runtime.histories[index], historyLength);
@@ -1544,7 +1583,10 @@ void LiveGraphRuntime::executeElement(std::size_t index,
         output.size(0) != 1 || output.size(1) < 1)
       throw std::runtime_error(
           "Frozen BlackBox returned an invalid tensor shape or type");
-    output = matchTimeLength(output, upstream.size(2));
+    const auto targetTime =
+        decodeFromLatent ? samples
+                         : (upstream.defined() ? upstream.size(2) : samples);
+    output = matchTimeLength(output, targetTime);
     const auto elapsed = std::chrono::duration<double, std::milli>(
         std::chrono::steady_clock::now() - started);
     runtime.inferenceMilliseconds[index].store(elapsed.count(),
@@ -2564,30 +2606,37 @@ LiveGraphEngine::compile(const graph::NodeGraph &graphDocument,
         element.conditioningX = node.conditioningX;
         element.conditioningY = node.conditioningY;
         break;
-      case NodeType::blackBox:
+      case NodeType::blackBox: {
         if (!blackBoxResolver)
           return failure(LiveGraphErrorCode::invalidBlackBox, node.id,
                          "Frozen BlackBox requires an off-thread resolver");
         element.blackBoxFactory = blackBoxResolver(node);
         element.filmInputIndex = -1;
         element.filmExtractChannel = -1;
+        element.latentInputIndex = -1;
+        element.latentExtractChannel = -1;
+        bool haveAudioInput = false;
         for (std::size_t index = 0; index < element.inputIsConditioning.size();
              ++index) {
-          if (element.inputIsConditioning[index] != 0 &&
-              index < element.inputIndices.size()) {
+          if (index >= element.inputIndices.size())
+            continue;
+          const auto extract =
+              index < element.inputExtractChannels.size()
+                  ? element.inputExtractChannels[index]
+                  : -1;
+          if (element.inputIsConditioning[index] != 0) {
             element.filmInputIndex = element.inputIndices[index];
-            element.filmExtractChannel =
-                index < element.inputExtractChannels.size()
-                    ? element.inputExtractChannels[index]
-                    : -1;
-          } else if (element.inputIsConditioning[index] == 0 &&
-                     index < element.inputIndices.size()) {
+            element.filmExtractChannel = extract;
+          } else if (index < element.inputUseLatentTap.size() &&
+                     element.inputUseLatentTap[index] != 0) {
+            element.latentInputIndex = element.inputIndices[index];
+            element.latentExtractChannel = extract;
+          } else {
             element.inputIndex = element.inputIndices[index];
             element.inputChannels = compiledSlotChannels(
                 compiled->elements[static_cast<std::size_t>(element.inputIndex)],
-                index < element.inputExtractChannels.size()
-                    ? element.inputExtractChannels[index]
-                    : -1);
+                extract);
+            haveAudioInput = true;
           }
         }
         if (node.blackBoxOrigin == graph::BlackBoxOrigin::externalLoad &&
@@ -2619,7 +2668,7 @@ LiveGraphEngine::compile(const graph::NodeGraph &graphDocument,
         element.outputChannels = element.blackBoxFactory->getOutputChannels();
         if ((node.blackBoxOrigin == graph::BlackBoxOrigin::trainAutoload ||
              node.blackBoxOrigin == graph::BlackBoxOrigin::externalLoad) &&
-            element.inputChannels > 0)
+            haveAudioInput && element.inputChannels > 0)
           element.outputChannels = element.inputChannels;
         element.receptiveField = std::max<std::uint64_t>(
             1, element.blackBoxFactory->getReceptiveField());
@@ -2630,6 +2679,7 @@ LiveGraphEngine::compile(const graph::NodeGraph &graphDocument,
         readFloatProperty(node, "fidelity", element.fidelityPercent);
         element.fidelityPercent = graph::clampFidelity(element.fidelityPercent);
         break;
+      }
       case NodeType::pqmfAnalysis: {
         int nBand = graph::defaultPqmfBands;
         readProperty(node, "n_band", nBand);

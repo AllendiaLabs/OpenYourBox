@@ -231,6 +231,59 @@ public:
 };
 
 /**
+ * @class TestRaveDecodeKernel
+ * @brief Distinguishes decode-from-latent (wide z) from encode-of-audio.
+ */
+class TestRaveDecodeKernel final : public openyourbox::dsp::FrozenBlackBoxKernel {
+public:
+  /** @brief Passes stereo audio through unchanged. */
+  torch::Tensor forward(const torch::Tensor &input) override { return input; }
+
+  /** @brief Returns the stereo audio as a 2-channel latent. */
+  torch::Tensor encode(const torch::Tensor &input) override { return input; }
+
+  /**
+   * @brief Emits stereo audio whose value flags the incoming latent width.
+   * @param latent Full-width or compact latent trajectory.
+   */
+  torch::Tensor decode(const torch::Tensor &latent) override {
+    auto audio = torch::zeros({1, 2, latent.size(2)}, latent.options());
+    audio.fill_(latent.size(1) >= 8 ? 0.25f : -0.5f);
+    return audio;
+  }
+
+  /** @brief Advertises encode/decode so Gold latent pins compile. */
+  bool hasEncodeDecode() const noexcept override { return true; }
+};
+
+/**
+ * @class TestRaveDecodeFactory
+ * @brief Stereo RAVE-style factory with an 8-channel latent (not host width).
+ */
+class TestRaveDecodeFactory final : public openyourbox::dsp::FrozenBlackBoxFactory {
+public:
+  /** @brief Returns the stereo test input width. */
+  int getInputChannels() const noexcept override { return 2; }
+  /** @brief Returns the stereo test output width. */
+  int getOutputChannels() const noexcept override { return 2; }
+  /** @brief Returns a single-sample receptive field. */
+  std::uint64_t getReceptiveField() const noexcept override { return 1; }
+  /** @brief Reports that the test kernel owns no trainable parameters. */
+  std::uint64_t getParameterCount() const noexcept override { return 0; }
+  /** @brief Reports exact digital-silence preservation. */
+  bool preservesSilence() const noexcept override { return true; }
+  /** @brief Advertises encode/decode beside forward. */
+  bool hasEncodeDecode() const noexcept override { return true; }
+  /** @brief Width that must not leak into Audio Output shape checks. */
+  int getLatentChannels() const noexcept override { return 8; }
+  /** @brief Creates one runtime-local encode/decode test kernel. */
+  std::unique_ptr<openyourbox::dsp::FrozenBlackBoxKernel>
+  createKernel() const override {
+    return std::make_unique<TestRaveDecodeKernel>();
+  }
+};
+
+/**
  * @brief Builds a valid stereo Conv1D graph for runtime tests.
  * @param firstConvolution Receives the first weighted node identifier.
  * @param secondConvolution Receives the second weighted node identifier.
@@ -3562,6 +3615,228 @@ int main() {
                          cleared->inputs.size() == 1 &&
                          cleared->outputs.size() == 1,
                      "Clear returns to audio-only empty passthrough");
+  }
+
+  {
+    using openyourbox::dsp::LiveGraphCompileError;
+    using openyourbox::dsp::LiveGraphEngine;
+    using openyourbox::graph::NodeType;
+    openyourbox::graph::NodeGraph latentGraph;
+    const auto input = latentGraph.addNode(NodeType::audioInput, {0.0f, 0.0f});
+    const auto load = latentGraph.addExternalTorchScriptLoadNode({180.0f, 0.0f});
+    const auto output = latentGraph.addNode(NodeType::audioOutput, {360.0f, 0.0f});
+    const auto knob = latentGraph.addNode(NodeType::knobInput, {180.0f, 80.0f});
+    const auto linear = latentGraph.addNode(NodeType::linear, {270.0f, 80.0f});
+    passed &= expect(latentGraph.setProperty(linear, "features", 8),
+                     "Linear features match latent width");
+    passed &= expect(
+        latentGraph.applyExternalCheckpointReady(load, "test-rave-latent.pt", 2,
+                                                2, 8, true, false, false, {}, {},
+                                                {}, ""),
+        "encode/decode load with 8-ch latent must succeed");
+    const auto *loadNode = latentGraph.findNode(load);
+    const auto *linearNode = latentGraph.findNode(linear);
+    const auto *knobNode = latentGraph.findNode(knob);
+    std::int32_t latentIn = 0;
+    if (loadNode != nullptr) {
+      for (const auto &pin : loadNode->inputs) {
+        if (openyourbox::graph::isLatentPin(pin))
+          latentIn = pin.id;
+      }
+    }
+    passed &= expect(
+        loadNode != nullptr && linearNode != nullptr && knobNode != nullptr &&
+            latentIn != 0 &&
+            latentGraph
+                .connect(latentGraph.findNode(input)->outputs.front().id,
+                         loadNode->inputs.front().id)
+                .accepted &&
+            latentGraph
+                .connect(loadNode->outputs.front().id,
+                         latentGraph.findNode(output)->inputs.front().id)
+                .accepted &&
+            latentGraph.connect(knobNode->outputs.front().id,
+                                 linearNode->inputs.front().id)
+                .accepted &&
+            latentGraph.connect(linearNode->outputs.front().id, latentIn)
+                .accepted,
+        "Knob → Linear → latent in must wire beside audio I/O");
+    const auto raveFactory = std::make_shared<TestRaveDecodeFactory>();
+    const auto latentCompiled = LiveGraphEngine::compile(
+        latentGraph, options,
+        [raveFactory](const openyourbox::graph::GraphNode &) {
+          return raveFactory;
+        });
+    if (!latentCompiled.succeeded())
+      std::cerr << "knob-linear-latent: " << latentCompiled.error.message << '\n';
+    passed &= expect(latentCompiled.succeeded(),
+                     "Knob → Linear → latent in must not steal Audio Output width");
+    LiveGraphCompileError prepareError;
+    const auto latentRuntime =
+        LiveGraphEngine::prepare(latentCompiled.snapshot, prepareError);
+    passed &= expect(latentRuntime != nullptr,
+                     "decode-from-latent graph must prepare");
+    if (latentRuntime != nullptr) {
+      const auto inputTensor = torch::randn({1, 2, 32}, torch::kFloat32);
+      const auto outputTensor = latentRuntime->processTensor(inputTensor);
+      passed &= expect(
+          outputTensor.defined() && outputTensor.size(1) == 2 &&
+              torch::allclose(outputTensor, torch::full_like(outputTensor, 0.25f)),
+          "connected latent in must decode Linear z, not encode audio");
+    }
+
+    openyourbox::graph::NodeGraph xyGraph;
+    const auto xyInput = xyGraph.addNode(NodeType::audioInput, {0.0f, 0.0f});
+    const auto xyLoad = xyGraph.addExternalTorchScriptLoadNode({180.0f, 0.0f});
+    const auto xyOutput = xyGraph.addNode(NodeType::audioOutput, {360.0f, 0.0f});
+    const auto pad = xyGraph.addNode(NodeType::xyTrackpad, {180.0f, 80.0f});
+    const auto xyLinear = xyGraph.addNode(NodeType::linear, {270.0f, 80.0f});
+    passed &= expect(xyGraph.setProperty(xyLinear, "features", 8),
+                     "XY Linear features match latent width");
+    passed &= expect(
+        xyGraph.applyExternalCheckpointReady(xyLoad, "test-rave-xy-latent.pt",
+                                             2, 2, 8, true, false, false, {}, {},
+                                             {}, ""),
+        "XY encode/decode load with 8-ch latent must succeed");
+    const auto *xyLoadNode = xyGraph.findNode(xyLoad);
+    const auto *xyLinearNode = xyGraph.findNode(xyLinear);
+    const auto *padNode = xyGraph.findNode(pad);
+    std::int32_t xyLatentIn = 0;
+    if (xyLoadNode != nullptr) {
+      for (const auto &pin : xyLoadNode->inputs) {
+        if (openyourbox::graph::isLatentPin(pin))
+          xyLatentIn = pin.id;
+      }
+    }
+    passed &= expect(
+        xyLoadNode != nullptr && xyLinearNode != nullptr && padNode != nullptr &&
+            xyLatentIn != 0 &&
+            xyGraph
+                .connect(xyGraph.findNode(xyInput)->outputs.front().id,
+                         xyLoadNode->inputs.front().id)
+                .accepted &&
+            xyGraph
+                .connect(xyLoadNode->outputs.front().id,
+                         xyGraph.findNode(xyOutput)->inputs.front().id)
+                .accepted &&
+            xyGraph.connect(padNode->outputs.front().id,
+                             xyLinearNode->inputs.front().id)
+                .accepted &&
+            xyGraph.connect(xyLinearNode->outputs.front().id, xyLatentIn)
+                .accepted,
+        "XY → Linear → latent in must wire beside audio I/O");
+    const auto xyCompiled = LiveGraphEngine::compile(
+        xyGraph, options,
+        [raveFactory](const openyourbox::graph::GraphNode &) {
+          return raveFactory;
+        });
+    if (!xyCompiled.succeeded())
+      std::cerr << "xy-linear-latent: " << xyCompiled.error.message << '\n';
+    passed &= expect(xyCompiled.succeeded(),
+                     "XY → Linear → latent in must not steal Audio Output width");
+  }
+
+  {
+    using openyourbox::graph::NodeType;
+    openyourbox::graph::NodeGraph shapeGraph;
+    const auto input = shapeGraph.addNode(NodeType::audioInput, {0.0f, 0.0f});
+    const auto load = shapeGraph.addExternalTorchScriptLoadNode({180.0f, 0.0f});
+    const auto output = shapeGraph.addNode(NodeType::audioOutput, {360.0f, 0.0f});
+    const auto linear = shapeGraph.addNode(NodeType::linear, {180.0f, 120.0f});
+    const auto conv = shapeGraph.addNode(NodeType::convolution, {270.0f, 120.0f});
+    passed &= expect(
+        shapeGraph
+            .connect(shapeGraph.findNode(input)->outputs.front().id,
+                       shapeGraph.findNode(load)->inputs.front().id)
+            .accepted &&
+            shapeGraph
+                .connect(shapeGraph.findNode(load)->outputs.front().id,
+                         shapeGraph.findNode(output)->inputs.front().id)
+                .accepted,
+        "empty TS load must accept stereo Audio In/Out cables");
+    passed &= expect(
+        shapeGraph.applyExternalCheckpointReady(load, "mono-rave.pt", 1, 1, 16,
+                                                true, false, false, {}, {}, {},
+                                                ""),
+        "mono encode/decode load must succeed after stereo cables exist");
+    passed &= expect(shapeGraph.setProperty(linear, "features", 32),
+                     shapeGraph.lastPropertyMessage().empty()
+                         ? "disconnected Linear must edit Features beside a TS load"
+                         : shapeGraph.lastPropertyMessage().c_str());
+    passed &= expect(shapeGraph.setProperty(conv, "channels", 8),
+                     shapeGraph.lastPropertyMessage().empty()
+                         ? "disconnected Conv1D must edit Channels beside a TS load"
+                         : shapeGraph.lastPropertyMessage().c_str());
+    auto intProperty = [](const openyourbox::graph::GraphNode *node,
+                            const char *key) {
+      if (node == nullptr)
+        return -1;
+      for (const auto &property : node->properties) {
+        if (property.key == key)
+          return property.value;
+      }
+      return -1;
+    };
+    passed &= expect(intProperty(shapeGraph.findNode(linear), "features") == 32,
+                     "disconnected Linear Features must stick");
+    passed &= expect(intProperty(shapeGraph.findNode(conv), "channels") == 8,
+                     "disconnected Conv1D Channels must stick");
+
+    passed &= expect(shapeGraph.setProperty(conv, "channels", 16),
+                     shapeGraph.lastPropertyMessage().empty()
+                         ? "Conv1D Channels must match the mono RAVE latent width"
+                         : shapeGraph.lastPropertyMessage().c_str());
+    const auto *loaded = shapeGraph.findNode(load);
+    const auto *convNode = shapeGraph.findNode(conv);
+    std::int32_t latentIn = 0;
+    int latentChannels = 0;
+    if (loaded != nullptr) {
+      for (const auto &pin : loaded->inputs) {
+        if (openyourbox::graph::isLatentPin(pin)) {
+          latentIn = pin.id;
+          latentChannels = pin.shape.channels;
+        }
+      }
+    }
+    const auto latentConnect =
+        (convNode != nullptr && latentIn != 0)
+            ? shapeGraph.connect(convNode->outputs.front().id, latentIn)
+            : openyourbox::graph::ConnectionResult{
+                  false, "missing Conv1D or latent pin"};
+    passed &= expect(loaded != nullptr && convNode != nullptr &&
+                         convNode->outputs.front().shape.channels == 16 &&
+                         latentChannels == 16,
+                     "Conv1D out and RAVE latent in must both declare 16 channels");
+    passed &= expect(
+        latentConnect.accepted,
+        latentConnect.message.empty()
+            ? "Conv1D 16ch must connect to latent in beside a stereo/mono mismatch"
+            : latentConnect.message.c_str());
+  }
+
+  {
+    using openyourbox::graph::NodeType;
+    openyourbox::graph::NodeGraph audioPinGraph;
+    const auto load =
+        audioPinGraph.addExternalTorchScriptLoadNode({180.0f, 0.0f});
+    const auto conv =
+        audioPinGraph.addNode(NodeType::convolution, {0.0f, 120.0f});
+    passed &= expect(
+        audioPinGraph.applyExternalCheckpointReady(load, "mono-rave-audio.pt", 1,
+                                                   1, 16, true, false, false, {},
+                                                   {}, {}, ""),
+        "mono encode/decode load must succeed for audio-pin refusal");
+    passed &= expect(audioPinGraph.setProperty(conv, "channels", 16),
+                     "Conv1D Channels must be 16 before the audio-pin check");
+    const auto *loadNode = audioPinGraph.findNode(load);
+    const auto *convNode = audioPinGraph.findNode(conv);
+    const auto audioConnect =
+        (loadNode != nullptr && convNode != nullptr)
+            ? audioPinGraph.connect(convNode->outputs.front().id,
+                                    loadNode->inputs.front().id)
+            : openyourbox::graph::ConnectionResult{false, "missing nodes"};
+    passed &= expect(!audioConnect.accepted,
+                     "Conv1D 16ch must be refused by unused mono RAVE audio in");
   }
 
   {
