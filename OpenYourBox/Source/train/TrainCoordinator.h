@@ -27,7 +27,7 @@ enum class TrainStatus {
 
 /**
  * @class TrainCoordinator
- * @brief Runs the Python train worker off-thread with pause/resume/stop.
+ * @brief Runs the Python train worker off-thread with run/stop.
  *
  * Progress events are parsed on the worker thread and published for the
  * message thread. Artifact preparation is optional and never runs on the
@@ -96,12 +96,6 @@ public:
   /** @brief Polls cloud status when a remote job is attached (message thread). */
   void pollCloud();
 
-  /** @brief Requests the worker to pause optimization. */
-  void pause();
-
-  /** @brief Requests the worker to resume a paused job. */
-  void resume();
-
   /** @brief Requests the worker to stop without exporting a replacement model. */
   void stop();
 
@@ -165,8 +159,8 @@ private:
   void run() override;
 
   /**
-   * @brief Writes a pause/resume/stop command for the worker to poll.
-   * @param command Command verb (`pause`, `resume`, or `stop`).
+   * @brief Writes a stop command for the worker to poll.
+   * @param command Command verb (`stop`).
    */
   void writeCommand(const juce::String &command);
 
@@ -194,15 +188,14 @@ private:
    */
   void finishCloudSuccess(const juce::File &artifact);
   /**
-   * @brief Returns true for queued, running, or paused.
+   * @brief Returns true for queued or running.
    * @param value Lifecycle state.
    */
   [[nodiscard]] bool isBusyStatus(TrainStatus value) const noexcept;
   /**
-   * @brief Sends pause/resume/stop to the cloud API off-thread.
-   * @param verb Control verb.
+   * @brief Sends stop to the cloud API off-thread.
    */
-  void cloudControl(const juce::String &verb);
+  void cloudStop();
 
   /** @brief Processor callback used after worker export succeeds. */
   ArtifactPreparer prepareArtifact;

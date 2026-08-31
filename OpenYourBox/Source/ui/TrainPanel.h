@@ -14,7 +14,7 @@
 namespace openyourbox::ui {
 /**
  * @class TrainPanel
- * @brief Master-only ml_forge-style Run/Pause/Stop panel with live loss.
+ * @brief Master-only ml_forge-style Run/Stop panel with live loss.
  */
 class TrainPanel {
 public:
@@ -68,10 +68,6 @@ public:
   struct Callbacks {
     /** @brief Start a job when copyright, selection, and arm gates pass. */
     std::function<void()> run;
-    /** @brief Pause the active job. */
-    std::function<void()> pause;
-    /** @brief Resume a paused job. */
-    std::function<void()> resume;
     /** @brief Stop without auto-load. */
     std::function<void()> stop;
     /** @brief Retry loading a successful artifact after a swap failure. */
@@ -141,7 +137,7 @@ public:
   };
 
   /**
-   * @brief Draws Run/Pause/Stop, loss plot, hyperparameters, and recipe info.
+   * @brief Draws Run/Stop, loss plot, hyperparameters, and recipe info.
    * @param coordinator Live train coordinator.
    * @param gates Enablement snapshot from the editor.
    * @param callbacks Editor-owned actions.

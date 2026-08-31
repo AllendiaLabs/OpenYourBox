@@ -26,8 +26,7 @@ void TrainPanel::render(const train::TrainCoordinator &coordinator,
   const auto status = coordinator.getStatus();
   const auto progress = coordinator.getProgress();
   const auto busy = status == train::TrainStatus::queued ||
-                    status == train::TrainStatus::running ||
-                    status == train::TrainStatus::paused;
+                    status == train::TrainStatus::running;
   const bool mixed = gates.mixedSampleRates;
   const bool unpairedMapping =
       objective == graph::TrainObjective::mapping && gates.unpairedSelected;
@@ -107,12 +106,6 @@ void TrainPanel::render(const train::TrainCoordinator &coordinator,
   if (!busy) {
     if (ImGui::Button("Run") && callbacks.run)
       callbacks.run();
-  } else if (status == train::TrainStatus::running) {
-    if (ImGui::Button("Pause") && callbacks.pause)
-      callbacks.pause();
-  } else if (status == train::TrainStatus::paused &&
-             ImGui::Button("Resume") && callbacks.resume) {
-    callbacks.resume();
   }
   ImGui::SameLine();
   const bool canStop = busy;
@@ -289,7 +282,7 @@ void TrainPanel::render(const train::TrainCoordinator &coordinator,
   const auto statusText = coordinator.getStatusMessage();
   const bool knownShortStatus =
       statusText == "Ready" || statusText == "Training..." ||
-      statusText == "Paused" || statusText == "Stopped" ||
+      statusText == "Stopped" ||
       statusText == "Training succeeded" || statusText == "Queued..." ||
       statusText == "Packaging..." || statusText == "Uploading..." ||
       statusText == "Attached cloud job" ||

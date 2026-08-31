@@ -486,12 +486,29 @@ void OpenYourBoxAudioProcessorEditor::renderFrame() {
       cloudJobsDiscovered = false;
     };
     cloudCallbacks.openStorefront = [this] { cloudTrainClient.openStorefront(); };
+    cloudCallbacks.applyEndpointOverrides =
+        [this](const juce::String &apiBaseUrlOverride,
+               const juce::String &storefrontUrlOverride) {
+          auto &settings = audioProcessor.getCloudSettings();
+          const auto nextApi = apiBaseUrlOverride.trim();
+          const auto nextStorefront = storefrontUrlOverride.trim();
+          const bool endpointChanged =
+              nextApi != settings.getApiBaseUrlOverride() ||
+              nextStorefront != settings.getStorefrontUrlOverride();
+          settings.setApiBaseUrlOverride(nextApi);
+          settings.setStorefrontUrlOverride(nextStorefront);
+          // Sessions are host-scoped; changing the origin requires a fresh link.
+          if (endpointChanged && settings.isLinked()) {
+            cloudTrainClient.logout();
+            cloudJobsDiscovered = false;
+            cloudLinkFlow = {};
+            pendingCloudDeviceCode.clear();
+          }
+        };
     cloudSettingsPanel.render(cloudSettings, cloudLinkFlow, cloudCallbacks);
     ImGui::Separator();
     openyourbox::ui::TrainPanel::Callbacks trainCallbacks;
     trainCallbacks.run = [this] { handleTrainRun(); };
-    trainCallbacks.pause = [this] { trainCoordinator.pause(); };
-    trainCallbacks.resume = [this] { trainCoordinator.resume(); };
     trainCallbacks.stop = [this] { trainCoordinator.stop(); };
     trainCallbacks.retryLoad = [this] {
       if (retryTrainResult.has_value())
@@ -1233,8 +1250,7 @@ void OpenYourBoxAudioProcessorEditor::rediscoverCloudJobs() {
       if (safeThis == nullptr || !jobs.has_value())
         return;
       for (const auto &job : *jobs) {
-        if (job.status == "queued" || job.status == "running" ||
-            job.status == "paused") {
+        if (job.status == "queued" || job.status == "running") {
           safeThis->trainCoordinator.attachCloudJob(job.jobId, job);
           break;
         }
@@ -1257,8 +1273,7 @@ void OpenYourBoxAudioProcessorEditor::refreshCloudEntitlement() {
 
 void OpenYourBoxAudioProcessorEditor::pollTrainingPreview() {
   const auto status = trainCoordinator.getStatus();
-  const auto busy = status == openyourbox::train::TrainStatus::running ||
-                    status == openyourbox::train::TrainStatus::paused;
+  const auto busy = status == openyourbox::train::TrainStatus::running;
   if (!trainPanel.hearWhileTraining || !busy) {
     trainPreviewLoadInFlight = false;
     return;

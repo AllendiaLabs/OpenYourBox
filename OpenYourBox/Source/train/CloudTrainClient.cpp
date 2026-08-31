@@ -298,10 +298,8 @@ std::optional<CloudJobSnapshot> CloudTrainClient::getJob(const juce::String &job
 }
 
 std::optional<CloudJobSnapshot>
-CloudTrainClient::controlJob(const juce::String &jobId, const juce::String &verb,
-                             CloudApiError &error) {
-  const auto result =
-      request("POST", "/v1/jobs/" + jobId + "/" + verb, "{}", true);
+CloudTrainClient::stopJob(const juce::String &jobId, CloudApiError &error) {
+  const auto result = request("POST", "/v1/jobs/" + jobId + "/stop", "{}", true);
   if (parseError(result, error)) {
     if (error.code == graph::cloudErrorCode::unauthorized)
       settings.markAuthError();

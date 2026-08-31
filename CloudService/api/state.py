@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 
 
-ACTIVE_STATUSES = frozenset({"queued", "running", "paused"})
+ACTIVE_STATUSES = frozenset({"queued", "running"})
 TERMINAL_STATUSES = frozenset({"succeeded", "failed", "stopped"})
 RETENTION_SECONDS = 30 * 24 * 60 * 60
 
@@ -24,6 +24,15 @@ def _now() -> float:
 def isoformat(ts: float | None = None) -> str:
     """Return an ISO-8601 UTC timestamp."""
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(ts if ts is not None else _now()))
+
+
+def heartbeat_timeout_seconds() -> float:
+    """Return the worker-liveness timeout used by the crash reconciler."""
+    raw = os.environ.get("CLOUD_HEARTBEAT_TIMEOUT_SECONDS", "120")
+    try:
+        return max(0.05, float(raw))
+    except ValueError:
+        return 120.0
 
 
 @dataclass
@@ -51,7 +60,7 @@ class LinkChallenge:
 
 @dataclass
 class Entitlement:
-    """Authoritative (mock) entitlement for one customer."""
+    """Authoritative (staging) entitlement for one customer."""
 
     sufficient: bool = True
     balance_hint: str = "mock-credit"
@@ -70,7 +79,7 @@ class Corpus:
 
 @dataclass
 class Checkpoint:
-    """Published intermediate artifact."""
+    """Published intermediate artifact (real recipe export bytes)."""
 
     checkpoint_id: str
     step: int
@@ -81,7 +90,11 @@ class Checkpoint:
 
 @dataclass
 class Job:
-    """Cloud training job record."""
+    """Cloud training job record.
+
+    ``succeeded`` is legal only when ``final_artifact`` holds non-empty bytes.
+    Product status never includes ``paused``.
+    """
 
     job_id: str
     customer_id: str
@@ -95,12 +108,19 @@ class Job:
     total_steps: int = 100
     stage: str = ""
     loss: float = 0.0
+    device: str = ""
     error_code: str = ""
     error_message: str = ""
     submitter_client_instance_id: str = ""
     checkpoints: list[Checkpoint] = field(default_factory=list)
     final_artifact: bytes | None = None
+    final_artifact_id: str = ""
     pin_corpus: bool = True
+    worker_heartbeat_at: float = 0.0
+    worker_pid: int | None = None
+    command_file: str = ""
+    work_dir: str = ""
+    stop_requested: bool = False
 
 
 class Store:
@@ -116,6 +136,7 @@ class Store:
         self.corpora: dict[str, Corpus] = {}
         self.entitlements: dict[str, Entitlement] = {}
         self.signed_downloads: dict[str, tuple[float, bytes, str]] = {}
+        self.worker_threads: dict[str, threading.Thread] = {}
         self.default_sufficient = os.environ.get("CLOUD_MOCK_ENTITLEMENT", "1") != "0"
         data_dir = os.environ.get("CLOUD_DATA_DIR", "")
         self.data_dir = Path(data_dir) if data_dir else None
@@ -131,7 +152,10 @@ class Store:
             self.corpora.clear()
             self.entitlements.clear()
             self.signed_downloads.clear()
+            self.worker_threads.clear()
             self.default_sufficient = os.environ.get("CLOUD_MOCK_ENTITLEMENT", "1") != "0"
+            data_dir = os.environ.get("CLOUD_DATA_DIR", "")
+            self.data_dir = Path(data_dir) if data_dir else None
 
     def new_id(self, prefix: str) -> str:
         return f"{prefix}-{uuid.uuid4().hex[:12]}"
@@ -161,7 +185,10 @@ class Store:
     def jobs_for(self, customer_id: str) -> list[Job]:
         with self.lock:
             owned = [j for j in self.jobs.values() if j.customer_id == customer_id]
-        owned.sort(key=lambda j: (0 if j.status in ACTIVE_STATUSES else 1, j.updated_at), reverse=True)
+        owned.sort(
+            key=lambda j: (0 if j.status in ACTIVE_STATUSES else 1, j.updated_at),
+            reverse=True,
+        )
         return owned
 
     def persist_hint(self) -> None:
@@ -170,9 +197,26 @@ class Store:
             return
         self.data_dir.mkdir(parents=True, exist_ok=True)
         snapshot = {
-            "jobs": {k: {"status": v.status, "customer_id": v.customer_id} for k, v in self.jobs.items()},
+            "jobs": {
+                k: {
+                    "status": v.status,
+                    "customer_id": v.customer_id,
+                    "corpus_id": v.corpus_id,
+                }
+                for k, v in self.jobs.items()
+            },
         }
-        (self.data_dir / "jobs-index.json").write_text(json.dumps(snapshot), encoding="utf-8")
+        (self.data_dir / "jobs-index.json").write_text(
+            json.dumps(snapshot), encoding="utf-8"
+        )
+
+    def artifact_dir(self, job_id: str) -> Path | None:
+        """Return the on-disk artifact directory for a job, if file-backed."""
+        if self.data_dir is None:
+            return None
+        path = self.data_dir / "jobs" / job_id
+        path.mkdir(parents=True, exist_ok=True)
+        return path
 
 
 STORE = Store()

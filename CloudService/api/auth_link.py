@@ -8,6 +8,7 @@ import time
 from fastapi import APIRouter, Request
 
 from CloudService.api.auth import error_response
+from CloudService.api.runtime import resolve_public_api_url
 from CloudService.api.state import STORE, LinkChallenge, Session
 
 router = APIRouter()
@@ -16,10 +17,12 @@ LINK_TTL_SECONDS = 600
 
 
 def _public_api() -> str:
-    return os.environ.get("CLOUD_API_PUBLIC_URL", "http://127.0.0.1:8787").rstrip("/")
+    """Return the advertised API origin for link bootstrap URLs."""
+    return resolve_public_api_url()
 
 
 def _storefront() -> str:
+    """Return the storefront origin (defaults to the advertised API origin)."""
     return os.environ.get("CLOUD_STOREFRONT_URL", _public_api()).rstrip("/")
 
 

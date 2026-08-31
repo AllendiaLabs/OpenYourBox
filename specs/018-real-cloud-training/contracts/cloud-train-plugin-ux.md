@@ -38,8 +38,11 @@ If a legacy `paused` status is ever received, treat as non-controllable anomaly 
 
 ## Staging pointer
 
-- No API URL fields in the main Train panel (per `017`).
-- Operators set `apiBaseUrlOverride` / `storefrontUrlOverride` in `cloud.xml` under the user data root to hit staging `CLOUD_API_PUBLIC_URL`.
+- No API URL fields in the main Train hyperparameter chrome (per `017`).
+- Operators set `apiBaseUrlOverride` / `storefrontUrlOverride` via the Allendia
+  account panel (**Cloud endpoint (staging / RunPod)**) or by editing `cloud.xml`
+  under the user data root, so Cloud Train hits staging / RunPod
+  `CLOUD_API_PUBLIC_URL`.
 
 ## Audio thread
 

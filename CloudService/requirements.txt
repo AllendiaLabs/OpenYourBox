@@ -1,0 +1,7 @@
+# Cloud training control plane (proprietary). Train recipes still use the
+# local Backend/train_worker.py PyTorch stack installed separately.
+fastapi>=0.110
+uvicorn[standard]>=0.27
+httpx>=0.27
+pytest>=8.0
+python-multipart>=0.0.9

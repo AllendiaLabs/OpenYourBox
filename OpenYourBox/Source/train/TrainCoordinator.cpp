@@ -122,8 +122,7 @@ graph::TrainDestination TrainCoordinator::getDestination() const noexcept {
 }
 
 bool TrainCoordinator::isBusyStatus(TrainStatus value) const noexcept {
-  return value == TrainStatus::queued || value == TrainStatus::running ||
-         value == TrainStatus::paused;
+  return value == TrainStatus::queued || value == TrainStatus::running;
 }
 
 bool TrainCoordinator::start(const graph::TrainJobRequest &request) {
@@ -251,8 +250,8 @@ void TrainCoordinator::applyCloudSnapshot(const CloudJobSnapshot &snapshot) {
     next = TrainStatus::queued;
     message = "Queued...";
   } else if (snapshot.status == "paused") {
-    next = TrainStatus::paused;
-    message = "Paused";
+    next = TrainStatus::running;
+    message = "Cloud reported paused (unsupported).";
   } else if (snapshot.status == "succeeded") {
     next = TrainStatus::succeeded;
     message = "Training succeeded";
@@ -261,8 +260,15 @@ void TrainCoordinator::applyCloudSnapshot(const CloudJobSnapshot &snapshot) {
     message = "Stopped";
   } else if (snapshot.status == "failed") {
     next = TrainStatus::failed;
-    message = snapshot.errorMessage.isNotEmpty() ? snapshot.errorMessage
-                                                 : juce::String("Cloud job failed");
+    if (snapshot.errorCode == graph::cloudErrorCode::workerLost ||
+        snapshot.errorCode == "worker_lost")
+      message = snapshot.errorMessage.isNotEmpty()
+                    ? snapshot.errorMessage
+                    : juce::String(
+                          "Cloud worker was lost. Checkpoints remain available.");
+    else
+      message = snapshot.errorMessage.isNotEmpty() ? snapshot.errorMessage
+                                                   : juce::String("Cloud job failed");
   }
   {
     const juce::ScopedLock lock(stateLock);
@@ -372,7 +378,7 @@ void TrainCoordinator::pollCloud() {
   });
 }
 
-void TrainCoordinator::cloudControl(const juce::String &verb) {
+void TrainCoordinator::cloudStop() {
   juce::String jobId;
   {
     const juce::ScopedLock lock(stateLock);
@@ -380,32 +386,12 @@ void TrainCoordinator::cloudControl(const juce::String &verb) {
   }
   if (jobId.isEmpty() || cloudClient == nullptr)
     return;
-  juce::Thread::launch([this, jobId, verb] {
+  juce::Thread::launch([this, jobId] {
     CloudApiError error;
-    const auto snapshot = cloudClient->controlJob(jobId, verb, error);
+    const auto snapshot = cloudClient->stopJob(jobId, error);
     if (snapshot.has_value())
       applyCloudSnapshot(*snapshot);
   });
-}
-
-void TrainCoordinator::pause() {
-  if (status.load(std::memory_order_acquire) != TrainStatus::running)
-    return;
-  if (destination.load(std::memory_order_acquire) == graph::TrainDestination::cloud) {
-    cloudControl("pause");
-    return;
-  }
-  writeCommand("pause");
-}
-
-void TrainCoordinator::resume() {
-  if (status.load(std::memory_order_acquire) != TrainStatus::paused)
-    return;
-  if (destination.load(std::memory_order_acquire) == graph::TrainDestination::cloud) {
-    cloudControl("resume");
-    return;
-  }
-  writeCommand("resume");
 }
 
 void TrainCoordinator::stop() {
@@ -413,7 +399,7 @@ void TrainCoordinator::stop() {
   if (!isBusyStatus(current))
     return;
   if (destination.load(std::memory_order_acquire) == graph::TrainDestination::cloud) {
-    cloudControl("stop");
+    cloudStop();
     return;
   }
   writeCommand("stop");
@@ -624,8 +610,8 @@ void TrainCoordinator::applyProgressObject(const juce::var &parsed) {
     if (lossHistory.size() > 2048)
       lossHistory.erase(lossHistory.begin());
     if (progress.status == "paused") {
-      statusMessage = "Paused";
-      status.store(TrainStatus::paused, std::memory_order_release);
+      statusMessage = "Training...";
+      status.store(TrainStatus::running, std::memory_order_release);
     } else if (progress.status == "running" || progress.status == "stopping") {
       statusMessage = "Training...";
       if (status.load(std::memory_order_acquire) == TrainStatus::paused)

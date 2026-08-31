@@ -1,6 +1,7 @@
 #include "graph/GraphTypes.h"
 #include "train/CloudJobPackage.h"
 #include "train/CloudSettings.h"
+#include "train/CloudTrainClient.h"
 
 #include <iostream>
 
@@ -62,6 +63,14 @@ int main() {
                    "non-submitter stays false after reload");
   reloaded.disconnect();
   passed &= expect(!reloaded.isLinked(), "disconnect clears the linked session");
+
+  CloudSettings stopSettings(temp);
+  openyourbox::train::CloudTrainClient client(stopSettings);
+  openyourbox::train::CloudApiError error;
+  passed &= expect(!client.stopJob("job-stop-only", error).has_value(),
+                   "stopJob is the only cloud control verb and fails without an API");
+  passed &= expect(error.message.isNotEmpty(),
+                   "stopJob surfaces a transport or API error");
 
   temp.getParentDirectory().deleteRecursively();
   if (!passed)

@@ -1,6 +1,32 @@
 #include "CloudSettingsPanel.h"
 
+#include <cstring>
+
 namespace openyourbox::ui {
+namespace {
+void copyToBuffer(std::array<char, 512> &buffer, const juce::String &text) {
+  const auto utf8 = text.toRawUTF8();
+  const auto length =
+      std::min(static_cast<size_t>(std::strlen(utf8)), buffer.size() - 1);
+  std::memcpy(buffer.data(), utf8, length);
+  buffer[length] = '\0';
+}
+} // namespace
+
+void CloudSettingsPanel::syncEndpointBuffers(const train::CloudSettings &settings) {
+  const auto api = settings.getApiBaseUrlOverride();
+  const auto storefront = settings.getStorefrontUrlOverride();
+  if (!endpointBuffersReady || api != lastSyncedApiOverride) {
+    copyToBuffer(apiBaseUrlBuffer, api);
+    lastSyncedApiOverride = api;
+  }
+  if (!endpointBuffersReady || storefront != lastSyncedStorefrontOverride) {
+    copyToBuffer(storefrontUrlBuffer, storefront);
+    lastSyncedStorefrontOverride = storefront;
+  }
+  endpointBuffersReady = true;
+}
+
 void CloudSettingsPanel::render(const train::CloudSettings &settings,
                                 const LinkFlow &flow,
                                 const Callbacks &callbacks) {
@@ -43,5 +69,42 @@ void CloudSettingsPanel::render(const train::CloudSettings &settings,
   ImGui::SameLine();
   if (ImGui::Button("Manage account") && callbacks.openStorefront)
     callbacks.openStorefront();
+
+  ImGui::Separator();
+  if (ImGui::CollapsingHeader("Cloud endpoint (staging / RunPod)")) {
+    syncEndpointBuffers(settings);
+    ImGui::TextDisabled("Leave empty to use product defaults.");
+    ImGui::TextDisabled("Effective API: %s", settings.getApiBaseUrl().toRawUTF8());
+
+    ImGui::SetNextItemWidth(-1.0f);
+    ImGui::InputTextWithHint("##cloudApiBase",
+                             "API base URL (e.g. https://POD-8787.proxy.runpod.net)",
+                             apiBaseUrlBuffer.data(), apiBaseUrlBuffer.size());
+    ImGui::SetNextItemWidth(-1.0f);
+    ImGui::InputTextWithHint(
+        "##cloudStorefront",
+        "Storefront / link URL (often same as API for staging)",
+        storefrontUrlBuffer.data(), storefrontUrlBuffer.size());
+
+    if (ImGui::Button("Use same as API")) {
+      std::memcpy(storefrontUrlBuffer.data(), apiBaseUrlBuffer.data(),
+                  storefrontUrlBuffer.size());
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Clear to defaults")) {
+      apiBaseUrlBuffer[0] = '\0';
+      storefrontUrlBuffer[0] = '\0';
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Apply endpoint") && callbacks.applyEndpointOverrides) {
+      const juce::String api(apiBaseUrlBuffer.data());
+      const juce::String storefront(storefrontUrlBuffer.data());
+      callbacks.applyEndpointOverrides(api, storefront);
+      lastSyncedApiOverride = api.trim();
+      lastSyncedStorefrontOverride = storefront.trim();
+      copyToBuffer(apiBaseUrlBuffer, lastSyncedApiOverride);
+      copyToBuffer(storefrontUrlBuffer, lastSyncedStorefrontOverride);
+    }
+  }
 }
 } // namespace openyourbox::ui

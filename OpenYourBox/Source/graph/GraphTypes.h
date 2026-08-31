@@ -96,6 +96,8 @@ inline constexpr const char *conflict = "conflict";
 inline constexpr const char *linkPending = "link_pending";
 /** @brief Device-code link expired before completion. */
 inline constexpr const char *linkExpired = "link_expired";
+/** @brief Remote worker/host died mid-run. */
+inline constexpr const char *workerLost = "worker_lost";
 } // namespace cloudErrorCode
 
 /** @brief Rate-changing convolution direction. */

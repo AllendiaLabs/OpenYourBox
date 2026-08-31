@@ -149,14 +149,12 @@ public:
   getJob(const juce::String &jobId, CloudApiError &error);
 
   /**
-   * @brief POST pause/resume/stop.
+   * @brief POST /v1/jobs/{id}/stop.
    * @param jobId Job identifier.
-   * @param verb `pause`, `resume`, or `stop`.
    * @param error Receives conflict or transport failures.
    */
   [[nodiscard]] std::optional<CloudJobSnapshot>
-  controlJob(const juce::String &jobId, const juce::String &verb,
-             CloudApiError &error);
+  stopJob(const juce::String &jobId, CloudApiError &error);
 
   /**
    * @brief GET /v1/jobs/{id}/checkpoints.

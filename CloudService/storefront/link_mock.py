@@ -1,4 +1,8 @@
-"""Dev/staging mock storefront handlers for device-code link completion."""
+"""Staging storefront handlers for device-code account link completion.
+
+This module verifies platform account linking only. It must never mark a
+training job succeeded or fabricate train artifacts.
+"""
 
 from __future__ import annotations
 
@@ -20,7 +24,8 @@ def link_page(code: str = "") -> str:
 <body>
   <h1>Link OpenYourBox</h1>
   <p>User code: <strong>{escaped}</strong></p>
-  <p>This mock storefront completes the device-code flow for local/staging.</p>
+  <p>This staging storefront completes the device-code account link only.
+     It does not start or fake training.</p>
   <form method="post" action="/mock/link/complete">
     <input type="hidden" name="user_code" value="{escaped}"/>
     <input type="hidden" name="customer_id" value="mock-customer"/>

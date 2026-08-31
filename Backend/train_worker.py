@@ -1688,7 +1688,8 @@ class RaveGraphModule(nn.Module):
             mean = self._run(audio)
             return torch.cat((mean, torch.ones_like(mean)), dim=1)
         mean = self._run(audio, stop_at=self.bottleneck_id)
-        layer = self.layers.get(self.bottleneck_id)
+        key = str(self.bottleneck_id)
+        layer = self.layers[key] if key in self.layers else None
         std = getattr(layer, "last_std", None)
         if std is None:
             std = torch.ones_like(mean)

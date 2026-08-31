@@ -21,12 +21,19 @@ export CLOUD_DATA_DIR=/tmp/oyb-cloud-data
 PYTHONPATH=. python -m uvicorn CloudService.api.app:app --host 127.0.0.1 --port 8787
 ```
 
-2. Point the plugin at staging via user-data `cloud.xml`:
+There is no `CLOUD_MOCK_WORKER`. The worker always runs real mapping/reconstruction
+recipes. See `CloudService/README.md` for the full staging variable table.
 
-- `apiBaseUrlOverride` = `http://127.0.0.1:8787`
-- `storefrontUrlOverride` = same origin if using staging link page
+2. Point the plugin at staging via Train → Allendia account → **Cloud endpoint
+   (staging / RunPod)** (same keys also work in user-data `cloud.xml`):
 
-3. Launch DAW → OpenYourBox → complete Allendia link + ensure entitlement sufficient (staging link flow).
+- API base URL = `http://127.0.0.1:8787` (must match `CLOUD_API_PUBLIC_URL`)
+- Storefront / link URL = same origin if using the staging link page
+- **Apply endpoint**
+
+To train on a **RunPod GPU** instead of the laptop: build/push `CloudService/Dockerfile`, deploy a pod with HTTP port 8787, confirm `GET /v1/health` has `"cuda": true`, and set both endpoint fields to `https://<POD_ID>-8787.proxy.runpod.net`. Details are in `CloudService/README.md`.
+
+3. Launch DAW → OpenYourBox → complete Allendia link + ensure entitlement sufficient (staging link flow). For a RunPod pod, open the staging `/link` page on the proxy origin.
 4. Confirm Train shows **Run** and **Stop** only (no Pause/Resume) for Local and Cloud.
 
 ## Scenarios
