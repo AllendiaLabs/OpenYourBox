@@ -45,6 +45,7 @@ Notes:
 - `capture_set` file names refer to multipart parts (or paths inside a corpus archive), **not** absolute local paths.
 - When reusing retention, set `corpus_id` and omit file parts (or send empty capture files); server resets `last_used_at`.
 - `train_options` / objective rules match unified train IPC (mapping vs reconstruction eligibility enforced **in plugin before upload** and re-checked server-side).
+- Auth and entitlement are **not** fields in the manifest; they are carried by the linked session on the HTTPS request.
 
 ## Multipart upload (new corpus)
 
@@ -59,7 +60,7 @@ Plugin computes `totalBytes` for soft warn before send.
 
 ## Server materialization
 
-1. Validate auth + one-job-per-token.  
+1. Validate linked session + entitlement + one-job-per-account.  
 2. Store files under new `corpus_id` **or** resolve existing `corpus_id`.  
 3. Rewrite capture paths to worker-local absolute paths.  
 4. Invoke train recipe equivalent to local start request.  

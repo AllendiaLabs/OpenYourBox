@@ -8,7 +8,7 @@ description: "Task list for Cloud Training"
 
 **Prerequisites**: `plan.md`, `spec.md`, `research.md`, `data-model.md`, `contracts/`
 
-**Tests**: Spec does not require TDD. Include targeted C++/Python tests where they reduce auth, concurrency, retention, and client-mapping risk; validate via `quickstart.md`.
+**Tests**: Spec does not require TDD. Include targeted C++/Python tests where they reduce auth, entitlement, concurrency, retention, and client-mapping risk; validate via `quickstart.md`.
 
 **Organization**: Tasks grouped by user story for independent implementation and validation.
 
@@ -33,7 +33,7 @@ description: "Task list for Cloud Training"
 
 **Purpose**: Scaffold proprietary cloud service tree and wire new plug-in sources into the build.
 
-- [ ] T001 Create `CloudService/` layout (`api/`, `worker/`, `tests/`) and README noting proprietary Phase 4 backend per `specs/017-cloud-training/plan.md`
+- [ ] T001 Create `CloudService/` layout (`api/`, `worker/`, `storefront/`, `tests/`) and README noting proprietary Phase 4 backend per `specs/017-cloud-training/plan.md`
 - [ ] T002 [P] Add Python deps stub for the cloud API (web framework + test extras) in `CloudService/requirements.txt`
 - [ ] T003 [P] Add new plug-in sources `CloudSettings`, `CloudTrainClient`, and job-package helpers to the OpenYourBox target in `CMakeLists.txt`
 - [ ] T004 Confirm design artifact paths and contracts are linked from `specs/017-cloud-training/plan.md`
@@ -42,142 +42,136 @@ description: "Task list for Cloud Training"
 
 ## Phase 2: Foundational (Blocking Prerequisites)
 
-**Purpose**: Shared types, settings persistence, destination enum, HTTP client skeleton, and API auth/job state machine required by all stories.
+**Purpose**: Shared types, linked-session persistence, destination enum, HTTP client skeleton, account-auth middleware, entitlement stub, and job store required by all stories.
 
 **⚠️ CRITICAL**: No user story work can begin until this phase is complete.
 
-- [ ] T005 Define `TrainDestination` (`local`|`cloud`), soft-warn constant default `2147483648`, and cloud error-code string helpers in `OpenYourBox/Source/graph/GraphTypes.h`
-- [ ] T006 [P] Implement `CloudSettings` (save/clear/replace masked token, optional base URL override, PropertiesFile persistence) in `OpenYourBox/Source/train/CloudSettings.h` and `CloudSettings.cpp`
-- [ ] T007 [P] Scaffold `CloudTrainClient` with off-audio-thread HTTPS request hooks and Bearer header injection in `OpenYourBox/Source/train/CloudTrainClient.h` and `CloudTrainClient.cpp`
+- [ ] T005 Define `TrainDestination` (`local`|`cloud`), soft-warn constant default `2147483648`, and cloud error-code string helpers (`unauthorized`, `insufficient_entitlement`, `one_job_per_account`, …) in `OpenYourBox/Source/graph/GraphTypes.h`
+- [ ] T006 [P] Implement `CloudSettings` (masked linked session + optional refresh, disconnect, base URL override, storefront URL override, PropertiesFile persistence) in `OpenYourBox/Source/train/CloudSettings.h` and `CloudSettings.cpp`
+- [ ] T007 [P] Scaffold `CloudTrainClient` with off-audio-thread HTTPS request hooks and Bearer linked-session header injection in `OpenYourBox/Source/train/CloudTrainClient.h` and `CloudTrainClient.cpp`
 - [ ] T008 Extend `TrainCoordinator` with destination-aware busy gate (one active local-or-cloud job per instance) without changing local ChildProcess path in `OpenYourBox/Source/train/TrainCoordinator.h` and `TrainCoordinator.cpp`
-- [ ] T009 Implement Bearer token auth middleware and standard `{error_code,error_message}` responses in `CloudService/api/auth.py`
-- [ ] T010 [P] Implement in-memory (or file-backed) job store with statuses `queued|running|paused|succeeded|failed|stopped` and one-active-job-per-token rule in `CloudService/api/jobs.py`
-- [ ] T011 [P] Add `GET /v1/health` and token-gated router skeleton matching `specs/017-cloud-training/contracts/cloud-train-api.md` in `CloudService/api/app.py`
-- [ ] T012 Persist submitter map (`jobId` → `isSubmitter`) for the local instance in `OpenYourBox/Source/train/CloudSettings.cpp` (or adjacent state helper)
-- [ ] T013 Wire `CloudSettings` + default cloud base URL into processor/editor lifecycle in `OpenYourBox/Source/PluginProcessor.cpp` and `OpenYourBox/Source/PluginEditor.cpp`
+- [ ] T009 Implement linked-session Bearer auth middleware and standard `{error_code,error_message}` responses in `CloudService/api/auth.py`
+- [ ] T010 [P] Implement mock entitlement provider (`sufficient` flag + `balance_hint`) with storefront sync stub in `CloudService/storefront/entitlement.py`
+- [ ] T011 [P] Implement in-memory (or file-backed) job store with statuses `queued|running|paused|succeeded|failed|stopped` and one-active-job-per-account rule in `CloudService/api/jobs.py`
+- [ ] T012 Add `GET /v1/health`, auth/link router stubs, and session-gated router skeleton matching `specs/017-cloud-training/contracts/cloud-train-api.md` in `CloudService/api/app.py`
+- [ ] T013 Persist submitter map (`jobId` → `isSubmitter`) for the local instance in `OpenYourBox/Source/train/CloudSettings.cpp` (or adjacent state helper)
+- [ ] T014 Wire `CloudSettings` + default cloud API base URL + default storefront URL into processor/editor lifecycle in `OpenYourBox/Source/PluginProcessor.cpp` and `OpenYourBox/Source/PluginEditor.cpp`
 
-**Checkpoint**: Token storage, client skeleton, coordinator busy gate, and cloud API auth/job store ready — story work can begin.
+**Checkpoint**: Linked-session storage, client skeleton, coordinator busy gate, cloud API auth/entitlement/job store ready — story work can begin.
 
 ---
 
-## Phase 3: User Story 1 - Configure Cloud Access Once (Priority: P1) 🎯 MVP
+## Phase 3: User Story 1 - Link Platform Customer Account (Priority: P1) 🎯 MVP
 
-**Goal**: In-plugin settings to enter, save, clear, and replace a masked API token with clear configured / not-configured / auth-error status; no separate app.
+**Goal**: In-plugin settings to link/disconnect a platform customer account via storefront device-code (or equivalent) flow, masked credentials, clear Linked / Not linked / Auth error status, and Open storefront affordance; no in-plugin checkout.
 
-**Independent Test**: Quickstart scenario 1 — save token (masked), clear disables cloud, invalid token shows auth error on probe/action.
+**Independent Test**: Quickstart scenario 1 — link (masked), disconnect disables cloud, revoked session shows auth error; Open storefront launches external URL.
 
 ### Implementation for User Story 1
 
-- [ ] T014 [P] [US1] Add cloud settings UI (token field, Save, Clear, masked display, status line) in `OpenYourBox/Source/ui/` (settings/prefs panel used by the editor)
-- [ ] T015 [US1] Connect settings UI to `CloudSettings` load/save/clear in `OpenYourBox/Source/PluginEditor.cpp`
-- [ ] T016 [US1] Add optional “Test connection” / auth probe via `CloudTrainClient` against `GET /v1/jobs` (or health+auth) in `OpenYourBox/Source/train/CloudTrainClient.cpp`
-- [ ] T017 [US1] Surface `unauthorized` as a clear authentication error in the settings/Train status without starting a job in `OpenYourBox/Source/ui/TrainPanel.cpp`
-- [ ] T018 [P] [US1] Ensure no WordPress/credits affordances appear in cloud settings copy in `OpenYourBox/Source/ui/` cloud settings panel (same file as T014)
+- [ ] T015 [P] [US1] Implement `POST /v1/auth/link/start` and `POST /v1/auth/link/token` (device-code style) in `CloudService/api/auth_link.py` wired from `CloudService/api/app.py`
+- [ ] T016 [P] [US1] Add mock storefront verification page/handler for link completion in `CloudService/storefront/link_mock.py` (dev/staging)
+- [ ] T017 [US1] Implement link-start, poll-for-token, refresh (optional), and logout client methods in `OpenYourBox/Source/train/CloudTrainClient.cpp`
+- [ ] T018 [P] [US1] Add cloud settings UI (Link account, Disconnect, masked status, Open storefront, optional advanced URLs) in `OpenYourBox/Source/ui/` settings/prefs panel used by the editor
+- [ ] T019 [US1] Connect settings UI to `CloudSettings` + link flow (show user code, open `verification_url`, poll until linked/expired/cancelled) in `OpenYourBox/Source/PluginEditor.cpp`
+- [ ] T020 [US1] Surface `unauthorized` / `link_expired` as clear authentication errors in settings/Train status without starting a job in `OpenYourBox/Source/ui/TrainPanel.cpp`
+- [ ] T021 [US1] Ensure no in-plugin checkout/cart/payment UI exists; only Open storefront URL launch in `OpenYourBox/Source/ui/` cloud settings panel (same file as T018)
 
-**Checkpoint**: US1 complete — token configure/clear/auth-error works independently.
+**Checkpoint**: US1 complete — account link/disconnect/auth-error/open-storefront works independently.
 
 ---
 
 ## Phase 4: User Story 2 - Start a Cloud Job From the Same Train Panel (Priority: P1)
 
-**Goal**: Local|Cloud destination; Cloud Run packages graph + corpus, uploads with progress, respects copyright/library gates, soft 2 GiB warn, and one-job-per-token; local path unchanged.
+**Goal**: Destination Local|Cloud on Train panel; Cloud Run packages graph + corpus, gates on linked account + entitlement, submits job; soft size warn; Local unchanged without account.
 
-**Independent Test**: Quickstart scenarios 2–4 — Cloud submit → queued/running; soft warn; second submit under same token refused; audio stays on pre-job model.
+**Independent Test**: Quickstart scenarios 2–5 — entitlement refuse, successful submit with progress, soft warn, one-job-per-account, Local without link (SC-010).
 
 ### Implementation for User Story 2
 
-- [ ] T019 [P] [US2] Add Local|Cloud destination control and last-used preference (default Local) in `OpenYourBox/Source/ui/TrainPanel.cpp`
-- [ ] T020 [US2] Gate Cloud Run on token configured + existing copyright/library/objective eligibility before any upload in `OpenYourBox/Source/ui/TrainPanel.cpp` and `OpenYourBox/Source/train/TrainCoordinator.cpp`
-- [ ] T021 [P] [US2] Compute selected corpus byte sum and show soft warning above 2 GiB without blocking in `OpenYourBox/Source/library/` helper and `OpenYourBox/Source/ui/TrainPanel.cpp`
-- [ ] T022 [US2] Build cloud `manifest.json` + multipart file parts (or archive) per `specs/017-cloud-training/contracts/cloud-job-package.md` in `OpenYourBox/Source/train/` (job package builder beside `TrainCoordinator`)
-- [ ] T023 [US2] Implement `POST /v1/jobs` multipart ingest, corpus storage, `corpus_id` assignment, and enqueue in `CloudService/api/jobs.py`
-- [ ] T024 [US2] Return `409` + `one_job_per_token` when an active job exists for the token in `CloudService/api/jobs.py`
-- [ ] T025 [US2] Submit package via `CloudTrainClient` with upload progress callbacks (message thread only) in `OpenYourBox/Source/train/CloudTrainClient.cpp`
-- [ ] T026 [US2] Fork `TrainCoordinator::start` for `destination=cloud` (package → upload → mark submitter) while keeping local ChildProcess path intact in `OpenYourBox/Source/train/TrainCoordinator.cpp`
-- [ ] T027 [US2] Map submit success to Train panel busy/queued state and show upload progress in `OpenYourBox/Source/ui/TrainPanel.cpp`
-- [ ] T028 [US2] Map API errors (`unauthorized`, `one_job_per_token`, `validation_failed`, `capacity`) to distinct user-readable messages in `OpenYourBox/Source/train/CloudTrainClient.cpp` and `TrainPanel.cpp`
-- [ ] T029 [P] [US2] Add mock/CPU worker that accepts a queued job and transitions `queued→running` for dev in `CloudService/worker/mock_worker.py`
-- [ ] T030 [P] [US2] Add Python tests for auth reject and one-job-per-token in `CloudService/tests/test_jobs_concurrency.py`
+- [ ] T022 [P] [US2] Implement `GET /v1/entitlement` using storefront entitlement provider in `CloudService/api/entitlement_routes.py` (wired in `CloudService/api/app.py`)
+- [ ] T023 [US2] Implement `POST /v1/jobs` with gates auth → entitlement → one-job-per-account → validation and multipart/corpus_id ingest per `specs/017-cloud-training/contracts/cloud-job-package.md` in `CloudService/api/jobs.py`
+- [ ] T024 [P] [US2] Add mock/CPU worker that accepts queued jobs and advances status for submit smoke tests in `CloudService/worker/mock_worker.py`
+- [ ] T025 [P] [US2] Build job-package assembler (manifest + selected library files / soft byte sum) in `OpenYourBox/Source/train/CloudJobPackage.h` and `CloudJobPackage.cpp`
+- [ ] T026 [US2] Add Local|Cloud destination control and soft-upload warning to Train panel in `OpenYourBox/Source/ui/TrainPanel.h` and `TrainPanel.cpp`
+- [ ] T027 [US2] Fork Cloud Run in `TrainCoordinator` (package → upload → accept; refuse when unlinked or entitlement insufficient with distinct messages) in `OpenYourBox/Source/train/TrainCoordinator.cpp`
+- [ ] T028 [US2] Probe entitlement via `CloudTrainClient` before/at Cloud Run and map `insufficient_entitlement` / `one_job_per_account` errors in `OpenYourBox/Source/train/CloudTrainClient.cpp`
+- [ ] T029 [US2] Keep Local path requiring zero platform account; verify Cloud disabled when disconnected in `OpenYourBox/Source/ui/TrainPanel.cpp` and `OpenYourBox/Source/train/TrainCoordinator.cpp`
+- [ ] T030 [US2] Show packaging/upload progress on Cloud submit without touching the audio thread in `OpenYourBox/Source/ui/TrainPanel.cpp` and `OpenYourBox/Source/train/CloudTrainClient.cpp`
+- [ ] T031 [P] [US2] Add Python tests for entitlement gate + one-job-per-account in `CloudService/tests/test_jobs_gates.py` (or `Tests/test_cloud_api.py`)
 
-**Checkpoint**: US2 complete — cloud submit works; local Train unaffected.
+**Checkpoint**: US2 complete — Cloud submit works with account+entitlement; Local works without account.
 
 ---
 
 ## Phase 5: User Story 3 - Monitor Progress and Control a Remote Job (Priority: P1)
 
-**Goal**: Poll status/loss/stage; Pause/Resume/Stop; offline/reconnect UX; token-wide list/attach across machines; plugin restart rediscovery.
+**Goal**: Poll status/metrics in Train panel; Pause/Resume/Stop; rediscovery and account-wide control across machines; offline/reconnect without implying cancel.
 
-**Independent Test**: Quickstart scenarios 5–6 and 10 — updates while online; pause/resume/stop; attach from second machine; restart reattach; offline does not imply cancel.
+**Independent Test**: Quickstart scenarios 6–7, 11 — status updates, pause/resume/stop, second-machine attach, restart rediscovery, offline banner.
 
 ### Implementation for User Story 3
 
-- [ ] T031 [P] [US3] Implement `GET /v1/jobs` and `GET /v1/jobs/{job_id}` progress payloads (status, step, loss, stage) in `CloudService/api/jobs.py`
-- [ ] T032 [P] [US3] Implement `POST .../pause|resume|stop` with legal state transitions in `CloudService/api/jobs.py`
-- [ ] T033 [US3] Drive mock/real worker to emit step/loss/stage updates while running in `CloudService/worker/mock_worker.py` (and later real worker)
-- [ ] T034 [US3] Poll job detail on a timer from `CloudTrainClient` / coordinator (≥1 update / 5 s target) off the audio thread in `OpenYourBox/Source/train/CloudTrainClient.cpp`
-- [ ] T035 [US3] Map remote statuses into `TrainStatus` + status message (including `queued` and offline/reconnect) in `OpenYourBox/Source/train/TrainCoordinator.cpp`
-- [ ] T036 [US3] Wire Train panel Pause/Resume/Stop to cloud control endpoints when destination is cloud in `OpenYourBox/Source/ui/TrainPanel.cpp`
-- [ ] T037 [US3] Ensure Stop yields terminal `stopped` with no success auto-load path invoked in `OpenYourBox/Source/train/TrainCoordinator.cpp` and `OpenYourBox/Source/PluginEditor.cpp`
-- [ ] T038 [US3] On editor open with token, call `GET /v1/jobs` and offer attach to active/recent job in `OpenYourBox/Source/PluginEditor.cpp` and `TrainPanel.cpp`
-- [ ] T039 [US3] Preserve `isSubmitter` only for locally recorded submitter jobs during rediscovery in `OpenYourBox/Source/train/CloudSettings.cpp`
-- [ ] T040 [P] [US3] Add Python tests for pause/resume/stop state machine in `CloudService/tests/test_job_controls.py`
+- [ ] T032 [P] [US3] Implement `GET /v1/jobs`, `GET /v1/jobs/{id}`, and `POST .../pause|resume|stop` in `CloudService/api/jobs.py`
+- [ ] T033 [US3] Drive mock worker progress fields (`step`, `loss`, `stage`) while running in `CloudService/worker/mock_worker.py`
+- [ ] T034 [US3] Add background poll timer and status mapping into existing `TrainStatus` / panel messages in `OpenYourBox/Source/train/CloudTrainClient.cpp` and `OpenYourBox/Source/train/TrainCoordinator.cpp`
+- [ ] T035 [US3] Wire Pause/Resume/Stop for cloud destination to remote control endpoints in `OpenYourBox/Source/ui/TrainPanel.cpp` and `OpenYourBox/Source/train/TrainCoordinator.cpp`
+- [ ] T036 [US3] On plugin open with linked account, list/attach active or recent jobs (account-wide) in `OpenYourBox/Source/train/CloudTrainClient.cpp` and `OpenYourBox/Source/PluginEditor.cpp`
+- [ ] T037 [US3] Show offline/reconnect UI when poll fails without claiming job cancelled in `OpenYourBox/Source/ui/TrainPanel.cpp`
+- [ ] T038 [P] [US3] Add Python tests for pause/resume/stop state machine and illegal transitions in `CloudService/tests/test_job_control.py`
 
-**Checkpoint**: US3 complete — monitor/control/rediscovery works token-wide.
+**Checkpoint**: US3 complete — monitor/control/rediscovery works with linked account.
 
 ---
 
 ## Phase 6: User Story 4 - Retrieve Checkpoints and Load Successful Results (Priority: P1)
 
-**Goal**: List/download checkpoints; optional mid-run load; submitter success auto-load Gold; non-submitter manual download/load only; retryable download failure.
+**Goal**: List/download checkpoints during run; submitter success auto-load Gold; non-submitter manual download/load only; Stop/fail never auto-load.
 
-**Independent Test**: Quickstart scenario 7 — checkpoint download during run; submitter auto-load on success; non-submitter no auto-swap.
+**Independent Test**: Quickstart scenario 8 — mid-run checkpoint load; submitter auto-load; non-submitter no auto-swap.
 
 ### Implementation for User Story 4
 
-- [ ] T041 [P] [US4] Publish checkpoint metadata from worker and expose `GET /v1/jobs/{id}/checkpoints` plus download URL endpoint in `CloudService/api/artifacts.py`
-- [ ] T042 [P] [US4] Publish final artifact on `succeeded` and expose artifact download endpoint in `CloudService/api/artifacts.py`
-- [ ] T043 [US4] List remote checkpoints in Train UI and download to local train artifact dir via `CloudTrainClient` in `OpenYourBox/Source/ui/TrainPanel.cpp` and `CloudTrainClient.cpp`
-- [ ] T044 [US4] Optional load of downloaded checkpoint into live path without stopping the remote job (reuse hear-while-training path) in `OpenYourBox/Source/PluginEditor.cpp`
-- [ ] T045 [US4] On submitter + `succeeded`, download final artifact and auto-load Gold using existing local success path in `OpenYourBox/Source/train/TrainCoordinator.cpp` and `PluginEditor.cpp`
-- [ ] T046 [US4] On non-submitter + `succeeded`, show success and enable manual Download/Load only (no graph auto-swap) in `OpenYourBox/Source/ui/TrainPanel.cpp`
-- [ ] T047 [US4] On download failure after server success, show retryable error and leave live graph unchanged in `OpenYourBox/Source/train/TrainCoordinator.cpp`
-- [ ] T048 [US4] Wire real GPU worker to materialize package and invoke mapping/reconstruction recipes compatible with `Backend/train_worker.py` in `CloudService/worker/train_runner.py`
-- [ ] T049 [P] [US4] Add Python tests for checkpoint list and success-only artifact availability in `CloudService/tests/test_artifacts.py`
+- [ ] T039 [P] [US4] Implement checkpoint list + signed download and final artifact download endpoints in `CloudService/api/artifacts.py` (wired in `CloudService/api/app.py`)
+- [ ] T040 [US4] Publish intermediate checkpoints and final artifact from mock/real worker on success only in `CloudService/worker/mock_worker.py` (and later GPU worker)
+- [ ] T041 [US4] List/download checkpoints to local artifact dirs and optional live load (hear-while-training) in `OpenYourBox/Source/train/CloudTrainClient.cpp` and `OpenYourBox/Source/train/TrainCoordinator.cpp`
+- [ ] T042 [US4] On `succeeded`, auto-download + Gold auto-load **only if** local `isSubmitter` for that `jobId` in `OpenYourBox/Source/train/TrainCoordinator.cpp` and `OpenYourBox/Source/PluginProcessor.cpp`
+- [ ] T043 [US4] Non-submitter success: show Download/Load actions without auto graph swap in `OpenYourBox/Source/ui/TrainPanel.cpp`
+- [ ] T044 [US4] Ensure `stopped`/`failed` never trigger success auto-load; retryable download error after server success in `OpenYourBox/Source/train/TrainCoordinator.cpp`
+- [ ] T045 [P] [US4] Add C++ unit tests for submitter-only auto-load flag and soft-warn byte math in `Tests/CloudTrainClientTests.cpp`
 
-**Checkpoint**: US4 complete — checkpoints and submitter-only Gold auto-load work.
+**Checkpoint**: US4 complete — checkpoints + submitter-only Gold auto-load.
 
 ---
 
-## Phase 7: User Story 5 - Understand Limits Before Credits Exist (Priority: P2)
+## Phase 7: User Story 5 - Entitlement Visibility and Storefront Path (Priority: P2)
 
-**Goal**: No credits/WordPress purchase path; clear capacity/concurrency messaging; Local remains available; retention 30-day extend-on-use + corpus reuse.
+**Goal**: High-level entitlement status in settings/Train; clear path to Open storefront when entitlement missing; concurrency messaging remains clear; no marketplace.
 
-**Independent Test**: Quickstart scenarios 8–9 — no credits UI; corpus reuse within window; expiry requires re-upload; concurrency message clear.
+**Independent Test**: Quickstart scenario 2 + US5 acceptance — insufficient entitlement shows storefront path; capacity/concurrency messages actionable.
 
 ### Implementation for User Story 5
 
-- [ ] T050 [P] [US5] Audit Train/settings UI strings to ensure no add-credits / WordPress storefront path in `OpenYourBox/Source/ui/TrainPanel.cpp` and cloud settings UI
-- [ ] T051 [US5] Add optional beta copy that paid credits come later (informational only) in `OpenYourBox/Source/ui/TrainPanel.cpp` and cloud settings UI under `OpenYourBox/Source/ui/`
-- [ ] T052 [US5] Implement corpus `last_used_at` + 30-day expiry and extend-on-reuse when `POST /v1/jobs` references `corpus_id` in `CloudService/api/corpus.py`
-- [ ] T053 [US5] Add retention sweeper deleting expired corpora not pinned by active jobs in `CloudService/api/retention.py`
-- [ ] T054 [US5] Support plugin submit with `corpus_id` reuse (skip full re-upload) in `OpenYourBox/Source/train/` job package builder and `OpenYourBox/Source/train/CloudTrainClient.cpp`
-- [ ] T055 [US5] Map `corpus_expired` and `capacity` to clear actionable Train messages in `OpenYourBox/Source/ui/TrainPanel.cpp`
-- [ ] T056 [P] [US5] Add Python tests for retention extend and idle expiry in `CloudService/tests/test_retention.py`
+- [ ] T046 [P] [US5] Surface entitlement status (available / unavailable / unknown) from last probe in cloud settings and Train panel in `OpenYourBox/Source/ui/TrainPanel.cpp` and settings panel under `OpenYourBox/Source/ui/`
+- [ ] T047 [US5] On entitlement refuse, show actionable copy + Open storefront button/link in `OpenYourBox/Source/ui/TrainPanel.cpp`
+- [ ] T048 [US5] Refresh entitlement probe on settings open and before Cloud Run in `OpenYourBox/Source/train/CloudTrainClient.cpp` and `OpenYourBox/Source/PluginEditor.cpp`
+- [ ] T049 [US5] Confirm marketplace browsing/selling remains absent from Train/settings surfaces in `OpenYourBox/Source/ui/TrainPanel.cpp` and settings panel
 
-**Checkpoint**: US5 complete — beta limits and retention behavior validated; still no billing UI.
+**Checkpoint**: US5 complete — entitlement visibility + storefront path without in-plugin checkout.
 
 ---
 
 ## Phase 8: Polish & Cross-Cutting Concerns
 
-**Purpose**: Build wiring, security hygiene, and end-to-end quickstart validation.
+**Purpose**: Retention, real GPU worker wiring, security hardening, and quickstart validation across stories.
 
-- [ ] T057 [P] Register C++ soft-warn / destination gating tests in `Tests/CloudTrainClientTests.cpp` (or equivalent) and CMake
-- [ ] T058 [P] Ensure tokens never logged in full in `OpenYourBox/Source/train/CloudTrainClient.cpp` and `CloudService/api/auth.py`
-- [ ] T059 Verify TLS/base-URL override path for staging in `OpenYourBox/Source/train/CloudSettings.cpp`
-- [ ] T060 Confirm local Train path (no token) still succeeds end-to-end in `OpenYourBox/Source/train/TrainCoordinator.cpp` / DAW
-- [ ] T061 Run `specs/017-cloud-training/quickstart.md` scenarios 1–10 and record results in `specs/017-cloud-training/checklists/requirements.md`
-- [ ] T062 Update `specs/017-cloud-training/plan.md` status to implementation-ready / tasks complete note after T061
+- [ ] T050 Implement corpus retention sweeper (30-day from `last_used_at`, extend on `corpus_id` reuse) in `CloudService/api/retention.py`
+- [ ] T051 [P] Add retention/reuse/expiry tests in `CloudService/tests/test_retention.py`
+- [ ] T052 Wire GPU (or shared-recipe) worker to local train recipes from `Backend/train_worker.py` in `CloudService/worker/train_runner.py`
+- [ ] T053 [P] Document staging env vars (API URL, storefront URL, mock entitlement) in `CloudService/README.md`
+- [ ] T054 Security pass: TLS assumptions, no secrets in query strings/logs, signed download URLs in `CloudService/api/` and `OpenYourBox/Source/train/CloudTrainClient.cpp`
+- [ ] T055 Run through `specs/017-cloud-training/quickstart.md` scenarios 1–11 and record gaps in `specs/017-cloud-training/checklists/requirements.md` notes (or adjacent QA note)
+- [ ] T056 Confirm audio-thread rules: no HTTP/pack/link waits on `processBlock` in `OpenYourBox/Source/PluginProcessor.cpp` and train client call sites
 
 ---
 
@@ -185,46 +179,49 @@ description: "Task list for Cloud Training"
 
 ### Phase Dependencies
 
-- **Setup (Phase 1)**: No dependencies
+- **Setup (Phase 1)**: No dependencies — start immediately
 - **Foundational (Phase 2)**: Depends on Setup — **BLOCKS** all user stories
-- **US1 (Phase 3)**: After Foundational — MVP (token settings)
-- **US2 (Phase 4)**: After Foundational; practically needs US1 token UX for Cloud Run
-- **US3 (Phase 5)**: Needs US2 submit (a job to monitor)
-- **US4 (Phase 6)**: Needs US3 progress/control shell
-- **US5 (Phase 7)**: Can overlap late US2+ for retention API; UI audit can run parallel after US1
+- **US1 (Phase 3)**: After Foundational — MVP account link
+- **US2 (Phase 4)**: After US1 link + Foundational entitlement/job APIs (submit needs linked session)
+- **US3 (Phase 5)**: After US2 (needs an accepted job to monitor); control APIs can be stubbed earlier
+- **US4 (Phase 6)**: After US3 progress path (checkpoints during/after run)
+- **US5 (Phase 7)**: After US1 + entitlement probe from US2; can partially overlap US2 UI
 - **Polish (Phase 8)**: After desired stories complete
 
 ### User Story Dependencies
 
-| Story | Depends on | Independently testable deliverable |
-|-------|------------|--------------------------------------|
-| US1 | Foundation | Token save/clear/auth error |
-| US2 | Foundation (+ US1 for real token UX) | Cloud submit + soft warn + concurrency refuse |
-| US3 | US2 job exists | Poll, pause/resume/stop, rediscovery |
-| US4 | US3 | Checkpoints + submitter auto-load |
-| US5 | US1 UI + US2 API | No credits UI + retention reuse/expiry |
+- **US1 (P1)**: After Foundational — no dependency on other stories
+- **US2 (P1)**: Needs US1 link flow for real submits; mock linked session acceptable for API-only testing
+- **US3 (P1)**: Needs US2 submit (or seeded job) for end-to-end monitor tests
+- **US4 (P1)**: Needs US3 running job + artifact endpoints
+- **US5 (P2)**: Needs US1 Open storefront + US2 entitlement probe; independently testable as UX polish
 
 ### Parallel Opportunities
 
-- T002 ∥ T003 ∥ T004 (setup)
-- T006 ∥ T007 ∥ T009–T011 (foundation client vs API)
-- T014 ∥ T018 (US1 UI copy vs controls)
-- T019 ∥ T021 ∥ T029 ∥ T030 (US2 UI/warn vs mock worker/tests)
-- T031 ∥ T032 ∥ T040 (US3 API/tests)
-- T041 ∥ T042 ∥ T049 (US4 artifacts/tests)
-- T050 ∥ T056 (US5 audit vs retention tests)
-- T057 ∥ T058 (polish)
+- Phase 1: T002 ∥ T003
+- Phase 2: T006 ∥ T007; T010 ∥ T011
+- US1: T015 ∥ T016 ∥ T018
+- US2: T022 ∥ T024 ∥ T025; T031 after gates exist
+- US3: T032 ∥ early mock progress; T038 after control API
+- US4: T039 ∥ T045
+- US5: T046 can start once entitlement probe exists
+- Polish: T051 ∥ T053
 
----
-
-## Parallel Example: User Story 2
+### Parallel Example: User Story 1
 
 ```bash
-# After foundational + US1 token path:
-Task: "Add Local|Cloud destination in OpenYourBox/Source/ui/TrainPanel.cpp"
-Task: "Soft-warn byte sum in library helper + TrainPanel.cpp"
-Task: "Mock worker in CloudService/worker/mock_worker.py"
-Task: "Concurrency tests in CloudService/tests/test_jobs_concurrency.py"
+# After Foundational:
+Task: "Implement POST /v1/auth/link/start and token exchange in CloudService/api/auth_link.py"
+Task: "Add mock storefront link completion in CloudService/storefront/link_mock.py"
+Task: "Add cloud settings UI (Link/Disconnect/Open storefront) under OpenYourBox/Source/ui/"
+```
+
+### Parallel Example: User Story 2
+
+```bash
+Task: "GET /v1/entitlement in CloudService/api/entitlement_routes.py"
+Task: "Mock/CPU worker in CloudService/worker/mock_worker.py"
+Task: "CloudJobPackage assembler in OpenYourBox/Source/train/CloudJobPackage.cpp"
 ```
 
 ---
@@ -233,31 +230,39 @@ Task: "Concurrency tests in CloudService/tests/test_jobs_concurrency.py"
 
 ### MVP First (User Story 1 Only)
 
-1. Complete Phase 1 Setup  
-2. Complete Phase 2 Foundational  
-3. Complete Phase 3 US1 (token settings)  
-4. **STOP and VALIDATE** quickstart scenario 1  
-5. Demo beta auth configuration inside the VST  
+1. Complete Phase 1: Setup  
+2. Complete Phase 2: Foundational  
+3. Complete Phase 3: US1 account link  
+4. **STOP and VALIDATE**: Quickstart scenario 1  
+5. Demo link/disconnect/open-storefront before cloud submit work
 
 ### Incremental Delivery
 
-1. US1 → token configured  
-2. US2 → first cloud submit (mock worker OK)  
-3. US3 → monitor/control/rediscovery  
-4. US4 → checkpoints + Gold auto-load + real worker  
-5. US5 → retention + no-credits polish  
-6. Phase 8 quickstart sign-off  
+1. Setup + Foundational → foundation ready  
+2. US1 → linked account MVP  
+3. US2 → Cloud submit with entitlement  
+4. US3 → monitor/control  
+5. US4 → checkpoints + Gold auto-load  
+6. US5 → entitlement UX polish  
+7. Polish → retention, real worker, quickstart sign-off  
 
-### Suggested MVP+ demo slice
+### Parallel Team Strategy
 
-**US1 + US2 + mock worker** proves cloud submit before full GPU worker and auto-load.
+1. Team completes Setup + Foundational together  
+2. Then:  
+   - Dev A: US1 UI + client link  
+   - Dev B: CloudService auth/link + entitlement + jobs  
+   - Dev C: package builder + Train destination (US2 prep)  
+3. Integrate on US2 submit, then US3–US5  
 
 ---
 
 ## Notes
 
-- [P] = different files, no dependency on incomplete sibling tasks  
-- Do not put HTTP/upload/poll on the audio thread  
-- Local `Backend/train_worker.py` path must remain usable with no token  
-- WordPress/credits/marketplace are explicitly out of scope — do not add tasks for them  
+- [P] = different files, no incomplete-task dependencies  
+- [USn] maps to spec user stories  
+- Local Train MUST remain usable with no linked account at every checkpoint after T029  
+- Do not add in-plugin checkout; storefront owns purchases  
+- Prior token-only `tasks.md` is superseded by this list  
+- Commit after each task or logical group  
 - Next command: `/speckit-implement`

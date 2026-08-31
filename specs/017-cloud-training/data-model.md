@@ -5,17 +5,35 @@
 
 ## Entities
 
-### CloudApiToken (local)
+### PlatformCustomerLink (local)
 
 | Field | Description |
 |-------|-------------|
-| `token` | Secret Bearer credential (stored locally; never shown in full after save) |
-| `configured` | Whether a non-empty token is saved |
+| `accessToken` | Linked session Bearer credential (stored locally; never shown in full after save) |
+| `refreshToken` | Optional refresh credential if issued |
+| `customerIdHint` | Optional opaque customer id for UI/debug (never a password) |
+| `linked` | Whether a non-empty valid session is saved |
 | `baseUrlOverride` | Optional staging/dev API base URL; empty → product default |
+| `storefrontUrlOverride` | Optional staging storefront URL; empty → product default |
 
-**Validation**: Cloud Run requires `configured`; empty token clears cloud capability.
+**Validation**: Cloud Run requires `linked` and successful entitlement check; disconnect clears cloud capability for remote jobs only.
 
-**Relationships**: Authorizes all cloud API calls; scopes job ownership.
+**Relationships**: Authorizes all cloud API calls; scopes job ownership to the platform customer account.
+
+---
+
+### CloudEntitlement (remote + local cache)
+
+| Field | Description |
+|-------|-------------|
+| `sufficient` | Whether a new cloud job may be submitted now |
+| `balanceHint` | Optional display string/units from server (ops-defined) |
+| `checkedAt` | Last successful probe time (local cache) |
+| `source` | Server/storefront authoritative; local cache advisory |
+
+**Validation**: `POST /v1/jobs` requires `sufficient == true` server-side. Stale local cache MUST NOT override a server `insufficient_entitlement` response.
+
+**Relationships**: Belongs to platform customer account; consumed/reserved per ops rules at job accept.
 
 ---
 
@@ -26,7 +44,7 @@
 | `local` | Existing ChildProcess `train_worker` path |
 | `cloud` | Remote job via `CloudTrainClient` |
 
-**Persistence**: Last-used destination may be remembered per plugin instance (optional UX); default `local` so no-token users are unaffected.
+**Persistence**: Last-used destination may be remembered per plugin instance (optional UX); default `local` so unlinked users are unaffected.
 
 ---
 
@@ -35,7 +53,7 @@
 | Field | Description |
 |-------|-------------|
 | `jobId` | Server-assigned unique id |
-| `tokenSubject` | Opaque token identity (server-side; not the raw token in logs) |
+| `customerSubject` | Opaque platform customer identity (server-side; not raw credentials in logs) |
 | `status` | `queued` \| `running` \| `paused` \| `succeeded` \| `failed` \| `stopped` |
 | `objective` | `mapping` \| `reconstruction` |
 | `step` / `totalSteps` | Progress counters when running |
@@ -46,7 +64,7 @@
 | `createdAt` / `updatedAt` | Timestamps |
 | `submitterClientInstanceId` | Id of submitting plugin instance (informational on server) |
 
-**Active job**: status ∈ {`queued`, `running`, `paused`}. At most one active job per token.
+**Active job**: status ∈ {`queued`, `running`, `paused`}. At most one active job per platform customer account.
 
 **State transitions**:
 
@@ -71,7 +89,7 @@ See `contracts/cloud-job-package.md`.
 | `corpusFiles` | Selected library audio to upload **or** |
 | `corpusId` | Reference to retained corpus (reuse; resets retention) |
 
-**Validation**: Same local gates before build (copyright, objective eligibility, mixed SR, etc.). Soft warn if total upload bytes &gt; `cloudSoftUploadWarnBytes` (default 2 GiB).
+**Validation**: Same local gates before build (copyright, objective eligibility, mixed SR, etc.). Soft warn if total upload bytes &gt; `cloudSoftUploadWarnBytes` (default 2 GiB). Cloud path also requires linked account + entitlement.
 
 ---
 
@@ -80,7 +98,7 @@ See `contracts/cloud-job-package.md`.
 | Field | Description |
 |-------|-------------|
 | `corpusId` | Unique id |
-| `tokenSubject` | Owning token |
+| `customerSubject` | Owning platform customer |
 | `byteSize` | Stored size |
 | `lastUsedAt` | Updated on create and on qualifying reuse |
 | `expiresAt` | `lastUsedAt + 30 days` (computed or stored) |
@@ -126,7 +144,7 @@ See `contracts/cloud-job-package.md`.
 | `lastStatus` | Mirrored status for UI |
 | `offline` | True when poll fails due to network (job not implied cancelled) |
 
-**Rediscovery**: On startup / token present → `GET /jobs` (active + recent); attach without requiring local job id if token-wide list returns the job. `isSubmitter` remains true only if local persistence records submit for that `jobId` (other machines: `isSubmitter=false`).
+**Rediscovery**: On startup / linked account present → `GET /v1/jobs` (active + recent); attach without requiring local job id if account-wide list returns the job. `isSubmitter` remains true only if local persistence records submit for that `jobId` (other machines: `isSubmitter=false`).
 
 ---
 
@@ -143,7 +161,8 @@ Does not block submit.
 ## Relationships (summary)
 
 ```text
-CloudApiToken ──authorizes──► CloudTrainingJob
+PlatformCustomerLink ──authorizes──► CloudTrainingJob
+PlatformCustomerLink ──has──► CloudEntitlement
 CloudTrainingJob ──uses──► RetainedCloudCorpus
 CloudTrainingJob ──publishes──► CloudCheckpoint*
 CloudTrainingJob ──publishes──► FinalCloudArtifact?

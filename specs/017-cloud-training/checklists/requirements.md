@@ -31,9 +31,6 @@
 
 ## Notes
 
-- Validation passed on 2026-08-31 (iteration 1); re-validated after `/speckit-clarify` session (5 answers) — still all items passing.
-- Specify-session clarifications: scope = remote job submit/monitor/download; auth = API token in settings; parity = mapping + reconstruction via existing Train/Library.
-- Clarify-session: corpus retention 30 days from last use (extend on reuse); one active cloud job per token; token-wide monitor/control; soft upload size warning (no hard cap); success Gold auto-load on submitting instance only.
-- Explicitly out of scope: WordPress, credit purchase/balance, marketplace.
-- Note on FR wording: “API token” is used as a product credential concept (user-entered secret), not a prescription of a particular HTTP API technology.
-- Ready for `/speckit-plan`.
+- Updated in place on existing `017-cloud-training` (WP platform account + entitlement gate).
+- WordPress storefront is named as the product account/commerce surface (constitution Phase 4), not as an implementation recipe.
+- Plan/research/contracts/tasks from the prior token-only slice are stale relative to this spec; re-run `/speckit-plan` (and tasks) before implement.

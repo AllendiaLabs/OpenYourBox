@@ -6,7 +6,7 @@
 ## General
 
 - Base URL: product default or settings override.
-- Auth: `Authorization: Bearer <api_token>` on all endpoints below.
+- Auth: `Authorization: Bearer <linked_session_token>` on all authenticated endpoints below (except health and link bootstrap as noted).
 - Content: JSON unless multipart upload.
 - Errors: `{ "error_code": "string", "error_message": "string" }` with suitable HTTP status.
 - TLS required in production.
@@ -15,13 +15,15 @@
 
 | `error_code` | When |
 |--------------|------|
-| `unauthorized` | Missing/invalid/revoked token |
-| `one_job_per_token` | Active job already exists for token |
+| `unauthorized` | Missing/invalid/expired/revoked linked session |
+| `insufficient_entitlement` | Linked account lacks active credit/purchase entitlement for a new job |
+| `one_job_per_account` | Active job already exists for this platform customer |
 | `validation_failed` | Bad manifest / ineligible package |
 | `not_found` | Unknown job/corpus/checkpoint |
 | `corpus_expired` | `corpus_id` no longer retained |
 | `capacity` | Service overloaded |
 | `conflict` | Illegal state transition (e.g. pause when not running) |
+| `link_pending` / `link_expired` | Account link bootstrap not completed or code expired |
 
 ## Endpoints
 
@@ -29,9 +31,54 @@
 
 Unauthenticated liveness (optional for plugin).
 
+### Account link bootstrap
+
+#### `POST /v1/auth/link/start`
+
+Unauthenticated or lightly rate-limited. Starts storefront account link.
+
+Response (example shape):
+
+```json
+{
+  "device_code": "…",
+  "user_code": "ABCD-EFGH",
+  "verification_url": "https://storefront.example/link",
+  "expires_in": 600,
+  "interval": 5
+}
+```
+
+Plugin shows `user_code`, opens `verification_url`, polls token endpoint until linked or expired.
+
+#### `POST /v1/auth/link/token`
+
+Exchange completed device/link flow for `{ "access_token", "refresh_token?", "token_type": "Bearer", "expires_in?" }`.
+
+#### `POST /v1/auth/refresh` (optional)
+
+Refresh linked session when refresh tokens are issued.
+
+#### `POST /v1/auth/logout`
+
+Invalidate current linked session (best-effort); plugin always clears local credentials on Disconnect.
+
+### `GET /v1/entitlement`
+
+Authenticated. Returns whether a new cloud job may be submitted.
+
+```json
+{
+  "sufficient": true,
+  "balance_hint": "optional display string"
+}
+```
+
+Insufficient → `200` with `sufficient: false` **or** `402`/`403` + `insufficient_entitlement` (pick one consistently in implementation; plugin handles both).
+
 ### `GET /v1/jobs`
 
-List jobs for the token (active first, then recent terminal).
+List jobs for the authenticated platform customer (active first, then recent terminal).
 
 Response:
 
@@ -58,13 +105,17 @@ Response:
 
 Create job. Either multipart (manifest JSON + files) **or** JSON body with `corpus_id` for reuse.
 
-**Concurrency**: If token has an active job → `409` + `one_job_per_token`.
+**Gates (in order)**:
+1. Valid linked session → else `401` + `unauthorized`
+2. Sufficient entitlement → else `402`/`403` + `insufficient_entitlement`
+3. No active job for account → else `409` + `one_job_per_account`
+4. Manifest/corpus validation → else `validation_failed`
 
-On accept: store corpus (if uploaded), set `last_used_at` now (create or reuse), enqueue → `202`/`200` with `{ "job_id", "status": "queued", "corpus_id" }`.
+On accept: optionally reserve/consume entitlement; store corpus (if uploaded); set `last_used_at` now (create or reuse); enqueue → `202`/`200` with `{ "job_id", "status": "queued", "corpus_id" }`.
 
 ### `GET /v1/jobs/{job_id}`
 
-Job detail including latest progress fields and checkpoint summary list.
+Job detail including latest progress fields and checkpoint summary list. Must belong to authenticated customer.
 
 ### `POST /v1/jobs/{job_id}/pause` | `/resume` | `/stop`
 
@@ -95,9 +146,16 @@ Final artifact when `status == succeeded`; otherwise `conflict`/`not_found`.
 - Publish checkpoints periodically; write final artifact on success only.
 - Never treat `stopped` as success.
 
+## Storefront obligations (server-side)
+
+- Resolve linked session → platform customer id.
+- Provide authoritative entitlement for submit gate (sync or query WordPress commerce/membership as ops defines).
+- Account creation and purchase UX remain on the storefront; API does not implement checkout pages for the VST.
+
 ## Implementation anchors
 
 - `CloudService/api/`
 - `CloudService/worker/`
+- `CloudService/storefront/`
 - `OpenYourBox/Source/train/CloudTrainClient.*`
 - `Tests/test_cloud_api.py`

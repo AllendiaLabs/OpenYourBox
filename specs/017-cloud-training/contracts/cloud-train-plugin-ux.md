@@ -5,17 +5,20 @@
 
 ## Settings
 
-- Fields: API token (password-style / masked after save), Clear, optional advanced Base URL.
-- Status line: Not configured | Token saved | Auth error (last probe).
-- No credits, WordPress, or purchase affordances (FR-014).
+- Actions: **Link account** (starts storefront link flow), **Disconnect**, optional advanced Base URL / Storefront URL.
+- During link: show user code (if device-code) and open verification URL in system browser; poll until linked, cancelled, or expired.
+- Status line: Not linked | Linked | Auth error | Entitlement unavailable (last probe).
+- Affordance: **Open storefront** (account / credits) — launches storefront URL outside the VST (FR-002a).
+- No in-plugin checkout, cart, or payment form.
 
 ## Train panel
 
 ### Destination
 
 - Control: **Local** | **Cloud** (same panel as objective / Run / Pause / Stop).
-- Cloud + no token → Run disabled or Run shows configure-token error (FR-003, FR-015).
-- Local ignores token (FR-017).
+- Cloud + not linked → Run disabled or Run shows link-account error (FR-005a, FR-015).
+- Cloud + linked + insufficient entitlement → Run refused with entitlement message; MAY offer Open storefront (FR-005a, US5).
+- Local ignores account link (FR-017).
 
 ### Soft size warning
 
@@ -24,7 +27,7 @@
 ### Busy rules
 
 - One active train job per instance (local or cloud) (FR-013).
-- Cloud submit may additionally fail with `one_job_per_token` (FR-013a) — show that message verbatim/clearly.
+- Cloud submit may additionally fail with `one_job_per_account` (FR-013a) — show that message clearly.
 
 ### Progress
 
@@ -45,12 +48,12 @@
 
 ### Rediscovery
 
-- On open with token: list token jobs; allow attach to active/recent.
+- On open with linked account: list account jobs; allow attach to active/recent.
 - Local persistence: remember `jobId` + `isSubmitter` for jobs this instance submitted so restart on same machine still auto-loads.
 
 ## Audio / threading
 
-- No HTTP, file packing, or waits on the audio thread.
+- No HTTP, file packing, browser-wait loops, or waits on the audio thread.
 - Audible model unchanged until intentional success auto-load or optional checkpoint load (FR-006).
 
 ## Implementation anchors
