@@ -1,8 +1,12 @@
 <!--
 Sync Impact Report
-- Version change: 1.0.0 → 1.1.0
+- Version change: 1.2.0 → 1.3.0
 - Modified sections:
-  - Phased Rollout Strategy: Phase 2.2 analysis plots now require all channels/feature dimensions on shared axes (not stereo L/R only)
+  - Phase 4 "Marketplace & Cloud": official cloud training requires authenticated
+    platform customer account and storefront-managed credits; local train/freeze
+    remain account-free; VST remains the only training UI
+  - Licensing Strategy: clarify open core vs paid hosted cloud; cloud backend
+    remains proprietary for the hosted service; marketplace commission unchanged
 - Added sections: None
 - Removed sections: None
 - Deferred TODOs: None
@@ -100,7 +104,8 @@ The UI is the primary gatekeeper against illegal operations and legal liability:
 **Phase 4: "Marketplace & Cloud"**
 - Goal: Monetization.
 - Marketplace: In-VST browser for downloading Gold models. Commission: 20%.
-- Cloud Training: Optional paid service returning `.pt` files.
+- Cloud Training: Optional paid hosted service returning `.pt` files. Job submit, status, and artifact load remain inside the VST (no standalone cloud app).
+- **Local vs cloud access**: Local training, freeze, and inference MUST remain fully usable without a platform customer account. Official cloud training MUST require an authenticated platform customer account (WordPress storefront) with an active credit or purchase entitlement before a remote job is accepted. Account creation, purchases, and credit balance live on the storefront; the VST links credentials and consumes entitlement at submit time.
 
 ## Performance Benchmarks (Non-Negotiable)
 
@@ -119,9 +124,10 @@ The UI is the primary gatekeeper against illegal operations and legal liability:
 - Marketplace Moderation: Any model containing copyrighted material MUST be removed without prior notice.
 
 **Licensing Strategy**:
-- Core Source Code (VST, Live Engine, Freeze logic): **Apache 2.0**
+- Core Source Code (VST, Live Engine, Freeze logic, local train worker): **Apache 2.0**
 - ML Forge Derived Code: MUST retain original MIT copyright notice in NOTICE file.
-- Cloud Training Backend: **Proprietary**
+- Cloud Training Backend (hosted API, workers, billing/entitlement integration): **Proprietary**
+- Open core licensing does not imply free hosted compute; the paid cloud product is the official remote training service.
 - Marketplace Models: Creator retains IP; platform takes 20% commission.
 
 ## Governance
@@ -138,5 +144,6 @@ This constitution serves as the single source of truth for all technical decisio
 2. Manual freeze only in V1.0 (auto-freeze is a future feature).
 3. Blue = Live (glitchable, randomizable). Gold = Frozen (optimized, stable).
 4. Zero audio-thread allocations. All graph modifications prepared on GUI thread and swapped atomically.
+5. Local train/freeze MUST NOT require platform login; official cloud jobs MUST.
 
-**Version**: 1.2.0 | **Ratified**: 2026-08-19 | **Last Amended**: 2026-08-19
+**Version**: 1.3.0 | **Ratified**: 2026-08-19 | **Last Amended**: 2026-08-31
