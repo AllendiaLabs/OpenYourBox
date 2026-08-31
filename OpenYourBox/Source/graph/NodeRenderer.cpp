@@ -202,6 +202,52 @@ std::uintptr_t editorIdentifier(std::int32_t identifier) noexcept {
   return static_cast<std::uintptr_t>(static_cast<std::uint32_t>(identifier));
 }
 
+/**
+ * @brief Collects every box that a canvas layout gesture must move together.
+ * @param out Destination set replaced with the gesture membership.
+ * @param pressId Box under the pointer, or zero.
+ * @param selectedNodes Last mirrored node selection.
+ * @param selectedGroups Last mirrored group selection.
+ */
+void collectLayoutGestureBoxes(
+    std::unordered_set<std::int32_t> &out, std::int32_t pressId,
+    const std::vector<std::int32_t> &selectedNodes,
+    const std::vector<std::int32_t> &selectedGroups) {
+  out.clear();
+  if (pressId != 0)
+    out.insert(pressId);
+  out.insert(selectedNodes.begin(), selectedNodes.end());
+  out.insert(selectedGroups.begin(), selectedGroups.end());
+  const auto objectCount = ed::GetSelectedObjectCount();
+  if (objectCount <= 0)
+    return;
+  std::vector<ed::NodeId> selected(static_cast<std::size_t>(objectCount));
+  const auto selectedCount =
+      ed::GetSelectedNodes(selected.data(), objectCount);
+  for (int index = 0; index < selectedCount; ++index)
+    out.insert(static_cast<std::int32_t>(
+        selected[static_cast<std::size_t>(index)].Get()));
+}
+
+/**
+ * @brief True when stored graph layout must not overwrite this box.
+ * @param boxId Candidate node or group.
+ * @param pressId Box under an in-progress press, or zero.
+ * @param draggingNode Node being dragged, or zero.
+ * @param draggingGroup Group being dragged, or zero.
+ * @param gestureBoxes Boxes captured for the current multi-box move.
+ */
+bool layoutGestureLocksBox(
+    std::int32_t boxId, std::int32_t pressId, std::int32_t draggingNode,
+    std::int32_t draggingGroup,
+    const std::unordered_set<std::int32_t> &gestureBoxes) {
+  if (boxId == 0)
+    return false;
+  if (boxId == pressId || boxId == draggingNode || boxId == draggingGroup)
+    return true;
+  return gestureBoxes.count(boxId) != 0;
+}
+
 ImVec4 colourFor(const juce::Colour &colour, float alpha = 1.0f) {
   return {colour.getFloatRed(), colour.getFloatGreen(), colour.getFloatBlue(),
           alpha};
@@ -666,6 +712,8 @@ void NodeRenderer::render(NodeGraph &graph,
                     ImGuiWindowFlags_NoScrollbar |
                         ImGuiWindowFlags_NoScrollWithMouse);
   ed::SetCurrentEditor(context);
+  // Canvas cut/copy shortcuts must not steal Cmd/Ctrl+C/V from InputText.
+  ed::EnableShortcuts(!ImGui::GetIO().WantTextInput);
 
   const auto canvasOrigin = ImGui::GetWindowPos();
   const auto canvasSize = ImGui::GetWindowSize();
@@ -750,10 +798,18 @@ void NodeRenderer::render(NodeGraph &graph,
       if (isDouble && isGroup) {
         canvasLastClickBoxId = 0;
         canvasPressBoxId = 0;
+        layoutGestureBoxIds.clear();
         openGroupCanvasFitted(graph, id);
       } else {
         canvasPressBoxId = id;
-        ed::SelectNode(ed::NodeId(editorIdentifier(id)), input.KeyShift);
+        const auto editorId = ed::NodeId(editorIdentifier(id));
+        // Keep an existing multi-selection so dragging one selected box
+        // moves the whole set. Replacing here is what made only the
+        // grabbed box move.
+        if (!ed::IsNodeSelected(editorId))
+          ed::SelectNode(editorId, input.KeyShift);
+        collectLayoutGestureBoxes(layoutGestureBoxIds, canvasPressBoxId,
+                                  selectedNodeIds, selectedGroupIds);
       }
     }
   }
@@ -795,6 +851,8 @@ void NodeRenderer::render(NodeGraph &graph,
     const auto commitDrop = [&](std::int32_t boxId) {
       if (hoveredGroupOnCanvas == 0 || hoveredGroupOnCanvas == boxId)
         return;
+      if (layoutGestureBoxIds.count(hoveredGroupOnCanvas) != 0)
+        return;
       const auto result = graph.addToGroup(hoveredGroupOnCanvas, boxId);
       if (result.accepted)
         mutatedThisFrame = true;
@@ -805,22 +863,29 @@ void NodeRenderer::render(NodeGraph &graph,
           callbacks.showMessage(result.message);
       }
     };
-    if (ImGui::IsMouseReleased(ImGuiMouseButton_Left)) {
-      if (draggingNodeId != 0) {
+    if (ImGui::IsMouseReleased(ImGuiMouseButton_Left) && hadLayoutDrag) {
+      const auto persistBox = [&](std::int32_t boxId) {
         const auto editorPos =
-            ed::GetNodePosition(ed::NodeId(editorIdentifier(draggingNodeId)));
-        graph.moveNode(draggingNodeId, {editorPos.x, editorPos.y});
-        commitDrop(draggingNodeId);
+            ed::GetNodePosition(ed::NodeId(editorIdentifier(boxId)));
+        if (graph.findNode(boxId) != nullptr)
+          graph.moveNode(boxId, {editorPos.x, editorPos.y});
+        else if (graph.findGroup(boxId) != nullptr)
+          graph.moveGroup(boxId, {editorPos.x, editorPos.y});
+        commitDrop(boxId);
+      };
+      if (!layoutGestureBoxIds.empty()) {
+        for (const auto boxId : layoutGestureBoxIds)
+          persistBox(boxId);
+      } else if (draggingNodeId != 0) {
+        persistBox(draggingNodeId);
       } else if (draggingGroupId != 0) {
-        const auto editorPos =
-            ed::GetNodePosition(ed::NodeId(editorIdentifier(draggingGroupId)));
-        graph.moveGroup(draggingGroupId, {editorPos.x, editorPos.y});
-        commitDrop(draggingGroupId);
+        persistBox(draggingGroupId);
       }
     }
     draggingNodeId = 0;
     draggingGroupId = 0;
     canvasPressBoxId = 0;
+    layoutGestureBoxIds.clear();
     if (hadLayoutDrag) {
       patchGestureHeldThisFrame = true;
       patchGestureLabel = "Move box";
@@ -1035,10 +1100,12 @@ void NodeRenderer::render(NodeGraph &graph,
     if (positionedNodeIds.count(node.id) == 0)
       continue;
     const auto size = ed::GetNodeSize(ed::NodeId(editorIdentifier(node.id)));
-    if (size.x > 0.0f && size.y > 0.0f && node.id != draggingNodeId &&
-        node.id != canvasPressBoxId)
+    const auto locked = layoutGestureLocksBox(
+        node.id, canvasPressBoxId, draggingNodeId, draggingGroupId,
+        layoutGestureBoxIds);
+    if (size.x > 0.0f && size.y > 0.0f && !locked)
       node.size = {size.x, size.y};
-    if (node.id != draggingNodeId)
+    if (!locked)
       continue;
     const auto position =
         ed::GetNodePosition(ed::NodeId(editorIdentifier(node.id)));
@@ -1055,10 +1122,12 @@ void NodeRenderer::render(NodeGraph &graph,
     if (positionedGroupIds.count(group.id) == 0)
       continue;
     const auto size = ed::GetNodeSize(ed::NodeId(editorIdentifier(group.id)));
-    if (size.x > 0.0f && size.y > 0.0f && group.id != draggingGroupId &&
-        group.id != canvasPressBoxId)
+    const auto locked = layoutGestureLocksBox(
+        group.id, canvasPressBoxId, draggingNodeId, draggingGroupId,
+        layoutGestureBoxIds);
+    if (size.x > 0.0f && size.y > 0.0f && !locked)
       group.size = {size.x, size.y};
-    if (draggingGroupId != group.id)
+    if (!locked)
       continue;
     const auto position =
         ed::GetNodePosition(ed::NodeId(editorIdentifier(group.id)));
@@ -2391,14 +2460,16 @@ void NodeRenderer::syncEditorTransforms(NodeGraph &graph) {
     if (!graph.isGroupOnFocusedCanvas(group.id, focusedGroupId))
       continue;
     positionedGroupIds.insert(group.id);
-    if (group.id != draggingGroupId && group.id != canvasPressBoxId) {
+    if (!layoutGestureLocksBox(group.id, canvasPressBoxId, draggingNodeId,
+                               draggingGroupId, layoutGestureBoxIds)) {
       ed::SetNodePosition(ed::NodeId(editorIdentifier(group.id)),
                           ImVec2(group.position.x, group.position.y));
     }
   }
   for (auto &node : graph.getNodes()) {
     if (!graph.isNodeOnFocusedCanvas(node.id, focusedGroupId) ||
-        node.id == draggingNodeId || node.id == canvasPressBoxId)
+        layoutGestureLocksBox(node.id, canvasPressBoxId, draggingNodeId,
+                               draggingGroupId, layoutGestureBoxIds))
       continue;
     positionedNodeIds.insert(node.id);
     ed::SetNodePosition(ed::NodeId(editorIdentifier(node.id)),

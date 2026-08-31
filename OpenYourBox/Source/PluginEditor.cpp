@@ -65,6 +65,10 @@ void OpenYourBoxAudioProcessorEditor::resized() {
   imguiHost.setBounds(getLocalBounds());
 }
 
+bool OpenYourBoxAudioProcessorEditor::keyPressed(const juce::KeyPress &key) {
+  return imguiHost.keyPressed(key);
+}
+
 void OpenYourBoxAudioProcessorEditor::renderFrame() {
   updateGraphIfNeeded();
   applyCompletedFreeze();

@@ -42,6 +42,13 @@ public:
   void paint(juce::Graphics &) override;
   /** @brief Fits the ImGui host to the complete editor area. */
   void resized() override;
+  /**
+   * @brief Forwards editor-level key presses into the ImGui host.
+   *
+   * Some hosts deliver Cmd/Ctrl chords to the editor rather than the focused
+   * child. Returning the host result keeps those shortcuts from being dropped.
+   */
+  bool keyPressed(const juce::KeyPress &key) override;
 
 private:
   void renderFrame();

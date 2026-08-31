@@ -5,6 +5,7 @@
 #include <array>
 #include <atomic>
 #include <functional>
+#include <string>
 #include <vector>
 
 struct ImGuiContext;
@@ -51,7 +52,7 @@ public:
    * @return Relative scale factor, or 1 when no pinch occurred.
    */
   [[nodiscard]] float takeMagnification() noexcept;
-  /** @brief Forwards typed text to ImGui. */
+  /** @brief Forwards typed text and queues one-frame ImGui key pulses. */
   bool keyPressed(const juce::KeyPress &key) override;
   /** @brief Forwards navigation-key press and release state to ImGui. */
   bool keyStateChanged(bool isKeyDown) override;
@@ -74,6 +75,13 @@ private:
     std::array<bool, 4> modifiers{};
     /** @brief Latest supported navigation key states. */
     std::array<bool, 15> navigationKeys{};
+    /**
+     * @brief Letter/digit keys to press for one ImGui frame.
+     *
+     * macOS synthesizes an immediate key-up for Cmd+letter, so polling
+     * `isKeyCurrentlyDown` always sees those keys as released.
+     */
+    std::vector<int> keyPulses;
     /** @brief Unicode characters typed since the previous frame. */
     std::vector<unsigned int> characters;
     /** @brief Whether a pointer update is waiting to be forwarded. */
@@ -93,6 +101,23 @@ private:
   void drainPendingInput();
   void updateMouse(const juce::MouseEvent &event);
   void updateButtons(const juce::ModifierKeys &modifiers);
+  /**
+   * @brief Copies the system clipboard into @ref clipboardUtf8 on the message
+   *        thread so paste can run on the OpenGL thread.
+   */
+  void snapshotSystemClipboard();
+  /** @brief Wires ImGui clipboard callbacks to the JUCE system clipboard. */
+  void bindClipboardHandlers();
+  /**
+   * @brief Queues a one-frame ImGui key press from a JUCE key code.
+   * @param keyCode JUCE key code, typically `'c'` for Cmd+C on macOS.
+   */
+  void queueKeyPulse(int keyCode);
+  /**
+   * @brief True when @p key is a clipboard or undo chord this host must consume.
+   * @param key Incoming JUCE key press.
+   */
+  static bool isEditShortcut(const juce::KeyPress &key) noexcept;
 
   juce::OpenGLContext openGLContext;
   RenderCallback renderCallback;
@@ -105,6 +130,16 @@ private:
   PendingInputState pendingInput;
   /** @brief Last render-thread keyboard capture decision. */
   std::atomic<bool> wantsKeyboardCapture{false};
+  /**
+   * @brief UTF-8 clipboard snapshot readable from ImGui's GetClipboardText
+   *        callback. Updated on the message thread and on copy.
+   */
+  std::string clipboardUtf8;
+  /**
+   * @brief ImGui keys pulsed last frame that must be released before the
+   *        next NewFrame. Touched only on the OpenGL thread.
+   */
+  std::vector<int> imguiKeysToRelease;
 
   JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(ImGuiHost)
 };

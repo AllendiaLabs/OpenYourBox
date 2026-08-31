@@ -26,6 +26,7 @@ void ImGuiHost::mouseDrag(const juce::MouseEvent &event) { updateMouse(event); }
 
 void ImGuiHost::mouseDown(const juce::MouseEvent &event) {
   grabKeyboardFocus();
+  snapshotSystemClipboard();
   updateMouse(event);
 }
 
@@ -55,12 +56,14 @@ float ImGuiHost::takeMagnification() noexcept {
 }
 
 bool ImGuiHost::keyPressed(const juce::KeyPress &key) {
+  snapshotSystemClipboard();
   const auto modifiers = key.getModifiers();
   {
     const juce::ScopedLock lock(inputLock);
     pendingInput.modifiers = {modifiers.isCtrlDown(), modifiers.isShiftDown(),
-                              modifiers.isAltDown(), modifiers.isCommandDown()};
+                               modifiers.isAltDown(), modifiers.isCommandDown()};
     pendingInput.modifiersChanged = true;
+    queueKeyPulse(key.getKeyCode());
     auto character = key.getTextCharacter();
     // AZERTY and similar layouts treat `^` as a dead key, so getTextCharacter()
     // is often 0 even though the physical key code is '^'. Inject the ASCII
@@ -68,10 +71,14 @@ bool ImGuiHost::keyPressed(const juce::KeyPress &key) {
     if (character == 0 && key.getKeyCode() == '^' &&
         !modifiers.isCommandDown() && !modifiers.isCtrlDown())
       character = '^';
-    if (character > 0)
+    // Cmd/Ctrl shortcuts must not insert control characters into InputText;
+    // ImGui handles copy/paste/select-all from the matching key events.
+    if (character >= 32 && !modifiers.isCommandDown() &&
+        !modifiers.isCtrlDown())
       pendingInput.characters.push_back(static_cast<unsigned int>(character));
   }
-  return wantsKeyboardCapture.load(std::memory_order_acquire);
+  return isEditShortcut(key) ||
+         wantsKeyboardCapture.load(std::memory_order_acquire);
 }
 
 bool ImGuiHost::keyStateChanged(bool isKeyDown) {
@@ -102,6 +109,7 @@ void ImGuiHost::newOpenGLContextCreated() {
   auto &io = ImGui::GetIO();
   io.IniFilename = nullptr;
   io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
+  bindClipboardHandlers();
   ImGui_ImplOpenGL3_Init(nullptr);
 }
 
@@ -123,7 +131,8 @@ void ImGuiHost::renderOpenGL() {
   if (renderCallback)
     renderCallback();
   ImGui::Render();
-  wantsKeyboardCapture.store(io.WantCaptureKeyboard, std::memory_order_release);
+  wantsKeyboardCapture.store(io.WantCaptureKeyboard || io.WantTextInput,
+                             std::memory_order_release);
 
   juce::OpenGLHelpers::clear(juce::Colour(20, 23, 30));
   juce::gl::glViewport(
@@ -147,8 +156,10 @@ void ImGuiHost::drainPendingInput() {
   PendingInputState input;
   {
     const juce::ScopedLock lock(inputLock);
-    pendingInput.modifiers = {modifiers.isCtrlDown(), modifiers.isShiftDown(),
-                              modifiers.isAltDown(), modifiers.isCommandDown()};
+    if (pendingInput.keyPulses.empty()) {
+      pendingInput.modifiers = {modifiers.isCtrlDown(), modifiers.isShiftDown(),
+                               modifiers.isAltDown(), modifiers.isCommandDown()};
+    }
     pendingInput.modifiersChanged = true;
     input = std::move(pendingInput);
     pendingInput.mousePosition = input.mousePosition;
@@ -156,6 +167,7 @@ void ImGuiHost::drainPendingInput() {
     pendingInput.modifiers = input.modifiers;
     pendingInput.navigationKeys = input.navigationKeys;
     pendingInput.characters.clear();
+    pendingInput.keyPulses.clear();
     pendingInput.wheelX = 0.0f;
     pendingInput.wheelY = 0.0f;
     pendingInput.mousePositionChanged = false;
@@ -190,8 +202,69 @@ void ImGuiHost::drainPendingInput() {
     for (std::size_t index = 0; index < keys.size(); ++index)
       io.AddKeyEvent(keys[index], input.navigationKeys[index]);
   }
+  for (const auto imguiKey : imguiKeysToRelease)
+    io.AddKeyEvent(static_cast<ImGuiKey>(imguiKey), false);
+  imguiKeysToRelease.clear();
+  imguiKeysToRelease.reserve(input.keyPulses.size());
+  for (const auto imguiKey : input.keyPulses) {
+    io.AddKeyEvent(static_cast<ImGuiKey>(imguiKey), true);
+    imguiKeysToRelease.push_back(imguiKey);
+  }
   for (const auto character : input.characters)
     io.AddInputCharacter(character);
+}
+
+void ImGuiHost::queueKeyPulse(int keyCode) {
+  auto normalised = keyCode;
+  if (normalised >= 'a' && normalised <= 'z')
+    normalised -= 'a' - 'A';
+  int imguiKey = ImGuiKey_None;
+  if (normalised >= 'A' && normalised <= 'Z')
+    imguiKey = ImGuiKey_A + (normalised - 'A');
+  else if (normalised >= '0' && normalised <= '9')
+    imguiKey = ImGuiKey_0 + (normalised - '0');
+  if (imguiKey == ImGuiKey_None)
+    return;
+  pendingInput.keyPulses.push_back(imguiKey);
+}
+
+bool ImGuiHost::isEditShortcut(const juce::KeyPress &key) noexcept {
+  const auto modifiers = key.getModifiers();
+  if (!(modifiers.isCommandDown() || modifiers.isCtrlDown()) ||
+      modifiers.isAltDown())
+    return false;
+  auto code = key.getKeyCode();
+  if (code >= 'a' && code <= 'z')
+    code -= 'a' - 'A';
+  return code == 'A' || code == 'C' || code == 'V' || code == 'X' ||
+         code == 'Y' || code == 'Z';
+}
+
+void ImGuiHost::snapshotSystemClipboard() {
+  const auto text = juce::SystemClipboard::getTextFromClipboard();
+  const juce::ScopedLock lock(inputLock);
+  clipboardUtf8 = text.toStdString();
+}
+
+void ImGuiHost::bindClipboardHandlers() {
+  auto &io = ImGui::GetIO();
+  io.ClipboardUserData = this;
+  io.SetClipboardTextFn = [](void *user, const char *text) {
+    auto *host = static_cast<ImGuiHost *>(user);
+    const juce::String copy(text != nullptr ? text : "");
+    {
+      const juce::ScopedLock lock(host->inputLock);
+      host->clipboardUtf8 = copy.toStdString();
+    }
+    juce::MessageManager::callAsync([copy] {
+      juce::SystemClipboard::copyTextToClipboard(copy);
+    });
+  };
+  io.GetClipboardTextFn = [](void *user) -> const char * {
+    auto *host = static_cast<ImGuiHost *>(user);
+    const juce::ScopedLock lock(host->inputLock);
+    return host->clipboardUtf8.c_str();
+  };
 }
 
 void ImGuiHost::updateMouse(const juce::MouseEvent &event) {

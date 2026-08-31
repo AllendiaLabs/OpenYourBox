@@ -405,10 +405,18 @@ private:
   /**
    * @brief Box under an in-progress canvas press (before drag threshold).
    *
-   * While this is set, stored graph transforms are not pushed back into the
-   * editor so the first pixels of a move are not snapped back.
+   * While this is set, stored graph transforms are not pushed back onto this
+   * box (or the rest of @ref layoutGestureBoxIds) so a multi-selection move
+   * is not snapped back around the grabbed box.
    */
   std::int32_t canvasPressBoxId = 0;
+  /**
+   * @brief Boxes that move together for the current canvas press/drag.
+   *
+   * imgui-node-editor translates every selected node; these ids stay locked
+   * to the editor until mouse-up so graph positions cannot overwrite them.
+   */
+  std::unordered_set<std::int32_t> layoutGestureBoxIds;
   /** @brief Last canvas-clicked box used for double-click detection. */
   std::int32_t canvasLastClickBoxId = 0;
   /** @brief Dear ImGui time of @ref canvasLastClickBoxId. */
