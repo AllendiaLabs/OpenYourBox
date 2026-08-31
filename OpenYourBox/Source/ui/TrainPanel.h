@@ -1,6 +1,7 @@
 #pragma once
 
 #include "../graph/GraphTypes.h"
+#include "../train/CloudTrainClient.h"
 #include "../train/TrainCoordinator.h"
 
 #include <imgui.h>
@@ -83,6 +84,14 @@ public:
     std::function<void(bool)> hearWhileTrainingChanged;
     /** @brief Opens the copyable dialog for the last train failure. */
     std::function<void(const juce::String &)> viewError;
+    /** @brief Destination Local|Allendia changed. */
+    std::function<void(graph::TrainDestination)> destinationChanged;
+    /** @brief Launch Allendia account page from an entitlement refusal. */
+    std::function<void()> openStorefront;
+    /** @brief Download a remote checkpoint for hear-while-training. */
+    std::function<void(const juce::String &)> downloadCheckpoint;
+    /** @brief Non-submitter manual Gold load after cloud success. */
+    std::function<void()> manualCloudLoad;
   };
 
   /** @brief Snapshot of Train enablement gates. */
@@ -93,6 +102,10 @@ public:
     int selectedPairCount = 0;
     /** @brief Total selected duration in seconds. */
     double selectedDurationSeconds = 0.0;
+    /** @brief Sum of selected library file bytes (soft Cloud warn). */
+    juce::int64 selectedUploadBytes = 0;
+    /** @brief Soft Cloud upload warning threshold. */
+    juce::int64 softUploadWarnBytes = graph::defaultCloudSoftUploadWarnBytes;
     /** @brief Number of armed trainable graph elements. */
     int armedElementCount = 0;
     /** @brief True when selected pairs mix sample rates (v1 block). */
@@ -113,6 +126,18 @@ public:
     bool reconstructionPathInvalid = false;
     /** @brief Reconstruction gate text. */
     juce::String reconstructionReason;
+    /** @brief Platform account is linked. */
+    bool cloudLinked = false;
+    /** @brief Last entitlement probe is insufficient. */
+    bool entitlementUnavailable = false;
+    /** @brief Cloud poll lost the network without cancelling the job. */
+    bool cloudOffline = false;
+    /** @brief This instance submitted the attached cloud job. */
+    bool isCloudSubmitter = true;
+    /** @brief Non-submitter may download/load the finished artifact. */
+    bool manualCloudLoadAvailable = false;
+    /** @brief Published remote checkpoints for the attached job. */
+    std::vector<train::CloudCheckpointInfo> cloudCheckpoints;
   };
 
   /**
@@ -143,5 +168,7 @@ public:
   char mlflowRunName[64]{};
   /** @brief Last-used Train objective for this plug-in instance. */
   graph::TrainObjective objective = graph::TrainObjective::mapping;
+  /** @brief Last-used Local vs Allendia destination (default local). */
+  graph::TrainDestination destination = graph::TrainDestination::local;
 };
 } // namespace openyourbox::ui

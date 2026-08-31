@@ -159,7 +159,11 @@ target_sources(OpenYourBox PRIVATE
     OpenYourBox/Source/state/EditHistory.cpp
     OpenYourBox/Source/state/PatchSnapshot.cpp
     OpenYourBox/Source/train/TrainCoordinator.cpp
+    OpenYourBox/Source/train/CloudSettings.cpp
+    OpenYourBox/Source/train/CloudTrainClient.cpp
+    OpenYourBox/Source/train/CloudJobPackage.cpp
     OpenYourBox/Source/ui/CaptureSamplesPanel.cpp
+    OpenYourBox/Source/ui/CloudSettingsPanel.cpp
     OpenYourBox/Source/ui/CopyrightModal.cpp
     OpenYourBox/Source/ui/ErrorModal.cpp
     OpenYourBox/Source/ui/ImGuiHost.cpp
@@ -443,6 +447,25 @@ if(BUILD_TESTING)
         juce::juce_recommended_warning_flags)
     add_test(NAME OpenYourBoxEditHistory COMMAND OpenYourBoxEditHistoryTests)
 
+    juce_add_console_app(OpenYourBoxCloudTrainTests PRODUCT_NAME "OpenYourBox Cloud Train Tests")
+    target_sources(OpenYourBoxCloudTrainTests PRIVATE Tests/CloudTrainClientTests.cpp)
+    target_include_directories(OpenYourBoxCloudTrainTests BEFORE PRIVATE
+        "${CMAKE_CURRENT_BINARY_DIR}/OpenYourBox_artefacts/JuceLibraryCode"
+        OpenYourBox/Source
+        "${TORCH_INCLUDE_DIRS}")
+    target_link_libraries(OpenYourBoxCloudTrainTests PRIVATE
+        OpenYourBox
+        OpenYourBoxResources
+        juce::juce_audio_utils
+        juce::juce_dsp
+        juce::juce_opengl
+        juce::juce_recommended_config_flags
+        juce::juce_recommended_warning_flags)
+    add_test(NAME CloudTrain COMMAND OpenYourBoxCloudTrainTests)
+
+    add_test(NAME OpenYourBoxCloudApi
+        COMMAND "${Python3_EXECUTABLE}" -m pytest
+            "${CMAKE_CURRENT_SOURCE_DIR}/CloudService/tests" -q)
     add_test(NAME OpenYourBoxFreezeWorker
         COMMAND "${Python3_EXECUTABLE}"
             "${CMAKE_CURRENT_SOURCE_DIR}/Tests/test_freeze_worker.py")

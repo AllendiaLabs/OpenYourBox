@@ -34,3 +34,4 @@
 - Updated in place on existing `017-cloud-training` (WP platform account + entitlement gate).
 - WordPress storefront is named as the product account/commerce surface (constitution Phase 4), not as an implementation recipe.
 - Plan/research/contracts/tasks from the prior token-only slice are stale relative to this spec; re-run `/speckit-plan` (and tasks) before implement.
+- Implement QA (2026-08-31): Python contract tests (`CloudService/tests`) cover entitlement, one-job-per-account, pause/resume/stop, and retention. Full DAW quickstart scenarios 1–11 still need a staging API + mock storefront session against a built VST; Local-without-account (SC-010) is unchanged in `TrainCoordinator::start`.

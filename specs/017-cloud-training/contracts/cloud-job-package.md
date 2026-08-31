@@ -1,7 +1,7 @@
 # Contract: Cloud Job Package
 
 **Feature**: `017-cloud-training`  
-**Applies to**: Plugin packager + `CloudService` ingest + GPU worker
+**Applies to**: Plugin packager + hosted Allendia cloud ingest + GPU worker
 
 ## Purpose
 
@@ -73,5 +73,5 @@ Worker MUST accept graph elements and objectives supported by current local `tra
 ## Implementation anchors
 
 - Plugin: package builder beside `TrainCoordinator` start-request assembly  
-- `CloudService/api` ingest  
-- `CloudService/worker` path rewrite + recipe invoke  
+- Hosted Allendia API ingest  
+- Hosted GPU worker path rewrite + recipe invoke (same recipes as `Backend/train_worker.py`)  

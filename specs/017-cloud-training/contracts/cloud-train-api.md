@@ -1,7 +1,7 @@
 # Contract: Cloud Training HTTP API
 
 **Feature**: `017-cloud-training`  
-**Applies to**: Proprietary `CloudService/` API consumed by `CloudTrainClient`
+**Applies to**: Hosted Allendia cloud training API consumed by `CloudTrainClient`
 
 ## General
 
@@ -154,8 +154,7 @@ Final artifact when `status == succeeded`; otherwise `conflict`/`not_found`.
 
 ## Implementation anchors
 
-- `CloudService/api/`
-- `CloudService/worker/`
-- `CloudService/storefront/`
+- Hosted Allendia cloud API + GPU workers (outside this repo)
+- WordPress storefront at `https://store.allendia.com` (account, verification page, credits)
 - `OpenYourBox/Source/train/CloudTrainClient.*`
-- `Tests/test_cloud_api.py`
+- `Tests/CloudTrainClientTests.cpp`

@@ -2,6 +2,7 @@
 #include "dsp/WeightLoader.h"
 #include "library/UserDataPaths.h"
 #include "params/ParamIDs.h"
+#include "train/CloudJobPackage.h"
 
 #include <imgui.h>
 
@@ -39,6 +40,7 @@ OpenYourBoxAudioProcessorEditor::OpenYourBoxAudioProcessorEditor(
                  std::string &error) {
             return audioProcessor.prepareTrainedArtifact(result, error);
           }),
+      cloudTrainClient(processorToUse.getCloudSettings()),
       imguiHost([this] { renderFrame(); }) {
   setOpaque(true);
   setResizable(true, true);
@@ -47,6 +49,8 @@ OpenYourBoxAudioProcessorEditor::OpenYourBoxAudioProcessorEditor(
   setSize(1100, 680);
   trainPanel.objective = audioProcessor.getLastTrainObjective();
   audioProcessor.onPatchApplied = [this] { reloadLiveGraphFromProcessor(); };
+  trainCoordinator.setCloudDependencies(
+      &cloudTrainClient, &audioProcessor.getCloudSettings());
 }
 
 OpenYourBoxAudioProcessorEditor::~OpenYourBoxAudioProcessorEditor() {
@@ -66,6 +70,8 @@ void OpenYourBoxAudioProcessorEditor::renderFrame() {
   applyCompletedFreeze();
   applyCompletedTrain();
   pollTrainingPreview();
+  trainCoordinator.pollCloud();
+  pollCloudLink();
   audioProcessor.drainInputCapture();
   if (const auto captureStatus = audioProcessor.takeCaptureStatusMessage();
       captureStatus.isNotEmpty()) {
@@ -419,6 +425,14 @@ void OpenYourBoxAudioProcessorEditor::renderFrame() {
     gates.copyrightAcknowledged = copyrightAcknowledgment.isAcknowledged();
     gates.selectedPairCount = library.getSelectedCount();
     gates.selectedDurationSeconds = library.getSelectedDurationSeconds();
+    juce::int64 selectedBytes = 0;
+    for (const auto &entry : library.getEntries()) {
+      if (entry.selectedForTrain)
+        selectedBytes += entry.byteSize;
+    }
+    gates.selectedUploadBytes = selectedBytes;
+    gates.softUploadWarnBytes =
+        audioProcessor.getCloudSettings().getSoftUploadWarnBytes();
     gates.armedElementCount =
         static_cast<int>(nodeGraph.getArmedTrainableNodeIds().size());
     gates.mixedSampleRates =
@@ -446,6 +460,34 @@ void OpenYourBoxAudioProcessorEditor::renderFrame() {
         !nodeGraph.hasReconstructionTrainPath();
     gates.reconstructionReason =
         juce::String(nodeGraph.reconstructionGateMessage());
+    auto &cloudSettings = audioProcessor.getCloudSettings();
+    gates.cloudLinked = cloudSettings.isLinked();
+    gates.entitlementUnavailable =
+        cloudSettings.getEntitlementStatus() ==
+        openyourbox::train::CloudSettings::EntitlementStatus::unavailable;
+    gates.cloudOffline = trainCoordinator.isOffline();
+    gates.isCloudSubmitter = trainCoordinator.isCloudSubmitter();
+    gates.manualCloudLoadAvailable = trainCoordinator.hasManualCloudLoad();
+    gates.cloudCheckpoints = trainCoordinator.getCloudCheckpoints();
+    if (sidePanelTab == 4 && cloudSettings.isLinked() &&
+        !cloudJobsDiscovered) {
+      cloudJobsDiscovered = true;
+      rediscoverCloudJobs();
+      refreshCloudEntitlement();
+    }
+    openyourbox::ui::CloudSettingsPanel::Callbacks cloudCallbacks;
+    cloudCallbacks.linkAccount = [this] { handleCloudLink(); };
+    cloudCallbacks.cancelLink = [this] {
+      cloudLinkFlow = {};
+      pendingCloudDeviceCode.clear();
+    };
+    cloudCallbacks.disconnect = [this] {
+      cloudTrainClient.logout();
+      cloudJobsDiscovered = false;
+    };
+    cloudCallbacks.openStorefront = [this] { cloudTrainClient.openStorefront(); };
+    cloudSettingsPanel.render(cloudSettings, cloudLinkFlow, cloudCallbacks);
+    ImGui::Separator();
     openyourbox::ui::TrainPanel::Callbacks trainCallbacks;
     trainCallbacks.run = [this] { handleTrainRun(); };
     trainCallbacks.pause = [this] { trainCoordinator.pause(); };
@@ -465,6 +507,28 @@ void OpenYourBoxAudioProcessorEditor::renderFrame() {
     };
     trainCallbacks.viewError = [this](const juce::String &detail) {
       showError(detail, true);
+    };
+    trainCallbacks.destinationChanged =
+        [this](openyourbox::graph::TrainDestination destination) {
+          trainCoordinator.setDestination(destination);
+          if (destination == openyourbox::graph::TrainDestination::cloud)
+            refreshCloudEntitlement();
+        };
+    trainCallbacks.openStorefront = [this] { cloudTrainClient.openStorefront(); };
+    trainCallbacks.downloadCheckpoint = [this](const juce::String &id) {
+      juce::Component::SafePointer<OpenYourBoxAudioProcessorEditor> safeThis(this);
+      juce::Thread::launch([safeThis, id] {
+        if (safeThis != nullptr)
+          (void)safeThis->trainCoordinator.downloadCloudCheckpoint(id);
+      });
+    };
+    trainCallbacks.manualCloudLoad = [this] {
+      if (retryTrainResult.has_value())
+        trainCoordinator.retryLoad(*retryTrainResult);
+      else {
+        auto result = trainCoordinator.getProgress();
+        trainCoordinator.retryLoad(result);
+      }
     };
     trainPanel.render(trainCoordinator, gates, trainCallbacks);
   } else if (sidePanelTab == 5) {
@@ -1050,12 +1114,145 @@ void OpenYourBoxAudioProcessorEditor::handleTrainRun() {
   options->setProperty("mlflow", juce::var(mlflow.release()));
   root->setProperty("train_options", juce::var(options.release()));
   request->graphFragment = juce::JSON::toString(payload, true).toStdString();
+  trainCoordinator.setDestination(trainPanel.destination);
+  if (trainPanel.destination ==
+      openyourbox::graph::TrainDestination::cloud) {
+    auto &cloudSettings = audioProcessor.getCloudSettings();
+    if (!cloudSettings.isLinked()) {
+      showError("Link a platform customer account before Cloud Run.");
+      return;
+    }
+    openyourbox::train::CloudApiError error;
+    const auto entitlement = cloudTrainClient.probeEntitlement(error);
+    if (!entitlement.has_value()) {
+      showError(error.message.isNotEmpty()
+                    ? error.message
+                    : juce::String("Authentication error. Sign in with Allendia again."));
+      return;
+    }
+    if (!entitlement->sufficient) {
+      showError("Allendia credits unavailable. Manage your account "
+                "to purchase credits.");
+      return;
+    }
+    const auto package = openyourbox::train::assembleCloudJobPackage(
+        *request, audioProcessor.getTrainingLibrary(),
+        cloudSettings.getClientInstanceId(),
+        juce::String(JucePlugin_VersionString));
+    if (!trainCoordinator.startCloud(package)) {
+      showGraphMessage("A training job is already running");
+      return;
+    }
+    trainPreviewNodeIds = request->armedNodeIds;
+    lastTrainPreviewPath.clear();
+    return;
+  }
   if (!trainCoordinator.start(*request)) {
     showGraphMessage("A training job is already running");
     return;
   }
   trainPreviewNodeIds = request->armedNodeIds;
   lastTrainPreviewPath.clear();
+}
+
+void OpenYourBoxAudioProcessorEditor::handleCloudLink() {
+  juce::Component::SafePointer<OpenYourBoxAudioProcessorEditor> safeThis(this);
+  juce::Thread::launch([safeThis] {
+    if (safeThis == nullptr)
+      return;
+    openyourbox::train::CloudApiError error;
+    auto start = safeThis->cloudTrainClient.startLink(error);
+    juce::MessageManager::callAsync([safeThis, start, error] {
+      if (safeThis == nullptr)
+        return;
+      if (!start.has_value()) {
+        safeThis->showError(error.message.isNotEmpty()
+                                ? error.message
+                                : juce::String("Could not start account link."));
+        return;
+      }
+      safeThis->cloudLinkFlow.active = true;
+      safeThis->cloudLinkFlow.userCode = start->userCode;
+      safeThis->cloudLinkFlow.verificationUrl = start->verificationUrl;
+      safeThis->cloudLinkFlow.message = "Waiting for Allendia verification…";
+      safeThis->pendingCloudDeviceCode = start->deviceCode;
+      safeThis->nextCloudLinkPoll = 0.0;
+      openyourbox::train::CloudTrainClient::openExternalUrl(start->verificationUrl);
+    });
+  });
+}
+
+void OpenYourBoxAudioProcessorEditor::pollCloudLink() {
+  if (!cloudLinkFlow.active || pendingCloudDeviceCode.isEmpty())
+    return;
+  const auto now = ImGui::GetTime();
+  if (now < nextCloudLinkPoll)
+    return;
+  nextCloudLinkPoll = now + 2.0;
+  const auto deviceCode = pendingCloudDeviceCode;
+  juce::Component::SafePointer<OpenYourBoxAudioProcessorEditor> safeThis(this);
+  juce::Thread::launch([safeThis, deviceCode] {
+    if (safeThis == nullptr)
+      return;
+    openyourbox::train::CloudApiError error;
+    const auto linked = safeThis->cloudTrainClient.pollLinkToken(deviceCode, error);
+    juce::MessageManager::callAsync([safeThis, linked, error] {
+      if (safeThis == nullptr)
+        return;
+      if (linked) {
+        safeThis->cloudLinkFlow = {};
+        safeThis->pendingCloudDeviceCode.clear();
+        safeThis->refreshCloudEntitlement();
+        safeThis->rediscoverCloudJobs();
+        return;
+      }
+      if (error.code == openyourbox::graph::cloudErrorCode::linkExpired) {
+        safeThis->cloudLinkFlow.active = false;
+        safeThis->pendingCloudDeviceCode.clear();
+        safeThis->showError("Link code expired. Start again.");
+        return;
+      }
+      if (error.code != openyourbox::graph::cloudErrorCode::linkPending &&
+          error.code.isNotEmpty() &&
+          error.code != "link_pending")
+        safeThis->cloudLinkFlow.message = error.message;
+    });
+  });
+}
+
+void OpenYourBoxAudioProcessorEditor::rediscoverCloudJobs() {
+  if (!audioProcessor.getCloudSettings().isLinked())
+    return;
+  juce::Component::SafePointer<OpenYourBoxAudioProcessorEditor> safeThis(this);
+  juce::Thread::launch([safeThis] {
+    if (safeThis == nullptr)
+      return;
+    openyourbox::train::CloudApiError error;
+    auto jobs = safeThis->cloudTrainClient.listJobs(error);
+    juce::MessageManager::callAsync([safeThis, jobs, error] {
+      if (safeThis == nullptr || !jobs.has_value())
+        return;
+      for (const auto &job : *jobs) {
+        if (job.status == "queued" || job.status == "running" ||
+            job.status == "paused") {
+          safeThis->trainCoordinator.attachCloudJob(job.jobId, job);
+          break;
+        }
+      }
+    });
+  });
+}
+
+void OpenYourBoxAudioProcessorEditor::refreshCloudEntitlement() {
+  if (!audioProcessor.getCloudSettings().isLinked())
+    return;
+  juce::Component::SafePointer<OpenYourBoxAudioProcessorEditor> safeThis(this);
+  juce::Thread::launch([safeThis] {
+    if (safeThis == nullptr)
+      return;
+    openyourbox::train::CloudApiError error;
+    (void)safeThis->cloudTrainClient.probeEntitlement(error);
+  });
 }
 
 void OpenYourBoxAudioProcessorEditor::pollTrainingPreview() {
@@ -1112,6 +1309,12 @@ void OpenYourBoxAudioProcessorEditor::applyCompletedTrain() {
     if (!result->artifactPath.empty())
       retryTrainResult = result;
     showError("Training failed: " + juce::String(result->errorMessage));
+    persistGraph(true, false);
+    return;
+  }
+  if (!trainCoordinator.shouldAutoLoadOnSuccess()) {
+    retryTrainResult = result;
+    showGraphMessage("Cloud job succeeded. Download and load to apply Gold.");
     persistGraph(true, false);
     return;
   }

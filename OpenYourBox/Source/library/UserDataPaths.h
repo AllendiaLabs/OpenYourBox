@@ -84,4 +84,11 @@ inline juce::File boxesDirectory() {
 inline juce::File presetsDirectory() {
   return ensureDirectory(userDataRoot().getChildFile("UserPresets"));
 }
+
+/**
+ * @brief Directory for downloaded cloud checkpoints and final artifacts.
+ */
+inline juce::File cloudArtifactsDirectory() {
+  return ensureDirectory(userDataRoot().getChildFile("CloudArtifacts"));
+}
 } // namespace openyourbox::library

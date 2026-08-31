@@ -69,6 +69,35 @@ enum class TrainObjective { mapping, reconstruction };
 /** @brief Accelerator requested for the Python train worker. */
 enum class TrainDevice { automatic, cpu, mps, cuda };
 
+/** @brief Where the Train panel submits a job. */
+enum class TrainDestination { local, cloud };
+
+/**
+ * @brief Cloud API `error_code` tokens consumed by the plug-in.
+ */
+namespace cloudErrorCode {
+/** @brief Missing, expired, or revoked linked session. */
+inline constexpr const char *unauthorized = "unauthorized";
+/** @brief Account lacks credit or purchase entitlement for a new job. */
+inline constexpr const char *insufficientEntitlement = "insufficient_entitlement";
+/** @brief An active cloud job already exists for this customer. */
+inline constexpr const char *oneJobPerAccount = "one_job_per_account";
+/** @brief Manifest or corpus failed validation. */
+inline constexpr const char *validationFailed = "validation_failed";
+/** @brief Unknown job, corpus, or checkpoint. */
+inline constexpr const char *notFound = "not_found";
+/** @brief Referenced corpus is past retention. */
+inline constexpr const char *corpusExpired = "corpus_expired";
+/** @brief Service overloaded. */
+inline constexpr const char *capacity = "capacity";
+/** @brief Illegal job-control transition. */
+inline constexpr const char *conflict = "conflict";
+/** @brief Device-code link has not been completed. */
+inline constexpr const char *linkPending = "link_pending";
+/** @brief Device-code link expired before completion. */
+inline constexpr const char *linkExpired = "link_expired";
+} // namespace cloudErrorCode
+
 /** @brief Rate-changing convolution direction. */
 enum class RateConvDirection { downsample, upsample };
 
@@ -464,6 +493,13 @@ inline constexpr const char *defaultTrainDevice = "auto";
 inline constexpr const char *defaultMlflowExperiment = "openyourbox";
 /** @brief Default MLflow tracking server origin for Train logging. */
 inline constexpr const char *defaultMlflowTrackingUri = "http://127.0.0.1:5000";
+/** @brief Soft Cloud upload warning threshold in bytes (2 GiB). */
+inline constexpr juce::int64 defaultCloudSoftUploadWarnBytes = 2147483648LL;
+/** @brief Product default HTTPS base for the proprietary cloud training API. */
+inline constexpr const char *defaultCloudApiBaseUrl =
+    "https://cloud.openyourbox.allendia.com";
+/** @brief Product default WordPress storefront origin for account/credits. */
+inline constexpr const char *defaultStorefrontUrl = "https://store.allendia.com";
 /** @brief Default PQMF band count matching acids-rave continuous layouts. */
 inline constexpr int defaultPqmfBands = 16;
 /** @brief Inclusive minimum PQMF band count (power-of-two layouts). */
@@ -734,6 +770,24 @@ inline const char *trainDeviceLabel(TrainDevice device) noexcept {
   default:
     return "Auto";
   }
+}
+
+/**
+ * @brief Returns the persisted Train destination token.
+ * @param destination Local worker or remote cloud.
+ * @return `local` or `cloud`.
+ */
+inline const char *trainDestinationName(TrainDestination destination) noexcept {
+  return destination == TrainDestination::cloud ? "cloud" : "local";
+}
+
+/**
+ * @brief Parses a Train destination token.
+ * @param name Destination string (`local` or `cloud`).
+ * @return Local unless the token is `cloud`.
+ */
+inline TrainDestination trainDestinationFromName(const std::string &name) noexcept {
+  return name == "cloud" ? TrainDestination::cloud : TrainDestination::local;
 }
 
 /**

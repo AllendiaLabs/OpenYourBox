@@ -1,6 +1,9 @@
 #pragma once
 
 #include "../graph/GraphTypes.h"
+#include "CloudJobPackage.h"
+#include "CloudSettings.h"
+#include "CloudTrainClient.h"
 
 #include <JuceHeader.h>
 
@@ -14,6 +17,7 @@ namespace openyourbox::train {
 /** @brief User-visible lifecycle of one Train job. */
 enum class TrainStatus {
   idle,
+  queued,
   running,
   paused,
   succeeded,
@@ -27,7 +31,8 @@ enum class TrainStatus {
  *
  * Progress events are parsed on the worker thread and published for the
  * message thread. Artifact preparation is optional and never runs on the
- * audio thread. Stop and failure never request a model swap.
+ * audio thread. Stop and failure never request a model swap. Cloud jobs use
+ * the same busy gate and status atom as the local ChildProcess path.
  */
 class TrainCoordinator final : private juce::Thread {
 public:
@@ -50,11 +55,46 @@ public:
   ~TrainCoordinator() override;
 
   /**
-   * @brief Starts one train job without blocking the caller.
+   * @brief Binds cloud HTTP client and persisted settings (editor lifecycle).
+   * @param client HTTPS client, or null to disable cloud.
+   * @param cloudSettings Linked session and submitter map.
+   */
+  void setCloudDependencies(CloudTrainClient *client, CloudSettings *cloudSettings);
+
+  /**
+   * @brief Sets Local vs Cloud destination for the next Run.
+   * @param destination Train destination.
+   */
+  void setDestination(graph::TrainDestination destination) noexcept;
+
+  /** @brief Returns the destination of the active or last job. */
+  [[nodiscard]] graph::TrainDestination getDestination() const noexcept;
+
+  /**
+   * @brief Starts one local train job without blocking the caller.
    * @param request Complete JSON worker request.
    * @return False when another job is already active.
    */
   bool start(const graph::TrainJobRequest &request);
+
+  /**
+   * @brief Packages and submits a cloud job on a background thread.
+   * @param package Manifest plus corpus files.
+   * @return False when another job is already active or cloud is unbound.
+   */
+  bool startCloud(CloudJobPackage package);
+
+  /**
+   * @brief Attaches to an existing account job (rediscovery).
+   * @param jobId Server job id.
+   * @param snapshot Optional last-known snapshot.
+   * @return False when another job is already active.
+   */
+  bool attachCloudJob(const juce::String &jobId,
+                      const CloudJobSnapshot &snapshot = {});
+
+  /** @brief Polls cloud status when a remote job is attached (message thread). */
+  void pollCloud();
 
   /** @brief Requests the worker to pause optimization. */
   void pause();
@@ -71,6 +111,16 @@ public:
    * @return False when no preparer is installed or the file is missing.
    */
   bool retryLoad(const graph::TrainJobResult &result);
+
+  /**
+   * @brief Downloads a cloud checkpoint and optionally exposes it as progress.
+   * @param checkpointId Server checkpoint id.
+   * @return Local file when the download succeeded.
+   */
+  std::optional<juce::File> downloadCloudCheckpoint(const juce::String &checkpointId);
+
+  /** @brief Returns published cloud checkpoints for the attached job. */
+  [[nodiscard]] std::vector<CloudCheckpointInfo> getCloudCheckpoints() const;
 
   /** @brief Returns the current lifecycle state without blocking. */
   [[nodiscard]] TrainStatus getStatus() const noexcept;
@@ -92,6 +142,24 @@ public:
    * @return Terminal result, or no value while work is pending.
    */
   [[nodiscard]] std::optional<graph::TrainJobResult> takeResult();
+
+  /** @brief True when this instance submitted the attached cloud job. */
+  [[nodiscard]] bool isCloudSubmitter() const;
+
+  /** @brief True when success should auto-load Gold (local or submitter). */
+  [[nodiscard]] bool shouldAutoLoadOnSuccess() const;
+
+  /** @brief True when cloud poll failed due to network (job not cancelled). */
+  [[nodiscard]] bool isOffline() const noexcept;
+
+  /** @brief Packaging/upload progress for Cloud Run. */
+  [[nodiscard]] CloudSubmitProgress getSubmitProgress() const;
+
+  /** @brief Attached cloud job id, or empty. */
+  [[nodiscard]] juce::String getCloudJobId() const;
+
+  /** @brief True when non-submitter success offers manual download/load. */
+  [[nodiscard]] bool hasManualCloudLoad() const noexcept;
 
 private:
   void run() override;
@@ -115,10 +183,37 @@ private:
    */
   void applyProgressObject(const juce::var &parsed);
 
+  /**
+   * @brief Maps a remote job snapshot onto TrainStatus and progress.
+   * @param snapshot Cloud job payload.
+   */
+  void applyCloudSnapshot(const CloudJobSnapshot &snapshot);
+  /**
+   * @brief Downloads (when submitter) and publishes a successful cloud result.
+   * @param artifact Local final artifact, or empty for non-submitter success.
+   */
+  void finishCloudSuccess(const juce::File &artifact);
+  /**
+   * @brief Returns true for queued, running, or paused.
+   * @param value Lifecycle state.
+   */
+  [[nodiscard]] bool isBusyStatus(TrainStatus value) const noexcept;
+  /**
+   * @brief Sends pause/resume/stop to the cloud API off-thread.
+   * @param verb Control verb.
+   */
+  void cloudControl(const juce::String &verb);
+
   /** @brief Processor callback used after worker export succeeds. */
   ArtifactPreparer prepareArtifact;
+  CloudTrainClient *cloudClient = nullptr;
+  CloudSettings *cloudSettings = nullptr;
+  std::atomic<graph::TrainDestination> destination{graph::TrainDestination::local};
   /** @brief Lock-free lifecycle state polled by the editor. */
   std::atomic<TrainStatus> status{TrainStatus::idle};
+  std::atomic<bool> offline{false};
+  std::atomic<bool> cloudPollInFlight{false};
+  std::atomic<bool> manualCloudLoad{false};
   /** @brief Protects request, result, message, and process ownership. */
   mutable juce::CriticalSection stateLock;
   /** @brief Immutable request copied before the worker thread starts. */
@@ -135,6 +230,10 @@ private:
   juce::File commandFile;
   /** @brief Killable child process owned for the active request. */
   std::unique_ptr<juce::ChildProcess> childProcess;
+  juce::String cloudJobId;
+  CloudSubmitProgress submitProgress;
+  std::vector<CloudCheckpointInfo> cloudCheckpoints;
+  juce::int64 lastCloudPollMs = 0;
 
   JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(TrainCoordinator)
 };

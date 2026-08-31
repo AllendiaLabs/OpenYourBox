@@ -10,7 +10,9 @@
 #include "state/EditHistory.h"
 #include "state/PatchSnapshot.h"
 #include "train/TrainCoordinator.h"
+#include "train/CloudTrainClient.h"
 #include "ui/CaptureSamplesPanel.h"
+#include "ui/CloudSettingsPanel.h"
 #include "ui/CopyrightModal.h"
 #include "ui/ErrorModal.h"
 #include "ui/ImGuiHost.h"
@@ -132,6 +134,14 @@ private:
   void pollTrainingPreview();
   /** @brief Starts a Train job when gates pass. */
   void handleTrainRun();
+  /** @brief Starts Allendia device-code sign-in from settings. */
+  void handleCloudLink();
+  /** @brief Polls link token while a device-code flow is active. */
+  void pollCloudLink();
+  /** @brief Lists account jobs and attaches an active one. */
+  void rediscoverCloudJobs();
+  /** @brief Probes entitlement for UI (message thread dispatch). */
+  void refreshCloudEntitlement();
   /**
    * @brief Requests the Parameters side tab on the next frame.
    */
@@ -247,6 +257,8 @@ private:
   openyourbox::freeze::FreezeCoordinator freezeCoordinator;
   /** @brief Owns detached train worker execution. */
   openyourbox::train::TrainCoordinator trainCoordinator;
+  /** @brief HTTPS cloud training client (never used on the audio thread). */
+  openyourbox::train::CloudTrainClient cloudTrainClient;
   openyourbox::graph::NodeGraph nodeGraph;
   openyourbox::ui::ImGuiHost imguiHost;
   openyourbox::graph::NodeRenderer nodeRenderer;
@@ -257,6 +269,7 @@ private:
   openyourbox::ui::UserPresetPanel presetPanel;
   openyourbox::ui::CaptureSamplesPanel capturePanel;
   openyourbox::ui::TrainPanel trainPanel;
+  openyourbox::ui::CloudSettingsPanel cloudSettingsPanel;
   openyourbox::ui::CopyrightModal copyrightModal;
   /** @brief Copyable error dialog for plugin, train, freeze, and model failures. */
   openyourbox::ui::ErrorModal errorModal;
@@ -280,6 +293,11 @@ private:
   bool trainPreviewLoadInFlight = false;
   /** @brief Last successful train result retained for retry-load. */
   std::optional<openyourbox::graph::TrainJobResult> retryTrainResult;
+  /** @brief In-progress Allendia device-code sign-in. */
+  openyourbox::ui::CloudSettingsPanel::LinkFlow cloudLinkFlow;
+  juce::String pendingCloudDeviceCode;
+  double nextCloudLinkPoll = 0.0;
+  bool cloudJobsDiscovered = false;
   /** @brief Bypass state restored when leaving capture. */
   bool restoreBypassOnExit = false;
   openyourbox::dsp::TCNConfiguration displayedConfiguration;

@@ -107,11 +107,33 @@ TrainCoordinator::~TrainCoordinator() {
   stopThread(5000);
 }
 
+void TrainCoordinator::setCloudDependencies(CloudTrainClient *client,
+                                            CloudSettings *settings) {
+  cloudClient = client;
+  cloudSettings = settings;
+}
+
+void TrainCoordinator::setDestination(graph::TrainDestination next) noexcept {
+  destination.store(next, std::memory_order_release);
+}
+
+graph::TrainDestination TrainCoordinator::getDestination() const noexcept {
+  return destination.load(std::memory_order_acquire);
+}
+
+bool TrainCoordinator::isBusyStatus(TrainStatus value) const noexcept {
+  return value == TrainStatus::queued || value == TrainStatus::running ||
+         value == TrainStatus::paused;
+}
+
 bool TrainCoordinator::start(const graph::TrainJobRequest &request) {
   if (request.graphFragment.empty() ||
       status.load(std::memory_order_acquire) != TrainStatus::idle)
     return false;
 
+  destination.store(graph::TrainDestination::local, std::memory_order_release);
+  offline.store(false, std::memory_order_release);
+  manualCloudLoad.store(false, std::memory_order_release);
   {
     const juce::ScopedLock lock(stateLock);
     pendingRequest = request;
@@ -121,6 +143,8 @@ bool TrainCoordinator::start(const graph::TrainJobRequest &request) {
     latestProgress.status = "running";
     latestProgress.totalSteps = 2500;
     lossHistory.clear();
+    cloudJobId.clear();
+    submitProgress = {};
     statusMessage = "Training...";
   }
   status.store(TrainStatus::running, std::memory_order_release);
@@ -128,31 +152,348 @@ bool TrainCoordinator::start(const graph::TrainJobRequest &request) {
   return true;
 }
 
+bool TrainCoordinator::startCloud(CloudJobPackage package) {
+  if (cloudClient == nullptr || cloudSettings == nullptr ||
+      status.load(std::memory_order_acquire) != TrainStatus::idle)
+    return false;
+
+  destination.store(graph::TrainDestination::cloud, std::memory_order_release);
+  offline.store(false, std::memory_order_release);
+  manualCloudLoad.store(false, std::memory_order_release);
+  {
+    const juce::ScopedLock lock(stateLock);
+    completedResult.reset();
+    latestProgress = {};
+    latestProgress.status = "queued";
+    lossHistory.clear();
+    cloudJobId.clear();
+    cloudCheckpoints.clear();
+    submitProgress = {};
+    submitProgress.phase = CloudSubmitProgress::Phase::packaging;
+    submitProgress.bytesTotal = package.totalBytes;
+    statusMessage = "Packaging...";
+  }
+  status.store(TrainStatus::queued, std::memory_order_release);
+
+  juce::Thread::launch([this, package = std::move(package)]() mutable {
+    CloudApiError error;
+    {
+      const juce::ScopedLock lock(stateLock);
+      submitProgress.phase = CloudSubmitProgress::Phase::uploading;
+      statusMessage = "Uploading...";
+    }
+    auto accepted = cloudClient->submitJob(
+        package, error, [this](juce::int64 sent, juce::int64 total) {
+          const juce::ScopedLock lock(stateLock);
+          submitProgress.bytesSent = sent;
+          submitProgress.bytesTotal = total;
+        });
+    if (!accepted.has_value()) {
+      juce::String message = error.message;
+      if (error.code == graph::cloudErrorCode::unauthorized)
+        message = "Authentication error. Sign in with Allendia again.";
+      else if (error.code == graph::cloudErrorCode::insufficientEntitlement)
+        message = "Allendia credits unavailable. Manage your account to purchase credits.";
+      else if (error.code == graph::cloudErrorCode::oneJobPerAccount)
+        message = "This Allendia account already has an active cloud job.";
+      publishFailure({}, message.toStdString());
+      return;
+    }
+    {
+      const juce::ScopedLock lock(stateLock);
+      cloudJobId = accepted->jobId;
+      submitProgress.phase = CloudSubmitProgress::Phase::accepted;
+      statusMessage = "Queued...";
+    }
+    applyCloudSnapshot(*accepted);
+  });
+  return true;
+}
+
+bool TrainCoordinator::attachCloudJob(const juce::String &jobId,
+                                      const CloudJobSnapshot &snapshot) {
+  if (jobId.isEmpty() || cloudClient == nullptr ||
+      status.load(std::memory_order_acquire) != TrainStatus::idle)
+    return false;
+  destination.store(graph::TrainDestination::cloud, std::memory_order_release);
+  offline.store(false, std::memory_order_release);
+  {
+    const juce::ScopedLock lock(stateLock);
+    cloudJobId = jobId;
+    completedResult.reset();
+    latestProgress = {};
+    lossHistory.clear();
+    statusMessage = "Attached cloud job";
+  }
+  status.store(TrainStatus::queued, std::memory_order_release);
+  if (snapshot.jobId.isNotEmpty())
+    applyCloudSnapshot(snapshot);
+  return true;
+}
+
+void TrainCoordinator::applyCloudSnapshot(const CloudJobSnapshot &snapshot) {
+  graph::TrainJobResult progress;
+  {
+    const juce::ScopedLock lock(stateLock);
+    progress = latestProgress;
+    cloudJobId = snapshot.jobId.isNotEmpty() ? snapshot.jobId : cloudJobId;
+  }
+  progress.status = snapshot.status.toStdString();
+  progress.step = snapshot.step;
+  progress.totalSteps = snapshot.totalSteps;
+  progress.loss = snapshot.loss;
+  progress.stage = snapshot.stage.toStdString();
+  progress.objective = snapshot.objective.toStdString();
+  progress.errorMessage = snapshot.errorMessage.toStdString();
+  TrainStatus next = TrainStatus::running;
+  juce::String message = "Training...";
+  if (snapshot.status == "queued") {
+    next = TrainStatus::queued;
+    message = "Queued...";
+  } else if (snapshot.status == "paused") {
+    next = TrainStatus::paused;
+    message = "Paused";
+  } else if (snapshot.status == "succeeded") {
+    next = TrainStatus::succeeded;
+    message = "Training succeeded";
+  } else if (snapshot.status == "stopped") {
+    next = TrainStatus::stopped;
+    message = "Stopped";
+  } else if (snapshot.status == "failed") {
+    next = TrainStatus::failed;
+    message = snapshot.errorMessage.isNotEmpty() ? snapshot.errorMessage
+                                                 : juce::String("Cloud job failed");
+  }
+  {
+    const juce::ScopedLock lock(stateLock);
+    latestProgress = progress;
+    if (snapshot.status == "running" && snapshot.step > 0)
+      lossHistory.push_back(static_cast<float>(snapshot.loss));
+    if (lossHistory.size() > 2048)
+      lossHistory.erase(lossHistory.begin());
+    statusMessage = message;
+    if (next == TrainStatus::failed || next == TrainStatus::stopped)
+      completedResult = progress;
+  }
+  status.store(next, std::memory_order_release);
+}
+
+void TrainCoordinator::finishCloudSuccess(const juce::File &artifact) {
+  graph::TrainJobResult result;
+  {
+    const juce::ScopedLock lock(stateLock);
+    result = latestProgress;
+  }
+  result.status = "success";
+  result.artifactPath = artifact.getFullPathName().toStdString();
+  std::string preparationError;
+  if (shouldAutoLoadOnSuccess() && prepareArtifact != nullptr &&
+      !prepareArtifact(result, preparationError)) {
+    result.status = "failure";
+    result.errorMessage = preparationError.empty()
+                              ? "Trained artifact could not be prepared"
+                              : preparationError;
+    const juce::ScopedLock lock(stateLock);
+    completedResult = result;
+    statusMessage = result.errorMessage;
+    status.store(TrainStatus::failed, std::memory_order_release);
+    return;
+  }
+  if (!shouldAutoLoadOnSuccess()) {
+    manualCloudLoad.store(true, std::memory_order_release);
+    result.status = "success";
+  }
+  {
+    const juce::ScopedLock lock(stateLock);
+    latestProgress = result;
+    completedResult = result;
+    statusMessage = shouldAutoLoadOnSuccess() ? "Training succeeded"
+                                              : "Cloud job succeeded";
+    status.store(TrainStatus::succeeded, std::memory_order_release);
+  }
+}
+
+void TrainCoordinator::pollCloud() {
+  if (destination.load(std::memory_order_acquire) != graph::TrainDestination::cloud)
+    return;
+  const auto current = status.load(std::memory_order_acquire);
+  if (!isBusyStatus(current) && current != TrainStatus::succeeded)
+    return;
+  juce::String jobId;
+  {
+    const juce::ScopedLock lock(stateLock);
+    jobId = cloudJobId;
+    const auto now = juce::Time::getMillisecondCounterHiRes();
+    if (now - static_cast<double>(lastCloudPollMs) < 1500.0)
+      return;
+    lastCloudPollMs = static_cast<juce::int64>(now);
+  }
+  if (jobId.isEmpty() || cloudClient == nullptr ||
+      cloudPollInFlight.exchange(true))
+    return;
+  juce::Thread::launch([this, jobId] {
+    CloudApiError error;
+    const auto snapshot = cloudClient->getJob(jobId, error);
+    if (!snapshot.has_value()) {
+      offline.store(true, std::memory_order_release);
+      cloudPollInFlight.store(false);
+      return;
+    }
+    offline.store(false, std::memory_order_release);
+    if (auto checkpoints = cloudClient->listCheckpoints(jobId, error)) {
+      const juce::ScopedLock lock(stateLock);
+      cloudCheckpoints = std::move(*checkpoints);
+    }
+    applyCloudSnapshot(*snapshot);
+    if (snapshot->status == "succeeded") {
+      bool alreadyFinished = false;
+      {
+        const juce::ScopedLock lock(stateLock);
+        alreadyFinished = completedResult.has_value();
+      }
+      if (!alreadyFinished) {
+        if (shouldAutoLoadOnSuccess()) {
+          CloudApiError downloadError;
+          auto file = cloudClient->downloadArtifact(jobId, downloadError);
+          if (file.has_value())
+            finishCloudSuccess(*file);
+          else {
+            publishFailure(jobId.toStdString(),
+                           downloadError.message.isNotEmpty()
+                               ? downloadError.message.toStdString()
+                               : "Could not download the trained artifact. Retry.");
+          }
+        } else {
+          finishCloudSuccess({});
+        }
+      }
+    }
+    cloudPollInFlight.store(false);
+  });
+}
+
+void TrainCoordinator::cloudControl(const juce::String &verb) {
+  juce::String jobId;
+  {
+    const juce::ScopedLock lock(stateLock);
+    jobId = cloudJobId;
+  }
+  if (jobId.isEmpty() || cloudClient == nullptr)
+    return;
+  juce::Thread::launch([this, jobId, verb] {
+    CloudApiError error;
+    const auto snapshot = cloudClient->controlJob(jobId, verb, error);
+    if (snapshot.has_value())
+      applyCloudSnapshot(*snapshot);
+  });
+}
+
 void TrainCoordinator::pause() {
   if (status.load(std::memory_order_acquire) != TrainStatus::running)
     return;
+  if (destination.load(std::memory_order_acquire) == graph::TrainDestination::cloud) {
+    cloudControl("pause");
+    return;
+  }
   writeCommand("pause");
 }
 
 void TrainCoordinator::resume() {
   if (status.load(std::memory_order_acquire) != TrainStatus::paused)
     return;
+  if (destination.load(std::memory_order_acquire) == graph::TrainDestination::cloud) {
+    cloudControl("resume");
+    return;
+  }
   writeCommand("resume");
 }
 
 void TrainCoordinator::stop() {
   const auto current = status.load(std::memory_order_acquire);
-  if (current != TrainStatus::running && current != TrainStatus::paused)
+  if (!isBusyStatus(current))
     return;
+  if (destination.load(std::memory_order_acquire) == graph::TrainDestination::cloud) {
+    cloudControl("stop");
+    return;
+  }
   writeCommand("stop");
 }
 
 bool TrainCoordinator::retryLoad(const graph::TrainJobResult &result) {
-  if (prepareArtifact == nullptr || result.artifactPath.empty() ||
-      !juce::File(result.artifactPath).existsAsFile())
+  auto toLoad = result;
+  if (toLoad.artifactPath.empty() &&
+      destination.load(std::memory_order_acquire) == graph::TrainDestination::cloud &&
+      cloudClient != nullptr) {
+    CloudApiError error;
+    juce::String jobId;
+    {
+      const juce::ScopedLock lock(stateLock);
+      jobId = cloudJobId;
+    }
+    if (auto file = cloudClient->downloadArtifact(jobId, error))
+      toLoad.artifactPath = file->getFullPathName().toStdString();
+  }
+  if (prepareArtifact == nullptr || toLoad.artifactPath.empty() ||
+      !juce::File(toLoad.artifactPath).existsAsFile())
     return false;
   std::string error;
-  return prepareArtifact(result, error);
+  return prepareArtifact(toLoad, error);
+}
+
+std::optional<juce::File>
+TrainCoordinator::downloadCloudCheckpoint(const juce::String &checkpointId) {
+  if (cloudClient == nullptr || checkpointId.isEmpty())
+    return std::nullopt;
+  juce::String jobId;
+  {
+    const juce::ScopedLock lock(stateLock);
+    jobId = cloudJobId;
+  }
+  CloudApiError error;
+  auto file = cloudClient->downloadCheckpoint(jobId, checkpointId, error);
+  if (file.has_value()) {
+    const juce::ScopedLock lock(stateLock);
+    latestProgress.artifactPath = file->getFullPathName().toStdString();
+  }
+  return file;
+}
+
+std::vector<CloudCheckpointInfo> TrainCoordinator::getCloudCheckpoints() const {
+  const juce::ScopedLock lock(stateLock);
+  return cloudCheckpoints;
+}
+
+bool TrainCoordinator::isCloudSubmitter() const {
+  juce::String jobId;
+  {
+    const juce::ScopedLock lock(stateLock);
+    jobId = cloudJobId;
+  }
+  return cloudSettings != nullptr && cloudSettings->isSubmitter(jobId);
+}
+
+bool TrainCoordinator::shouldAutoLoadOnSuccess() const {
+  if (destination.load(std::memory_order_acquire) != graph::TrainDestination::cloud)
+    return true;
+  return isCloudSubmitter();
+}
+
+bool TrainCoordinator::isOffline() const noexcept {
+  return offline.load(std::memory_order_acquire);
+}
+
+CloudSubmitProgress TrainCoordinator::getSubmitProgress() const {
+  const juce::ScopedLock lock(stateLock);
+  return submitProgress;
+}
+
+juce::String TrainCoordinator::getCloudJobId() const {
+  const juce::ScopedLock lock(stateLock);
+  return cloudJobId;
+}
+
+bool TrainCoordinator::hasManualCloudLoad() const noexcept {
+  return manualCloudLoad.load(std::memory_order_acquire);
 }
 
 TrainStatus TrainCoordinator::getStatus() const noexcept {

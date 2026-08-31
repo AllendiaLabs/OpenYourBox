@@ -12,6 +12,7 @@
 #include "library/TrainingLibrary.h"
 #include "state/EditHistory.h"
 #include "state/PatchSnapshot.h"
+#include "train/CloudSettings.h"
 
 #include <array>
 #include <atomic>
@@ -368,11 +369,21 @@ public:
   [[nodiscard]] openyourbox::graph::TrainObjective
   getLastTrainObjective() const noexcept;
 
-  /**
-   * @brief Stores the last-used Train objective.
+  /** @brief Stores the last-used Train objective.
    * @param objective Mapping or reconstruction.
    */
   void setLastTrainObjective(openyourbox::graph::TrainObjective objective) noexcept;
+
+  /**
+   * @brief Returns persisted cloud account settings for this instance.
+   */
+  [[nodiscard]] openyourbox::train::CloudSettings &getCloudSettings() noexcept;
+
+  /**
+   * @brief Returns persisted cloud account settings for this instance.
+   */
+  [[nodiscard]] const openyourbox::train::CloudSettings &
+  getCloudSettings() const noexcept;
 
   /**
    * @brief Consumes a pending capture status string for the editor.
@@ -648,6 +659,8 @@ private:
   /** @brief Last-used Train objective persisted with the project. */
   openyourbox::graph::TrainObjective lastTrainObjective{
       openyourbox::graph::TrainObjective::mapping};
+  /** @brief Linked platform session, URL overrides, and submitter ids. */
+  openyourbox::train::CloudSettings cloudSettings;
   /** @brief True when the active take is unpaired Single capture. */
   bool singleCaptureActive = false;
   /** @brief Protects capture assembly paths and status. */

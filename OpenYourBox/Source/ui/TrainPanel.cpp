@@ -1,4 +1,5 @@
 #include "TrainPanel.h"
+#include "../train/CloudJobPackage.h"
 
 #include <algorithm>
 #include <cfloat>
@@ -24,7 +25,8 @@ void TrainPanel::render(const train::TrainCoordinator &coordinator,
 
   const auto status = coordinator.getStatus();
   const auto progress = coordinator.getProgress();
-  const auto busy = status == train::TrainStatus::running ||
+  const auto busy = status == train::TrainStatus::queued ||
+                    status == train::TrainStatus::running ||
                     status == train::TrainStatus::paused;
   const bool mixed = gates.mixedSampleRates;
   const bool unpairedMapping =
@@ -32,10 +34,13 @@ void TrainPanel::render(const train::TrainCoordinator &coordinator,
   const bool reconstructionBlocked =
       objective == graph::TrainObjective::reconstruction &&
       gates.reconstructionPathInvalid;
+  const bool cloudBlocked =
+      destination == graph::TrainDestination::cloud &&
+      (!gates.cloudLinked || gates.entitlementUnavailable);
   const bool gated =
       !gates.copyrightAcknowledged || gates.selectedPairCount < 1 ||
       gates.armedElementCount < 1 || mixed || unpairedMapping ||
-      reconstructionBlocked;
+      reconstructionBlocked || cloudBlocked;
 
   const char *objectiveLabel =
       objective == graph::TrainObjective::reconstruction ? "Reconstruction"
@@ -48,6 +53,41 @@ void TrainPanel::render(const train::TrainCoordinator &coordinator,
                           objective == graph::TrainObjective::reconstruction))
       objective = graph::TrainObjective::reconstruction;
     ImGui::EndCombo();
+  }
+
+  const char *destinationLabel =
+      destination == graph::TrainDestination::cloud ? "Allendia" : "Local";
+  if (ImGui::BeginCombo("Destination", destinationLabel)) {
+    if (ImGui::Selectable("Local",
+                          destination == graph::TrainDestination::local)) {
+      destination = graph::TrainDestination::local;
+      if (callbacks.destinationChanged)
+        callbacks.destinationChanged(destination);
+    }
+    if (ImGui::Selectable("Allendia",
+                          destination == graph::TrainDestination::cloud)) {
+      destination = graph::TrainDestination::cloud;
+      if (callbacks.destinationChanged)
+        callbacks.destinationChanged(destination);
+    }
+    ImGui::EndCombo();
+  }
+  if (destination == graph::TrainDestination::cloud) {
+    if (!gates.cloudLinked)
+      ImGui::TextColored(ImVec4(1.0f, 0.72f, 0.25f, 1.0f),
+                         "Sign in with Allendia to run cloud training.");
+    else if (gates.entitlementUnavailable) {
+      ImGui::TextColored(ImVec4(1.0f, 0.72f, 0.25f, 1.0f),
+                         "Allendia credits unavailable.");
+      if (ImGui::SmallButton("Manage account") && callbacks.openStorefront)
+        callbacks.openStorefront();
+    } else
+      ImGui::TextDisabled("Credits: available");
+    if (train::exceedsSoftUploadWarn(gates.selectedUploadBytes,
+                                     gates.softUploadWarnBytes))
+      ImGui::TextColored(
+          ImVec4(1.0f, 0.72f, 0.25f, 1.0f),
+          "Upload is larger than 2 GiB. You can still continue.");
   }
 
   ImGui::Text("%d items selected · ~%.1f min", gates.selectedPairCount,
@@ -64,14 +104,14 @@ void TrainPanel::render(const train::TrainCoordinator &coordinator,
 
   if (gated && !busy)
     ImGui::BeginDisabled();
-  if (status != train::TrainStatus::running &&
-      status != train::TrainStatus::paused) {
+  if (!busy) {
     if (ImGui::Button("Run") && callbacks.run)
       callbacks.run();
   } else if (status == train::TrainStatus::running) {
     if (ImGui::Button("Pause") && callbacks.pause)
       callbacks.pause();
-  } else if (ImGui::Button("Resume") && callbacks.resume) {
+  } else if (status == train::TrainStatus::paused &&
+             ImGui::Button("Resume") && callbacks.resume) {
     callbacks.resume();
   }
   ImGui::SameLine();
@@ -237,16 +277,29 @@ void TrainPanel::render(const train::TrainCoordinator &coordinator,
     ImGui::EndDisabled();
 
   ImGui::Separator();
+  if (gates.cloudOffline)
+    ImGui::TextColored(ImVec4(1.0f, 0.72f, 0.25f, 1.0f),
+                       "Offline — reconnecting. The cloud job is still running.");
+  const auto submit = coordinator.getSubmitProgress();
+  if (submit.phase == train::CloudSubmitProgress::Phase::uploading &&
+      submit.bytesTotal > 0)
+    ImGui::Text("Upload %.1f / %.1f MiB",
+                static_cast<double>(submit.bytesSent) / (1024.0 * 1024.0),
+                static_cast<double>(submit.bytesTotal) / (1024.0 * 1024.0));
   const auto statusText = coordinator.getStatusMessage();
   const bool knownShortStatus =
       statusText == "Ready" || statusText == "Training..." ||
       statusText == "Paused" || statusText == "Stopped" ||
-      statusText == "Training succeeded";
+      statusText == "Training succeeded" || statusText == "Queued..." ||
+      statusText == "Packaging..." || statusText == "Uploading..." ||
+      statusText == "Attached cloud job" ||
+      statusText == "Cloud job succeeded";
   const bool showErrorAction =
-      status == train::TrainStatus::failed || !knownShortStatus ||
-      progress.errorMessage.empty() == false;
-  if (showErrorAction && status != train::TrainStatus::running &&
-      status != train::TrainStatus::paused) {
+      status == train::TrainStatus::failed ||
+      (!knownShortStatus && !busy) ||
+      (status == train::TrainStatus::failed &&
+       progress.errorMessage.empty() == false);
+  if (showErrorAction && !busy) {
     ImGui::TextColored(ImVec4(1.0f, 0.35f, 0.35f, 1.0f), "Status: failed");
     ImGui::SameLine();
     if (ImGui::Button("View error") && callbacks.viewError) {
@@ -295,6 +348,25 @@ void TrainPanel::render(const train::TrainCoordinator &coordinator,
   ImGui::TextDisabled("RF-aware crops · RF ≈ %.1f ms",
                       gates.receptiveFieldMilliseconds);
   ImGui::TextDisabled("Train window ≈ %.1f s", gates.trainWindowSeconds);
+
+  if (!gates.cloudCheckpoints.empty()) {
+    ImGui::Separator();
+    ImGui::TextUnformatted("Allendia checkpoints");
+    for (const auto &checkpoint : gates.cloudCheckpoints) {
+      ImGui::PushID(checkpoint.checkpointId.toRawUTF8());
+      ImGui::Text("step %d %s", checkpoint.step,
+                  checkpoint.stage.toRawUTF8());
+      ImGui::SameLine();
+      if (ImGui::SmallButton("Download") && callbacks.downloadCheckpoint)
+        callbacks.downloadCheckpoint(checkpoint.checkpointId);
+      ImGui::PopID();
+    }
+  }
+  if (gates.manualCloudLoadAvailable) {
+    ImGui::TextUnformatted("Success on another machine: download and load manually.");
+    if (ImGui::Button("Download / Load") && callbacks.manualCloudLoad)
+      callbacks.manualCloudLoad();
+  }
 
   if (gates.retryAvailable && ImGui::Button("Retry load") && callbacks.retryLoad)
     callbacks.retryLoad();

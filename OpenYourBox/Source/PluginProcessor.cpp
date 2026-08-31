@@ -1370,6 +1370,16 @@ void OpenYourBoxAudioProcessor::setLastTrainObjective(
   lastTrainObjective = objective;
 }
 
+openyourbox::train::CloudSettings &
+OpenYourBoxAudioProcessor::getCloudSettings() noexcept {
+  return cloudSettings;
+}
+
+const openyourbox::train::CloudSettings &
+OpenYourBoxAudioProcessor::getCloudSettings() const noexcept {
+  return cloudSettings;
+}
+
 void OpenYourBoxAudioProcessor::startPairedRecording() {
   if (!capturePairing.canRecord()) {
     setCaptureStatusMessage("Assign complementary Clean/Processed roles.");

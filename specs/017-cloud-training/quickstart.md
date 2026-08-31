@@ -6,17 +6,18 @@
 ## Prerequisites
 
 - Built OpenYourBox VST/AU with Train / Library working **locally** (004/005 baseline).
-- Cloud API reachable (staging or local `CloudService` with mock/CPU worker + mock entitlement).
-- WordPress storefront (or mock link/entitlement) available for account link and purchase paths.
+- Hosted Allendia cloud training API reachable at the product default
+  (`https://cloud.openyourbox.allendia.com`, or a staging override in `cloud.xml`).
+- Allendia storefront (`https://store.allendia.com`) for account sign-in, verification, and credits.
 - Contracts: `contracts/cloud-train-api.md`, `cloud-train-plugin-ux.md`, `cloud-job-package.md`.
 
 ## Setup
 
 1. Launch DAW → load OpenYourBox.  
-2. Open plugin settings → **Link account** → complete storefront verification → confirm Linked status.  
-3. Ensure entitlement is sufficient (storefront purchase or mock).  
+2. Open Train → **Sign in with Allendia** → complete verification in the browser → confirm Signed in.  
+3. Ensure credits are available (**Manage account** / storefront purchase).  
 4. Prepare a minimal eligible Train setup (armed graph, selected library entries, copyright acknowledged).  
-5. Confirm **Local** Run still works once **without** a linked account (SC-010) — disconnect first if needed.
+5. Confirm **Local** Run still works once **without** signing in (SC-010) — Sign out first if needed.
 
 ## Scenarios
 
@@ -91,12 +92,7 @@ Disconnect network during run → UI shows offline/reconnect; reconnect resumes 
 ## Automated smoke (as implemented)
 
 ```text
-# API / entitlement / retention / concurrency (from repo root, once CloudService tests exist)
-pytest CloudService/tests -q
-# or
-pytest Tests/test_cloud_api.py -q
-
-# Plugin-side client shaping / soft-warn / gate messages (CTest target name TBD in tasks)
+# Plugin-side client shaping / soft-warn / gate messages
 ctest -R CloudTrain -j
 ```
 
