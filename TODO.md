@@ -40,19 +40,9 @@
 - [ ] add depthwise to TCN. and to conv1d? what is it exactly? like groups?
 
 
-- [ ] move parameters from boxes to new tab in right menu
-- [ ] double click on group box to open it (it does not work anymore)
-- [x] from user library or project structure, clicking on an element should open its property panel
-- [x] from project structure, double clicking on a non-group element should go to that element (camera centered on it). double-clicking a group opens its inner canvas
-- [ ] from project structure, dragging an element can move it within the structure, outside a group or in a group. during drag, highlight parent folder/group or new folder it will be added to. highlight by showing bounds of the group, ie a rectangle around its name and content.
-- [ ] from user library, dragging to the canva should enable the user to add to project
-- [ ] now it is very annoying to move a box, I must click on it many times before being able to drag it. clicking on it should directly select it and make it draggable, in one hold click
-- [ ] when I move group boxes they glitch: they can change size, and the randomize button changes size too. the button should be in right property menu.
-- [ ] only keep name and pins on boxes. the rest goes to property menu.
-- [ ] selecting or clicking on a box should open its property menu 
+
 
 - [ ] fix rms levels not showing after groups and from group input, and after deletion of group between audio in->out
-- [ ] allow creating group of one
 - [ ] allow wrong connections and eg insertion of wrong element, cut sound and show warning to change shape parameter if necessary
 
 - [ ] Big v1 rave: noise path should also do Math x1 - 5 → Sigmoid → Math 2 * x1^2.3 + 1e-7?
@@ -62,9 +52,6 @@
 - [x] load last checkpoint of rave: https://github.com/acids-ircam/RAVE/discussions/82 (`specs/015-torchscript-load-node/`)
 
 - [ ] trained boxes should store a list of checkpoints to select from, with "best" one too. 
-
-- [ ] Remove TCN because was reproduced as a group (but macros needed for convenience)
-- [ ] remove linear because it's conv1d with stride=kernel=dilation=1
 
 - [ ] Reproduce NAM neural amp modeler
 - [ ] neural waveshaping synthesis
@@ -77,7 +64,6 @@
   - Latent jamming / prior as a partner. A second net (GRU is the live-cheap one) predicts the next z so you jam with a continuation of the corpus, not a clone of the input. MSPrior (https://github.com/caillonantoine/msprior), Caillon’s semantic-hand demo (https://caillonantoine.github.io/2023/05/16/semantic-control.html). Your audio becomes a suggestion, not a waveform to copy.
 - Latent granular resynthesis: https://arxiv.org/abs/2507.19202
 
-- [ ] moving a box when it is selected with other boxes only moves the one now, whole selection should move together like before 
 
 - [ ] add audio to rms to modulate parameters, revoir tutos touchdesigner sur l'audio réactivité: https://www.youtube.com/@OranginalCreative
 
