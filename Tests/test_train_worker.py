@@ -1633,5 +1633,329 @@ class VariationalBottleneckParityTests(unittest.TestCase):
         self.assertTrue(torch.allclose(silent, torch.zeros_like(silent)))
 
 
+class TrainGraphRecipeTests(unittest.TestCase):
+    """Architecture-agnostic train_graph envelope, bindings, stages, and arming."""
+
+    @staticmethod
+    def _write_wav(path: Path) -> None:
+        samples = [0.05] * 256
+        payload = struct.pack("<" + "f" * len(samples), *samples)
+        fmt = struct.pack("<HHIIHH", 3, 1, 44100, 44100 * 4, 4, 32)
+        riff_size = 4 + (8 + len(fmt)) + (8 + len(payload))
+        path.write_bytes(
+            b"RIFF"
+            + struct.pack("<I", riff_size)
+            + b"WAVEfmt "
+            + struct.pack("<I", len(fmt))
+            + fmt
+            + b"data"
+            + struct.pack("<I", len(payload))
+            + payload
+        )
+
+    @staticmethod
+    def _conv_fragment() -> dict:
+        return {
+            "elements": [
+                {
+                    "id": 1,
+                    "type": "conv1d",
+                    "properties": [
+                        {"key": "channels", "value": 1},
+                        {"key": "kernel_size", "value": 3},
+                        {"key": "stride", "value": 1},
+                        {"key": "dilation", "value": 1},
+                    ],
+                },
+                {
+                    "id": 2,
+                    "type": "conv1d",
+                    "properties": [
+                        {"key": "channels", "value": 1},
+                        {"key": "kernel_size", "value": 3},
+                        {"key": "stride", "value": 1},
+                        {"key": "dilation", "value": 1},
+                    ],
+                },
+                {
+                    "id": 10,
+                    "type": "data_loader",
+                    "properties": [{"key": "output_count", "value": 2}],
+                },
+                {
+                    "id": 20,
+                    "type": "loss",
+                    "properties": [
+                        {"key": "loss_type", "value": 0},
+                    ],
+                },
+                {
+                    "id": 21,
+                    "type": "loss",
+                    "properties": [
+                        {"key": "loss_type", "value": 0},
+                    ],
+                },
+            ],
+            "connections": [
+                {"source_element_id": 1, "destination_element_id": 2},
+            ],
+        }
+
+    def test_train_graph_rejects_empty_schedule_without_losses(self) -> None:
+        """Empty loss_schedule without Loss nodes must fail instead of mapping."""
+        with self.assertRaisesRegex(ValueError, "loss_schedule"):
+            train_worker.train_request(
+                {
+                    "request_id": "graph-empty",
+                    "operation": "train_graph",
+                    "schema_version": 2,
+                    "graph_fragment": {"elements": [], "connections": []},
+                    "data_loader_bindings": {},
+                    "loss_schedule": {"stages": []},
+                    "train_options": {"total_steps": 1, "device": "cpu"},
+                },
+                Path("/tmp"),
+                None,
+            )
+
+    def test_train_graph_zips_bindings_and_emits_stages(self) -> None:
+        """Bindings zip by index; weighted stages appear on progress events."""
+        fragment = self._conv_fragment()
+        with tempfile.TemporaryDirectory() as tmp:
+            x_a = Path(tmp) / "x_a.wav"
+            x_b = Path(tmp) / "x_b.wav"
+            y_a = Path(tmp) / "y_a.wav"
+            y_b = Path(tmp) / "y_b.wav"
+            for path in (x_a, x_b, y_a, y_b):
+                self._write_wav(path)
+            events: list[dict] = []
+            original = train_worker._emit
+
+            def _capture(event):
+                events.append(event)
+
+            train_worker._emit = _capture
+            try:
+                result = train_worker.train_request(
+                    {
+                        "request_id": "graph-zip",
+                        "operation": "train_graph",
+                        "schema_version": 2,
+                        "active_data_loader_id": "10",
+                        "armed_element_ids": [1, 2],
+                        "graph_fragment": fragment,
+                        "data_loader_bindings": {
+                            "10": {
+                                "0": {
+                                    "kind": "audio_list",
+                                    "items": [
+                                        {"path": str(x_a)},
+                                        {"path": str(x_b)},
+                                    ],
+                                },
+                                "1": {
+                                    "kind": "audio_list",
+                                    "items": [
+                                        {"path": str(y_a)},
+                                        {"path": str(y_b)},
+                                        {"path": str(y_a)},
+                                    ],
+                                },
+                            }
+                        },
+                        "loss_schedule": {
+                            "stages": [
+                                {
+                                    "name": "representation",
+                                    "steps": 1,
+                                    "losses": [
+                                        {"loss_node_id": 20, "weight": 1.0},
+                                    ],
+                                },
+                                {
+                                    "name": "quality",
+                                    "steps": 1,
+                                    "losses": [
+                                        {"loss_node_id": 21, "weight": 2.0},
+                                    ],
+                                },
+                            ]
+                        },
+                        "train_options": {
+                            "total_steps": 2,
+                            "segment_length": 64,
+                            "device": "cpu",
+                            "cond_dim": 2,
+                            "host_input_channels": 1,
+                            "loss": {
+                                "fft_sizes": [32, 64],
+                                "win_lengths": [32, 64],
+                                "hop_sizes": [8, 16],
+                            },
+                        },
+                    },
+                    Path(tmp),
+                    None,
+                )
+            finally:
+                train_worker._emit = original
+            self.assertEqual(result["status"], "success")
+            self.assertEqual(result["step"], 2)
+            stages = [event.get("stage") for event in events if event.get("stage")]
+            self.assertIn("representation", stages)
+            self.assertIn("quality", stages)
+            self.assertTrue((Path(tmp) / "graph-zip.pt").is_file())
+
+    def test_train_graph_freezes_unarmed_parameters(self) -> None:
+        """Unarmed on-path layers must not receive gradient updates."""
+        fragment = self._conv_fragment()
+        with tempfile.TemporaryDirectory() as tmp:
+            x_wav = Path(tmp) / "x.wav"
+            y_wav = Path(tmp) / "y.wav"
+            self._write_wav(x_wav)
+            self._write_wav(y_wav)
+            module = train_worker.build_module(fragment, 1, 2)
+            before = {
+                name: tensor.detach().clone()
+                for name, tensor in module.state_dict().items()
+            }
+            original_build = train_worker.build_module
+            original_emit = train_worker._emit
+            train_worker.build_module = lambda *_args, **_kwargs: module
+            train_worker._emit = lambda _event: None
+            try:
+                train_worker.train_request(
+                    {
+                        "request_id": "graph-arm",
+                        "operation": "train_graph",
+                        "armed_element_ids": [1],
+                        "graph_fragment": fragment,
+                        "data_loader_bindings": {
+                            "10": {
+                                "0": {
+                                    "kind": "audio_list",
+                                    "items": [{"path": str(x_wav)}],
+                                },
+                                "1": {
+                                    "kind": "audio_list",
+                                    "items": [{"path": str(y_wav)}],
+                                },
+                            }
+                        },
+                        "loss_schedule": {
+                            "stages": [
+                                {
+                                    "name": "train",
+                                    "steps": 2,
+                                    "losses": [{"loss_node_id": 20, "weight": 1.0}],
+                                }
+                            ]
+                        },
+                        "train_options": {
+                            "segment_length": 64,
+                            "device": "cpu",
+                            "cond_dim": 2,
+                            "loss": {
+                                "fft_sizes": [32],
+                                "win_lengths": [32],
+                                "hop_sizes": [8],
+                            },
+                        },
+                    },
+                    Path(tmp),
+                    None,
+                )
+            finally:
+                train_worker.build_module = original_build
+                train_worker._emit = original_emit
+            after = module.state_dict()
+            changed = []
+            unchanged = []
+            for name, tensor in before.items():
+                delta = (after[name] - tensor).abs().sum().item()
+                if name.startswith("layers.0"):
+                    changed.append(delta)
+                if name.startswith("layers.1"):
+                    unchanged.append(delta)
+            self.assertTrue(any(value > 0 for value in changed))
+            self.assertTrue(all(value == 0 for value in unchanged))
+
+    def test_train_graph_stage_freeze_element_ids(self) -> None:
+        """Per-stage freeze_element_ids must stop grads on listed armed layers."""
+        fragment = self._conv_fragment()
+        with tempfile.TemporaryDirectory() as tmp:
+            x_wav = Path(tmp) / "x.wav"
+            y_wav = Path(tmp) / "y.wav"
+            self._write_wav(x_wav)
+            self._write_wav(y_wav)
+            module = train_worker.build_module(fragment, 1, 2)
+            before = {
+                name: tensor.detach().clone()
+                for name, tensor in module.state_dict().items()
+            }
+            original_build = train_worker.build_module
+            original_emit = train_worker._emit
+            train_worker.build_module = lambda *_args, **_kwargs: module
+            train_worker._emit = lambda _event: None
+            try:
+                train_worker.train_request(
+                    {
+                        "request_id": "graph-stage-freeze",
+                        "operation": "train_graph",
+                        "armed_element_ids": [1, 2],
+                        "graph_fragment": fragment,
+                        "data_loader_bindings": {
+                            "10": {
+                                "0": {
+                                    "kind": "audio_list",
+                                    "items": [{"path": str(x_wav)}],
+                                },
+                                "1": {
+                                    "kind": "audio_list",
+                                    "items": [{"path": str(y_wav)}],
+                                },
+                            }
+                        },
+                        "loss_schedule": {
+                            "stages": [
+                                {
+                                    "name": "freeze-first",
+                                    "steps": 2,
+                                    "losses": [{"loss_node_id": 20, "weight": 1.0}],
+                                    "freeze_element_ids": [1],
+                                }
+                            ]
+                        },
+                        "train_options": {
+                            "segment_length": 64,
+                            "device": "cpu",
+                            "cond_dim": 2,
+                            "loss": {
+                                "fft_sizes": [32],
+                                "win_lengths": [32],
+                                "hop_sizes": [8],
+                            },
+                        },
+                    },
+                    Path(tmp),
+                    None,
+                )
+            finally:
+                train_worker.build_module = original_build
+                train_worker._emit = original_emit
+            after = module.state_dict()
+            frozen_delta = []
+            trained_delta = []
+            for name, tensor in before.items():
+                delta = (after[name] - tensor).abs().sum().item()
+                if name.startswith("layers.0"):
+                    frozen_delta.append(delta)
+                if name.startswith("layers.1"):
+                    trained_delta.append(delta)
+            self.assertTrue(all(value == 0 for value in frozen_delta))
+            self.assertTrue(any(value > 0 for value in trained_delta))
+
+
 if __name__ == "__main__":
     unittest.main()

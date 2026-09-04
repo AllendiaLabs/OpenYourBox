@@ -48,7 +48,7 @@ struct CloudJobPackage {
 
 /**
  * @brief Builds a cloud job package from a local train request and library.
- * @param localRequest Local `train_steerable` JSON already assembled for Run.
+ * @param localRequest Local `train_graph` JSON already assembled for Run.
  * @param library Training library (selected entries supply audio bytes).
  * @param clientInstanceId Submitter instance id written into the manifest.
  * @param pluginVersion Plugin version string.

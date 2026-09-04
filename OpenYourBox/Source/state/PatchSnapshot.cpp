@@ -70,7 +70,8 @@ std::unique_ptr<juce::XmlElement> PatchSnapshot::toXml() const {
     xml = std::make_unique<juce::XmlElement>(openyourbox::params::stateType);
   xml->setAttribute("schemaVersion", schemaVersion);
   xml->setAttribute("randomizationCounter", juce::String(randomizationCounter));
-  xml->setAttribute("lastTrainObjective", lastTrainObjective);
+  if (trainConfigJson.isNotEmpty())
+    xml->setAttribute("trainConfigJson", trainConfigJson);
   if (hasWeights) {
     xml->setAttribute("architectureHash", architectureHash);
     xml->setAttribute("weights", weightsBlob.toBase64Encoding());
@@ -106,8 +107,7 @@ std::optional<PatchSnapshot> PatchSnapshot::fromXml(const juce::XmlElement &xml)
   snapshot.parameterState = std::move(restored);
   snapshot.randomizationCounter = static_cast<std::uint64_t>(
       xml.getStringAttribute("randomizationCounter", "0").getLargeIntValue());
-  snapshot.lastTrainObjective =
-      xml.getStringAttribute("lastTrainObjective", "mapping");
+  snapshot.trainConfigJson = xml.getStringAttribute("trainConfigJson");
   snapshot.architectureHash = xml.getStringAttribute("architectureHash");
   if (xml.hasAttribute("weights")) {
     snapshot.hasWeights =

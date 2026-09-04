@@ -1,5 +1,6 @@
 #pragma once
 
+#include "../library/TrainingConfigLibrary.h"
 #include "../graph/GraphTypes.h"
 #include "../train/CloudTrainClient.h"
 #include "../train/TrainCoordinator.h"
@@ -86,8 +87,17 @@ public:
     std::function<void()> openStorefront;
     /** @brief Download a remote checkpoint for hear-while-training. */
     std::function<void(const juce::String &)> downloadCheckpoint;
-    /** @brief Non-submitter manual Gold load after cloud success. */
+    /** @brief Persist current train settings on the project snapshot. */
+    std::function<void(const juce::var &)> saveProjectConfig;
+    /** @brief Active Data Loader picker changed. */
+    std::function<void(std::int32_t)> activeDataLoaderChanged;
+    /** @brief Download and load a cloud artifact from another machine. */
     std::function<void()> manualCloudLoad;
+    /**
+     * @brief Load a shipped example template (`mapping` or `reconstruction`).
+     * Loads the companion graph and training-config example; not a Train mode.
+     */
+    std::function<void(const juce::String &)> loadExampleTemplate;
   };
 
   /** @brief Snapshot of Train enablement gates. */
@@ -118,10 +128,30 @@ public:
     bool retryAvailable = false;
     /** @brief Mapping is blocked because unpaired clips are selected. */
     bool unpairedSelected = false;
-    /** @brief Reconstruction graph is missing bottleneck/decode path. */
-    bool reconstructionPathInvalid = false;
-    /** @brief Reconstruction gate text. */
-    juce::String reconstructionReason;
+    /** @brief Data Loader nodes on the canvas (id, label) for the active picker. */
+    std::vector<std::pair<std::int32_t, juce::String>> dataLoaders;
+    /** @brief Loss nodes on the canvas (id, label) for the stage editor. */
+    std::vector<std::pair<std::int32_t, juce::String>> lossNodes;
+    /**
+     * @brief One row in the per-stage freeze structure tree (project structure).
+     */
+    struct FreezeStructureNode {
+      /** @brief Graph node or group id. */
+      std::int32_t id = 0;
+      /** @brief Display label. */
+      juce::String label;
+      /** @brief True when this row is a group container. */
+      bool isGroup = false;
+      /**
+       * @brief Leaf: currently armed. Group: any armed armable leaf under it.
+       * Disarmed armable leaves are force-frozen (checked, gray, disabled).
+       */
+      bool armedForTraining = false;
+      /** @brief Ordered children for groups. */
+      std::vector<FreezeStructureNode> children;
+    };
+    /** @brief Root freeze-tree rows mirroring Project Structure. */
+    std::vector<FreezeStructureNode> freezeStructure;
     /** @brief Platform account is linked. */
     bool cloudLinked = false;
     /** @brief Last entitlement probe is insufficient. */
@@ -152,6 +182,31 @@ public:
 
   /** @brief Recipe values edited in the panel and read when Run is pressed. */
   Hyperparameters hyperparameters;
+  /** @brief One Loss box selected for a stage, with its schedule weight. */
+  struct LossStageEntry {
+    /** @brief Canvas Loss node id. */
+    std::int32_t lossNodeId = 0;
+    /** @brief Multiplier applied to that Loss during the stage. */
+    float weight = graph::defaultLossWeight;
+  };
+
+  /**
+   * @brief Ordered loss stage schedule (empty = single stage of all wired losses).
+   */
+  struct LossStageDraft {
+    /** @brief Optional stage name. */
+    char name[64]{};
+    /** @brief Stage duration in optimizer steps. */
+    int steps = 1000;
+    /** @brief Losses participating in this stage (weights live here, not on the box). */
+    std::vector<LossStageEntry> losses;
+    /**
+     * @brief Element ids frozen for this stage (no grad); unarmed leaves stay listed.
+     */
+    std::vector<std::int32_t> freezeElementIds;
+  };
+  /** @brief User-edited multi-stage schedule; empty means use total_steps. */
+  std::vector<LossStageDraft> lossStages;
   /** @brief When true, live audio swaps in exported training checkpoints. */
   bool hearWhileTraining = false;
   /** @brief When true, the train worker logs the run to an MLflow server. */
@@ -162,9 +217,28 @@ public:
   char mlflowExperiment[128]{};
   /** @brief Optional MLflow run name; empty lets the server assign one. */
   char mlflowRunName[64]{};
-  /** @brief Last-used Train objective for this plug-in instance. */
-  graph::TrainObjective objective = graph::TrainObjective::mapping;
   /** @brief Last-used Local vs Allendia destination (default local). */
   graph::TrainDestination destination = graph::TrainDestination::local;
+  /** @brief Active Data Loader node id for the next Run, or 0 when unset. */
+  std::int32_t activeDataLoaderId = 0;
+
+  /**
+   * @brief Serializes the current HP + stage editor to a JSON object.
+   */
+  [[nodiscard]] juce::var captureConfig() const;
+
+  /**
+   * @brief Applies recognized config fields; unknown keys are ignored.
+   * @param config JSON object.
+   * @return True when any recognized field was missing and defaults were used.
+   */
+  bool applyConfig(const juce::var &config);
+
+  /** @brief User-level training-config catalog. */
+  library::TrainingConfigLibrary configLibrary;
+  /** @brief Save-as name buffer. */
+  char configName[128]{"untitled"};
+  /** @brief Warning shown after a forward-compatible load. */
+  juce::String configLoadWarning;
 };
 } // namespace openyourbox::ui

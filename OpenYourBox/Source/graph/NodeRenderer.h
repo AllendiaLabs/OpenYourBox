@@ -1,6 +1,7 @@
 #pragma once
 
 #include "NodeGraph.h"
+#include "../library/TrainingLibrary.h"
 #include "../library/UserBoxLibrary.h"
 #include "../ui/UserBoxLibraryPanel.h"
 
@@ -121,6 +122,15 @@ public:
    */
   void inspectLibraryEntry(const juce::String &entryId,
                            std::int32_t nestedRootId);
+
+  /** @brief True while the Train tab is the active right-menu page. */
+  bool trainTabActive = false;
+  /** @brief Nodes on the active Data Loader training path. */
+  std::unordered_set<std::int32_t> trainOnPathNodeIds;
+  /** @brief Armed trainable nodes on that path. */
+  std::unordered_set<std::int32_t> trainArmedOnPathNodeIds;
+  /** @brief Training Library used by Data Loader binding pickers, or null. */
+  openyourbox::library::TrainingLibrary *trainingLibrary = nullptr;
 
 private:
   /**

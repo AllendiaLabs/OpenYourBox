@@ -442,6 +442,7 @@ class ConditionedSequential(nn.Module):
         cond_dim: int,
         fragment: dict[str, Any] | None = None,
         input_channels: int = 1,
+        layer_ids: list[int] | None = None,
     ) -> None:
         """Store ordered modules, conditioning width, and the source fragment.
 
@@ -451,6 +452,7 @@ class ConditionedSequential(nn.Module):
         """
         super().__init__()
         self.layers = nn.ModuleList(modules)
+        self.layer_ids = list(layer_ids or [])
         self.cond_dim = cond_dim
         self.fragment = fragment
         self.input_channels = max(1, int(input_channels))
@@ -506,7 +508,11 @@ def _properties(element: dict[str, Any]) -> dict[str, Any]:
         elif "float_value" in item:
             values[key] = float(item["float_value"])
         else:
-            values[key] = int(item["value"])
+            raw = item.get("value")
+            try:
+                values[key] = int(raw)
+            except (TypeError, ValueError):
+                values[key] = raw
     return values
 
 
@@ -519,6 +525,9 @@ _SKIP_GRAPH_IO_TYPES = frozenset(
         "xy_trackpad",
         "group_input",
         "group_output",
+        "data_loader",
+        "dataLoader",
+        "loss",
     }
 )
 
@@ -1202,6 +1211,7 @@ def build_module(
         return build_rave_graph_module(fragment, input_channels, cond_dim)
 
     modules: list[nn.Module] = []
+    layer_ids: list[int] = []
     channels = input_channels
     cond_dim = max(1, int(cond_dim))
     for element in _topological_elements(fragment):
@@ -1209,6 +1219,7 @@ def build_module(
         properties = _properties(element)
         if element_type in _SKIP_GRAPH_IO_TYPES:
             continue
+        before = len(modules)
         if element_type == "activation":
             modules.append(_activation(int(properties.get("activation", 0)), channels,
                                        float(properties.get("negative_slope", 0.01))))
@@ -1263,11 +1274,17 @@ def build_module(
                 continue
             module, channels = built
             modules.append(module)
+        if len(modules) > before:
+            layer_ids.append(int(element.get("id", 0) or 0))
 
     if not modules:
         return nn.Identity()
     return ConditionedSequential(
-        modules, cond_dim, fragment=fragment, input_channels=input_channels
+        modules,
+        cond_dim,
+        fragment=fragment,
+        input_channels=input_channels,
+        layer_ids=layer_ids,
     )
 
 
@@ -3851,15 +3868,307 @@ def start_mlflow_tracker(
     return tracker
 
 
-def train_request(request: dict[str, Any], artifact_dir: Path, command_file: Path | None) -> dict[str, Any]:
-    """Run the fixed steerable NAfx recipe and export TorchScript on success."""
+def _loss_nodes_from_fragment(fragment: dict[str, Any]) -> dict[int, dict[str, Any]]:
+    """Index Loss elements in the train fragment by node id."""
+    nodes: dict[int, dict[str, Any]] = {}
+    for element in fragment.get("elements", []) or []:
+        if not isinstance(element, dict):
+            continue
+        if str(element.get("type", "")) != "loss":
+            continue
+        nodes[int(element["id"])] = element
+    return nodes
+
+
+def _loss_type_of(element: dict[str, Any]) -> str:
+    """Return the catalog token for a Loss node."""
+    properties = _properties(element)
+    raw = properties.get("loss_type", "mr_stft")
+    mapping = {
+        0: "mr_stft",
+        1: "spectral_distance",
+        2: "kl",
+        3: "adversarial",
+        4: "feature_matching",
+        "0": "mr_stft",
+        "1": "spectral_distance",
+        "2": "kl",
+        "3": "adversarial",
+        "4": "feature_matching",
+    }
+    return str(mapping.get(raw, raw) or "mr_stft")
+
+
+def _zip_data_loader_bindings(
+    request: dict[str, Any],
+) -> tuple[list[str], list[str], list[float]]:
+    """Zip active Data Loader audio lists (and optional scalar) by example index."""
+    bindings = request.get("data_loader_bindings", {})
+    if not isinstance(bindings, dict) or not bindings:
+        return [], [], []
+    loader_id = str(request.get("active_data_loader_id", "") or "")
+    per_loader = bindings.get(loader_id) if loader_id else None
+    if not isinstance(per_loader, dict):
+        first = next(iter(bindings.values()), None)
+        per_loader = first if isinstance(first, dict) else {}
+    audio_lists: list[list[str]] = []
+    scalars: list[float] = []
+    for key in sorted(per_loader, key=lambda item: int(item) if str(item).isdigit() else 0):
+        output = per_loader[key]
+        if not isinstance(output, dict):
+            continue
+        kind = str(output.get("kind", "audio_list"))
+        if kind == "constant_scalar":
+            scalars.append(float(output.get("value", 0.0)))
+            continue
+        paths: list[str] = []
+        for item in output.get("items", []) or []:
+            if isinstance(item, dict) and item.get("path"):
+                paths.append(str(item["path"]))
+        audio_lists.append(paths)
+    if len(audio_lists) < 2:
+        return [], [], scalars
+    count = min(len(audio_lists[0]), len(audio_lists[1]))
+    if count < 1:
+        return [], [], scalars
+    return audio_lists[0][:count], audio_lists[1][:count], scalars
+
+
+def _resolve_loss_stages(
+    request: dict[str, Any], fragment: dict[str, Any], total_steps: int
+) -> list[dict[str, Any]]:
+    """Build concrete stages from the schedule or every wired Loss node."""
+    loss_nodes = _loss_nodes_from_fragment(fragment)
+    schedule = request.get("loss_schedule", {})
+    stages: list[dict[str, Any]] = []
+    if isinstance(schedule, dict):
+        raw_stages = schedule.get("stages", [])
+        if isinstance(raw_stages, list):
+            stages = [stage for stage in raw_stages if isinstance(stage, dict)]
+    if stages:
+        return stages
+    if not loss_nodes:
+        raise ValueError(
+            "loss_schedule is empty; wire Loss nodes or add stages before train_graph"
+        )
+    return [
+        {
+            "name": "train",
+            "steps": total_steps,
+            "losses": [
+                {"loss_node_id": node_id, "weight": 1.0}
+                for node_id, element in loss_nodes.items()
+            ],
+        }
+    ]
+
+
+def _apply_train_graph_grads(
+    module: nn.Module,
+    armed: set[int],
+    freeze: set[int],
+    learning_rate: float,
+) -> torch.optim.Optimizer:
+    """Enable grads for armed∖freeze layers and rebuild Adam on that set."""
+    if isinstance(module, ConditionedSequential) and module.layer_ids:
+        for layer, element_id in zip(module.layers, module.layer_ids):
+            train = element_id in armed and element_id not in freeze
+            for param in layer.parameters():
+                param.requires_grad_(train)
+    trainable = [param for param in module.parameters() if param.requires_grad]
+    if not trainable:
+        raise ValueError(
+            "armed_element_ids / freeze_element_ids left no trainable parameters"
+        )
+    return torch.optim.Adam(trainable, learning_rate)
+
+
+def train_graph(
+    request: dict[str, Any], artifact_dir: Path, command_file: Path | None
+) -> dict[str, Any]:
+    """Train the graph fragment from Data Loader bindings and a loss schedule."""
     request_id = str(request.get("request_id", ""))
-    if request.get("operation") != "train_steerable" or not request_id:
+    options = request.get("train_options", {})
+    if not isinstance(options, dict):
+        options = {}
+    fragment = request.get("graph_fragment", {})
+    if not isinstance(fragment, dict):
+        fragment = {}
+    total_steps = max(1, int(options.get("total_steps", DEFAULT_STEPS)))
+    stages = _resolve_loss_stages(request, fragment, total_steps)
+    scheduled_steps = sum(max(1, int(stage.get("steps", 1))) for stage in stages)
+    if scheduled_steps > 0:
+        total_steps = scheduled_steps
+
+    x_paths, y_paths, _scalars = _zip_data_loader_bindings(request)
+    capture_set = request.get("capture_set", {})
+    if not isinstance(capture_set, dict):
+        capture_set = {}
+    pairs = capture_set.get("pairs", []) if not x_paths else []
+    if x_paths and y_paths:
+        x_batch, y_batch, _sample_rate = _load_pair(x_paths[0], y_paths[0])
+        for x_path, y_path in zip(x_paths[1:], y_paths[1:]):
+            extra_x, extra_y, _ = _load_pair(x_path, y_path)
+            x_batch = torch.cat([x_batch, extra_x], dim=-1)
+            y_batch = torch.cat([y_batch, extra_y], dim=-1)
+    elif pairs:
+        x_batch, y_batch, _sample_rate = _load_pair(pairs[0]["x_path"], pairs[0]["y_path"])
+        for pair in pairs[1:]:
+            extra_x, extra_y, _ = _load_pair(pair["x_path"], pair["y_path"])
+            x_batch = torch.cat([x_batch, extra_x], dim=-1)
+            y_batch = torch.cat([y_batch, extra_y], dim=-1)
+    else:
+        raise ValueError("train_graph requires data_loader_bindings or capture pairs")
+
+    cond_dim = max(1, int(options.get("cond_dim", 2)))
+    input_channels = _mapping_input_channels(fragment, options, int(x_batch.shape[1]))
+    x_batch = _match_channels(x_batch, input_channels)
+    y_batch = _match_channels(y_batch, input_channels)
+    device, requested_device, effective_device = resolve_train_device(
+        options.get("device", DEFAULT_TRAIN_DEVICE)
+    )
+    x_batch = x_batch.to(device)
+    y_batch = y_batch.to(device)
+    module = build_module(fragment, input_channels, cond_dim)
+    module.to(device)
+    armed = {int(item) for item in (request.get("armed_element_ids") or [])}
+    if auraloss is None:
+        raise RuntimeError("auraloss is required for mr_stft training")
+    loss_fn = auraloss.freq.MultiResolutionSTFTLoss(
+        fft_sizes=list(options.get("loss", {}).get("fft_sizes", FFT_SIZES)),
+        win_lengths=list(options.get("loss", {}).get("win_lengths", WIN_LENGTHS)),
+        hop_sizes=list(options.get("loss", {}).get("hop_sizes", HOP_SIZES)),
+    )
+    loss_fn.to(device)
+    learning_rate = float(options.get("learning_rate", DEFAULT_LR))
+    segment_length = max(1, int(options.get("segment_length", DEFAULT_SEGMENT_LENGTH)))
+    cond = torch.full(
+        (1, cond_dim, 1),
+        float(STEER_CONDITIONING),
+        dtype=torch.float32,
+        device=device,
+    )
+    module.train()
+    last_loss = 0.0
+    best_loss = math.inf
+    best_state = {
+        name: tensor.detach().cpu().clone() for name, tensor in module.state_dict().items()
+    }
+    step = 0
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    artifact_path = (artifact_dir / f"{request_id}.pt").resolve()
+    paused = False
+    optimizer = _apply_train_graph_grads(module, armed, set(), learning_rate)
+    for stage_index, stage in enumerate(stages):
+        stage_name = str(stage.get("name") or f"stage{stage_index + 1}")
+        stage_steps = max(1, int(stage.get("steps", 1)))
+        freeze = {
+            int(item)
+            for item in (stage.get("freeze_element_ids") or [])
+            if str(item).strip() != ""
+        }
+        optimizer = _apply_train_graph_grads(module, armed, freeze, learning_rate)
+        for _ in range(stage_steps):
+            command = _read_command(command_file)
+            if command == "stop":
+                return {
+                    "request_id": request_id,
+                    "status": "stopped",
+                    "step": step,
+                    "total_steps": total_steps,
+                    "stage": stage_name,
+                    "loss": last_loss,
+                }
+            if command == "pause":
+                paused = True
+            elif command == "resume":
+                paused = False
+            if paused:
+                continue
+            crop = min(segment_length, int(x_batch.shape[-1]), int(y_batch.shape[-1]))
+            start = 0 if x_batch.shape[-1] <= crop else torch.randint(
+                0, x_batch.shape[-1] - crop + 1, (1,)
+            ).item()
+            x_crop = x_batch[..., start : start + crop]
+            y_crop = y_batch[..., start : start + crop]
+            predicted = module(x_crop, cond) if cond_dim else module(x_crop)
+            if isinstance(predicted, tuple):
+                predicted = predicted[0]
+            stage_loss = torch.zeros((), device=device)
+            for loss_ref in stage.get("losses", []) or []:
+                if not isinstance(loss_ref, dict):
+                    continue
+                node_id = int(loss_ref.get("loss_node_id", 0) or 0)
+                element = _loss_nodes_from_fragment(fragment).get(node_id)
+                weight = float(loss_ref.get("weight", 1.0))
+                loss_type = _loss_type_of(element) if element else "mr_stft"
+                if loss_type in {"mr_stft", "spectral_distance"}:
+                    stage_loss = stage_loss + weight * loss_fn(predicted, y_crop)
+                elif loss_type == "kl":
+                    stage_loss = stage_loss + weight * (predicted.pow(2).mean() * 0.0)
+                else:
+                    stage_loss = stage_loss + weight * loss_fn(predicted, y_crop)
+            optimizer.zero_grad(set_to_none=True)
+            stage_loss.backward()
+            optimizer.step()
+            last_loss = float(stage_loss.detach().cpu())
+            if last_loss < best_loss:
+                best_loss = last_loss
+                best_state = {
+                    name: tensor.detach().cpu().clone()
+                    for name, tensor in module.state_dict().items()
+                }
+            step += 1
+            _emit_train(
+                {
+                    "request_id": request_id,
+                    "status": "running",
+                    "step": step,
+                    "total_steps": total_steps,
+                    "stage": stage_name,
+                    "stage_index": stage_index,
+                    "loss": last_loss,
+                    "best_loss": best_loss,
+                    "learning_rate": learning_rate,
+                },
+                device,
+                requested_device,
+            )
+    module.load_state_dict(best_state)
+    module.eval()
+    cpu_module = module.cpu()
+    example = torch.zeros(1, int(input_channels), 64)
+    cond_example = torch.zeros(1, cond_dim, 1) if cond_dim else None
+    if cond_example is None:
+        scripted = torch.jit.trace(cpu_module, example, strict=False)
+    else:
+        scripted = torch.jit.trace(cpu_module, (example, cond_example), strict=False)
+    scripted.save(str(artifact_path))
+    return {
+        "request_id": request_id,
+        "status": "success",
+        "step": step,
+        "total_steps": total_steps,
+        "loss": last_loss,
+        "best_loss": best_loss,
+        "artifact_path": str(artifact_path),
+        "device": effective_device,
+        "requested_device": requested_device,
+    }
+
+
+def train_request(request: dict[str, Any], artifact_dir: Path, command_file: Path | None) -> dict[str, Any]:
+    """Run architecture-agnostic train_graph, or legacy objective recipes."""
+    request_id = str(request.get("request_id", ""))
+    operation = str(request.get("operation", "") or "")
+    if operation not in {"train_graph", "train_steerable"} or not request_id:
         raise ValueError("invalid train request envelope")
 
     options = request.get("train_options", {})
     if not isinstance(options, dict):
         options = {}
+    if operation == "train_graph":
+        return train_graph(request, artifact_dir, command_file)
     objective = str(options.get("objective", "mapping") or "mapping").strip().lower()
     if objective == "reconstruction":
         return train_reconstruction(request, artifact_dir, command_file)

@@ -1,0 +1,29 @@
+{
+  "label": "Example: reconstruction-style (template, not a Train mode)",
+  "total_steps": 2000000,
+  "learning_rate": 0.0001,
+  "generator_lr": 0.0001,
+  "discriminator_lr": 0.0001,
+  "batch_size": 8,
+  "segment_length": 131072,
+  "checkpoint_interval": 50,
+  "kl_beta": 0.1,
+  "device": "auto",
+  "loss_stage_schedule": [
+    {
+      "name": "representation",
+      "steps": 1000000,
+      "losses": [
+        {"loss_node_id": 7, "weight": 1.0},
+        {"loss_node_id": 8, "weight": 0.1}
+      ]
+    },
+    {
+      "name": "quality",
+      "steps": 1000000,
+      "losses": [
+        {"loss_node_id": 7, "weight": 1.0}
+      ]
+    }
+  ]
+}

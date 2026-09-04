@@ -77,8 +77,8 @@ TrainingConfiguration ──user library──► TrainingConfigLibrary
 | Coexistence | May share destination with one live cable | Live vs train selection by runtime |
 
 **Connection rules**:
-- ALLOW: destination is external/inference (Audio In → processing pin, Knob, XY Trackpad, similar).
-- REFUSE: destination already driven by upstream processing node (internal feed).
+- ALLOW: empty pin; pin fed by Audio In or group-input hub; Loss **target**.
+- REFUSE: pin driven by upstream processing; Loss **prediction**; Audio Out; another Data Loader.
 - Live playback ignores these cables.
 
 ---
@@ -100,9 +100,8 @@ TrainingConfiguration ──user library──► TrainingConfigLibrary
 | `id` | ElementId | |
 | `type` | `"loss"` | Or typed subtypes; see catalog |
 | `loss_type` | enum | `mr_stft` \| `spectral_distance` \| `kl` \| `adversarial` \| `feature_matching` |
-| `weight` | float ≥ 0 | Default contribution in single-stage / when schedule omits override |
-| `properties` | typed map | FFT sizes, windows, etc. |
-| Pins | prediction / target (as required by type) | User wires architecture outputs + Data Loader targets |
+| `properties` | typed map | FFT sizes, windows, etc. — **no `weight`** |
+| Pins | prediction (0) / target (1) | Live→prediction only; Data Loader→target only |
 | Training-only | bool | Ignored live |
 
 **Validation at Start**:
@@ -117,7 +116,7 @@ TrainingConfiguration ──user library──► TrainingConfigLibrary
 | Field | Type | Notes |
 |-------|------|-------|
 | `stages[]` | LossStage | Ordered |
-| Empty / absent | Implicit single stage: all wired losses × their node weights for `total_steps` | |
+| Empty / absent | Implicit single stage: all wired losses at weight **1.0** for `total_steps` | |
 
 ### LossStage
 
@@ -125,7 +124,8 @@ TrainingConfiguration ──user library──► TrainingConfigLibrary
 |-------|------|-------|
 | `name` | string optional | e.g. representation, quality |
 | `steps` | int > 0 | Stage duration |
-| `losses[]` | `{ loss_node_id, weight? }` | Active set; weight overrides node default when set |
+| `losses[]` | `{ loss_node_id, weight }` | Active set; **weight required** (defaults to 1.0 if omitted) |
+| `freeze_element_ids[]` | ElementId[] | Optional; armed layers listed here get `requires_grad=False` for this stage only |
 
 ---
 
@@ -211,7 +211,7 @@ Assembled at Start for local and cloud (see `contracts/generalized-train-ipc.md`
 |------|--------|
 | Min members | **1** (was 2) |
 | Audio I/O | Still excluded |
-| Hubs | Unchanged |
+| Hubs | Dedupe by `(kind, memberPinId)` — shared live + Data Loader on one pin → **one** input hub |
 
 ---
 

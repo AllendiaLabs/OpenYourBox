@@ -20,8 +20,10 @@ Describe Train tab / panel behavior after removing architecture modes: active Da
 ## Hyperparameter surface
 
 - Single general editor covering settings formerly split across mapping vs reconstruction UIs (steps or stage steps, LRs, segment, batch, device, checkpoint/export, RF crop, adversarial helpers, etc.).
-- Loss **stage schedule** editor (optional): ordered stages with steps and loss refs/weights.
+- Loss **stage schedule** editor (optional): ordered stages with steps and, for each included Loss, a **weight** (edited in the stage row—not on the Loss box).
+- Per-stage **Freeze** tree (collapsed by default): armable elements only; disarmed force-frozen gray; group check cascades; mixed parent state when children differ.
 - Save / Load to **user training-config library**; keep/restore **project snapshot**.
+- Config JSON: `loss_stage_schedule[].losses[{ loss_node_id, weight }]` and optional `freeze_element_ids` (accept legacy `loss_node_ids` as weight 1.0).
 
 ## Arm & Train-tab visuals
 
@@ -44,6 +46,7 @@ Describe Train tab / panel behavior after removing architecture modes: active Da
 ## Group of one / palette
 
 - Not Train-panel-specific, but same production pass: group menu allows one allowed box; palette omits TCN and Linear.
+- Shared Audio In + Data Loader on one member pin → one group input hub (see `data-loader-graph-ui.md`).
 
 ## Implementation anchors
 

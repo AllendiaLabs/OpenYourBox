@@ -4,15 +4,18 @@
 #include "params/ParamIDs.h"
 #include "train/CloudJobPackage.h"
 
+#include <BinaryData.h>
 #include <imgui.h>
 
 #include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstring>
+#include <functional>
 #include <memory>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -24,6 +27,104 @@ bool sameArchitecture(const openyourbox::dsp::TCNConfiguration &left,
          left.inputChannels == right.inputChannels &&
          left.outputChannels == right.outputChannels &&
          left.activation == right.activation;
+}
+
+using FreezeNode = openyourbox::ui::TrainPanel::Gates::FreezeStructureNode;
+
+/**
+ * @brief True when the node can be armed for training (freeze tree leaf).
+ */
+bool isArmableTrainElement(const openyourbox::graph::GraphNode &node) {
+  using openyourbox::graph::isControlSourceType;
+  using openyourbox::graph::isTrainOnlyType;
+  using openyourbox::graph::NodeState;
+  return node.hasWeights && node.state == NodeState::liveBlue &&
+         !isControlSourceType(node.type) && !isTrainOnlyType(node.type);
+}
+
+/**
+ * @brief Builds one freeze-tree row for armable elements and groups that contain them.
+ * @param graph Live node graph.
+ * @param boxId Node or group id.
+ * @param armed Armed trainable leaf ids for this Run.
+ */
+FreezeNode buildFreezeStructureNode(openyourbox::graph::NodeGraph &graph,
+                                    std::int32_t boxId,
+                                    const std::unordered_set<std::int32_t> &armed) {
+  using openyourbox::graph::isGroupBoundaryType;
+  FreezeNode out;
+  if (const auto *boundary = graph.findNode(boxId);
+      boundary != nullptr && isGroupBoundaryType(boundary->type))
+    return out;
+  if (const auto *group = graph.findGroup(boxId)) {
+    out.id = boxId;
+    out.isGroup = true;
+    out.label = juce::String(group->name);
+    for (const auto member :
+         graph.orderSiblingBoxesByFlow(boxId, group->memberIds)) {
+      auto child = buildFreezeStructureNode(graph, member, armed);
+      if (child.id == 0)
+        continue;
+      out.children.push_back(std::move(child));
+    }
+    if (out.children.empty()) {
+      out.id = 0;
+      return out;
+    }
+    bool anyArmed = false;
+    std::function<void(const FreezeNode &)> walk =
+        [&](const FreezeNode &node) {
+          if (!node.isGroup) {
+            anyArmed = anyArmed || node.armedForTraining;
+            return;
+          }
+          for (const auto &child : node.children)
+            walk(child);
+        };
+    walk(out);
+    out.armedForTraining = anyArmed;
+    return out;
+  }
+  if (const auto *node = graph.findNode(boxId)) {
+    if (!isArmableTrainElement(*node))
+      return out;
+    out.id = boxId;
+    out.isGroup = false;
+    out.label = juce::String(node->label.empty() ? ("Element " + std::to_string(boxId))
+                                                 : node->label);
+    out.armedForTraining = armed.count(boxId) != 0;
+    return out;
+  }
+  return out;
+}
+
+/**
+ * @brief Roots for the Train panel freeze tree (armable elements only).
+ */
+std::vector<FreezeNode>
+buildFreezeStructure(openyourbox::graph::NodeGraph &graph,
+                     const std::unordered_set<std::int32_t> &armed) {
+  using openyourbox::graph::isFixedIoType;
+  using openyourbox::graph::isGroupBoundaryType;
+  std::vector<std::int32_t> roots;
+  for (const auto &group : graph.getGroups()) {
+    if (!group.parentGroupId.has_value())
+      roots.push_back(group.id);
+  }
+  for (const auto &node : graph.getNodes()) {
+    if (!node.parentGroupId.has_value() && !isFixedIoType(node.type) &&
+        !isGroupBoundaryType(node.type))
+      roots.push_back(node.id);
+  }
+  roots = graph.orderSiblingBoxesByFlow(std::nullopt, std::move(roots));
+  std::vector<FreezeNode> result;
+  result.reserve(roots.size());
+  for (const auto id : roots) {
+    auto row = buildFreezeStructureNode(graph, id, armed);
+    if (row.id != 0)
+      result.push_back(std::move(row));
+  }
+  return result;
 }
 } // namespace
 
@@ -47,7 +148,6 @@ OpenYourBoxAudioProcessorEditor::OpenYourBoxAudioProcessorEditor(
   setResizeLimits(760, 480, 1920, 1200);
   addAndMakeVisible(imguiHost);
   setSize(1100, 680);
-  trainPanel.objective = audioProcessor.getLastTrainObjective();
   audioProcessor.onPatchApplied = [this] { reloadLiveGraphFromProcessor(); };
   trainCoordinator.setCloudDependencies(
       &cloudTrainClient, &audioProcessor.getCloudSettings());
@@ -263,6 +363,22 @@ void OpenYourBoxAudioProcessorEditor::renderFrame() {
     if (audioProcessor.getNodeOutputRms(node.id, rms))
       outputRmsByNodeId[node.id] = rms;
   }
+  nodeRenderer.trainTabActive = sidePanelTab == 4;
+  nodeRenderer.trainingLibrary = &audioProcessor.getTrainingLibrary();
+  nodeRenderer.trainOnPathNodeIds.clear();
+  nodeRenderer.trainArmedOnPathNodeIds.clear();
+  if (nodeRenderer.trainTabActive) {
+    auto loaderId = trainPanel.activeDataLoaderId;
+    const auto loaders = nodeGraph.getDataLoaderNodeIds();
+    if (loaders.size() == 1)
+      loaderId = loaders.front();
+    if (loaderId != 0) {
+      for (const auto id : nodeGraph.collectDataLoaderPathNodeIds(loaderId))
+        nodeRenderer.trainOnPathNodeIds.insert(id);
+      for (const auto id : nodeGraph.collectArmedOnPathNodeIds(loaderId))
+        nodeRenderer.trainArmedOnPathNodeIds.insert(id);
+    }
+  }
   nodeRenderer.render(nodeGraph, callbacks, imguiHost.takeMagnification(),
                       &boxLibrary, &outputRmsByNodeId);
   ImGui::EndChild();
@@ -384,7 +500,6 @@ void OpenYourBoxAudioProcessorEditor::renderFrame() {
             juce::File(playX ? entry->xPath : entry->yPath));
     };
     libraryCallbacks.stopPreview = [this] { audioProcessor.stopPreview(); };
-    libraryPanel.objective = trainPanel.objective;
     libraryPanel.render(library, libraryCallbacks,
                         audioProcessor.isPreviewPlaying());
   } else if (sidePanelTab == 3) {
@@ -439,6 +554,10 @@ void OpenYourBoxAudioProcessorEditor::renderFrame() {
         audioProcessor.getCloudSettings().getSoftUploadWarnBytes();
     gates.armedElementCount =
         static_cast<int>(nodeGraph.getArmedTrainableNodeIds().size());
+    std::unordered_set<std::int32_t> armedIds;
+    for (const auto id : nodeGraph.getArmedTrainableNodeIds())
+      armedIds.insert(id);
+    gates.freezeStructure = buildFreezeStructure(nodeGraph, armedIds);
     gates.mixedSampleRates =
         !library.selectedSampleRatesMatch(mixedReason) &&
         gates.selectedPairCount > 0;
@@ -446,11 +565,7 @@ void OpenYourBoxAudioProcessorEditor::renderFrame() {
     gates.receptiveFieldMilliseconds = receptiveFieldMs;
     gates.trainWindowSeconds =
         sampleRate > 0.0
-            ? static_cast<double>(
-                  trainPanel.objective ==
-                          openyourbox::graph::TrainObjective::reconstruction
-                      ? trainPanel.hyperparameters.reconstructionSegmentLength
-                      : trainPanel.hyperparameters.segmentLength) /
+            ? static_cast<double>(trainPanel.hyperparameters.segmentLength) /
                   sampleRate
             : 0.0;
     gates.isMaster = pairing.getPairingRole() !=
@@ -458,12 +573,22 @@ void OpenYourBoxAudioProcessorEditor::renderFrame() {
     gates.retryAvailable = retryTrainResult.has_value();
     gates.unpairedSelected =
         library.selectedContainsUnpaired();
-    gates.reconstructionPathInvalid =
-        trainPanel.objective ==
-            openyourbox::graph::TrainObjective::reconstruction &&
-        !nodeGraph.hasReconstructionTrainPath();
-    gates.reconstructionReason =
-        juce::String(nodeGraph.reconstructionGateMessage());
+    gates.dataLoaders.clear();
+    gates.lossNodes.clear();
+    for (const auto &node : nodeGraph.getNodes()) {
+      if (node.type == openyourbox::graph::NodeType::dataLoader)
+        gates.dataLoaders.push_back(
+            {node.id, juce::String(node.label.empty()
+                                       ? ("Data Loader " + std::to_string(node.id))
+                                       : node.label)});
+      if (node.type == openyourbox::graph::NodeType::loss)
+        gates.lossNodes.push_back(
+            {node.id, juce::String(node.label.empty()
+                                       ? ("Loss " + std::to_string(node.id))
+                                       : node.label)});
+    }
+    if (gates.dataLoaders.size() == 1 && trainPanel.activeDataLoaderId == 0)
+      trainPanel.activeDataLoaderId = gates.dataLoaders.front().first;
     auto &cloudSettings = audioProcessor.getCloudSettings();
     gates.cloudLinked = cloudSettings.isLinked();
     gates.entitlementUnavailable =
@@ -513,6 +638,36 @@ void OpenYourBoxAudioProcessorEditor::renderFrame() {
     ImGui::Separator();
     openyourbox::ui::TrainPanel::Callbacks trainCallbacks;
     trainCallbacks.run = [this] { handleTrainRun(); };
+    trainCallbacks.saveProjectConfig = [this](const juce::var &config) {
+      audioProcessor.setTrainConfigJson(juce::JSON::toString(config, true));
+    };
+    trainCallbacks.loadExampleTemplate = [this](const juce::String &kind) {
+      const char *graphBytes = nullptr;
+      int graphSize = 0;
+      const char *configBytes = nullptr;
+      int configSize = 0;
+      if (kind == "mapping") {
+        graphBytes = BinaryData::mappingstylegraph_xml;
+        graphSize = BinaryData::mappingstylegraph_xmlSize;
+        configBytes = BinaryData::mappingstyleconfig_json;
+        configSize = BinaryData::mappingstyleconfig_jsonSize;
+      } else {
+        graphBytes = BinaryData::reconstructionstylegraph_xml;
+        graphSize = BinaryData::reconstructionstylegraph_xmlSize;
+        configBytes = BinaryData::reconstructionstyleconfig_json;
+        configSize = BinaryData::reconstructionstyleconfig_jsonSize;
+      }
+      auto xml = juce::parseXML(juce::String::fromUTF8(graphBytes, graphSize));
+      if (xml == nullptr ||
+          !nodeGraph.restoreFromValueTree(juce::ValueTree::fromXml(*xml))) {
+        showError("Could not load the example graph template.");
+        return;
+      }
+      persistGraph(true, false);
+      trainPanel.applyConfig(
+          juce::JSON::parse(juce::String::fromUTF8(configBytes, configSize)));
+      showGraphMessage("Loaded example template (not a Train mode)");
+    };
     trainCallbacks.stop = [this] { trainCoordinator.stop(); };
     trainCallbacks.retryLoad = [this] {
       if (retryTrainResult.has_value())
@@ -929,22 +1084,16 @@ void OpenYourBoxAudioProcessorEditor::handleTrainRun() {
     copyrightModalVisible = true;
     return;
   }
+  const auto gate =
+      nodeGraph.validateTrainStart(trainPanel.activeDataLoaderId);
+  if (!gate.empty()) {
+    showError(juce::String(gate));
+    return;
+  }
   if (!audioProcessor.getTrainingLibrary().selectedSampleRatesMatch(mixed)) {
     showError(mixed);
     return;
   }
-  if (trainPanel.objective == openyourbox::graph::TrainObjective::mapping &&
-      audioProcessor.getTrainingLibrary().selectedContainsUnpaired()) {
-    showError("Mapping cannot train unpaired clips. Deselect them or switch to reconstruction.");
-    return;
-  }
-  if (trainPanel.objective ==
-          openyourbox::graph::TrainObjective::reconstruction &&
-      !nodeGraph.hasReconstructionTrainPath()) {
-    showError(juce::String(nodeGraph.reconstructionGateMessage()));
-    return;
-  }
-  audioProcessor.setLastTrainObjective(trainPanel.objective);
   auto request = nodeGraph.createTrainRequest();
   if (!request.has_value()) {
     showError("Arm at least one trainable element before Train");
@@ -984,76 +1133,43 @@ void OpenYourBoxAudioProcessorEditor::handleTrainRun() {
   root->setProperty("capture_set", juce::var(captureSet.release()));
   auto options = std::make_unique<juce::DynamicObject>();
   options->setProperty("optimizer", "adam");
+  options->setProperty("generator_lr",
+                       static_cast<double>(trainPanel.hyperparameters.generatorLr));
   options->setProperty(
-      "objective",
-      juce::String(openyourbox::graph::trainObjectiveName(trainPanel.objective)));
-  auto reconstruction = std::make_unique<juce::DynamicObject>();
-  reconstruction->setProperty("stage1_steps",
-                              trainPanel.hyperparameters.stage1Steps);
-  reconstruction->setProperty("stage2_steps",
-                              trainPanel.hyperparameters.stage2Steps);
-  reconstruction->setProperty("generator_lr",
-                              static_cast<double>(trainPanel.hyperparameters.generatorLr));
-  reconstruction->setProperty(
       "discriminator_lr",
       static_cast<double>(trainPanel.hyperparameters.discriminatorLr));
-  reconstruction->setProperty("adam_beta1",
-                              static_cast<double>(trainPanel.hyperparameters.adamBeta1));
-  reconstruction->setProperty("adam_beta2",
-                              static_cast<double>(trainPanel.hyperparameters.adamBeta2));
-  reconstruction->setProperty(
+  options->setProperty("adam_beta1",
+                       static_cast<double>(trainPanel.hyperparameters.adamBeta1));
+  options->setProperty("adam_beta2",
+                       static_cast<double>(trainPanel.hyperparameters.adamBeta2));
+  options->setProperty(
       "lr_decay_end_factor",
       static_cast<double>(trainPanel.hyperparameters.lrDecayEndFactor));
-  reconstruction->setProperty("batch_size", trainPanel.hyperparameters.batchSize);
-  reconstruction->setProperty(
-      "segment_length", trainPanel.hyperparameters.reconstructionSegmentLength);
-  reconstruction->setProperty("kl_beta",
-                              static_cast<double>(trainPanel.hyperparameters.klBeta));
-  reconstruction->setProperty(
+  options->setProperty("batch_size", trainPanel.hyperparameters.batchSize);
+  options->setProperty("kl_beta",
+                       static_cast<double>(trainPanel.hyperparameters.klBeta));
+  options->setProperty(
       "kl_beta_start",
       static_cast<double>(trainPanel.hyperparameters.klBetaStart));
-  reconstruction->setProperty("kl_warmup_steps",
-                              trainPanel.hyperparameters.klWarmupSteps);
-  reconstruction->setProperty(
+  options->setProperty("kl_warmup_steps",
+                       trainPanel.hyperparameters.klWarmupSteps);
+  options->setProperty(
       "feature_matching_weight",
       static_cast<double>(trainPanel.hyperparameters.featureMatchingWeight));
-  reconstruction->setProperty("update_discriminator_every",
-                              trainPanel.hyperparameters.updateDiscriminatorEvery);
-  reconstruction->setProperty(
+  options->setProperty("update_discriminator_every",
+                       trainPanel.hyperparameters.updateDiscriminatorEvery);
+  options->setProperty(
       "phase_mangle_prob",
       static_cast<double>(trainPanel.hyperparameters.phaseMangleProb));
-  reconstruction->setProperty("dequantize_bits",
-                              trainPanel.hyperparameters.dequantizeBits);
-  reconstruction->setProperty(
-      "spectral_windows",
-      juce::Array<juce::var>{2048, 1024, 512, 256, 128});
-  options->setProperty("reconstruction", juce::var(reconstruction.release()));
-  auto loss = std::make_unique<juce::DynamicObject>();
-  loss->setProperty("type", "multiresolution_stft");
-  loss->setProperty("fft_sizes", juce::Array<juce::var>{32, 128, 512, 2048});
-  loss->setProperty("win_lengths", juce::Array<juce::var>{32, 128, 512, 2048});
-  loss->setProperty("hop_sizes", juce::Array<juce::var>{16, 64, 256, 1024});
-  options->setProperty("loss", juce::var(loss.release()));
+  options->setProperty("dequantize_bits",
+                       trainPanel.hyperparameters.dequantizeBits);
   options->setProperty("steer_conditioning", 0.0);
-  options->setProperty("total_steps",
-                       trainPanel.objective ==
-                               openyourbox::graph::TrainObjective::reconstruction
-                           ? trainPanel.hyperparameters.stage1Steps +
-                                 trainPanel.hyperparameters.stage2Steps
-                           : trainPanel.hyperparameters.totalSteps);
+  options->setProperty("total_steps", trainPanel.hyperparameters.totalSteps);
   options->setProperty(
       "learning_rate",
-      static_cast<double>(
-          trainPanel.objective ==
-                  openyourbox::graph::TrainObjective::reconstruction
-              ? trainPanel.hyperparameters.generatorLr
-              : trainPanel.hyperparameters.learningRate));
-  options->setProperty(
-      "segment_length",
-      trainPanel.objective ==
-              openyourbox::graph::TrainObjective::reconstruction
-          ? trainPanel.hyperparameters.reconstructionSegmentLength
-          : trainPanel.hyperparameters.segmentLength);
+      static_cast<double>(trainPanel.hyperparameters.learningRate));
+  options->setProperty("segment_length",
+                       trainPanel.hyperparameters.segmentLength);
   options->setProperty("checkpoint_interval",
                        trainPanel.hyperparameters.checkpointInterval);
   options->setProperty("export_checkpoints", trainPanel.hearWhileTraining);
@@ -1127,13 +1243,33 @@ void OpenYourBoxAudioProcessorEditor::handleTrainRun() {
   mlflow->setProperty("tracking_uri", juce::String(trainPanel.mlflowTrackingUri));
   mlflow->setProperty("experiment", juce::String(trainPanel.mlflowExperiment));
   mlflow->setProperty("name", juce::String(trainPanel.mlflowRunName));
-  mlflow->setProperty(
-      "tags", trainPanel.objective ==
-                     openyourbox::graph::TrainObjective::reconstruction
-                 ? juce::Array<juce::var>{"train", "reconstruction", "rave"}
-                 : juce::Array<juce::var>{"train", "steerable"});
+  mlflow->setProperty("tags", juce::Array<juce::var>{"train", "graph"});
   options->setProperty("mlflow", juce::var(mlflow.release()));
   root->setProperty("train_options", juce::var(options.release()));
+  if (trainPanel.activeDataLoaderId != 0)
+    root->setProperty("active_data_loader_id", trainPanel.activeDataLoaderId);
+  auto schedule = std::make_unique<juce::DynamicObject>();
+  juce::Array<juce::var> stages;
+  for (const auto &stage : trainPanel.lossStages) {
+    auto object = std::make_unique<juce::DynamicObject>();
+    object->setProperty("name", juce::String(stage.name));
+    object->setProperty("steps", stage.steps);
+    juce::Array<juce::var> losses;
+    for (const auto &entry : stage.losses) {
+      auto loss = std::make_unique<juce::DynamicObject>();
+      loss->setProperty("loss_node_id", entry.lossNodeId);
+      loss->setProperty("weight", static_cast<double>(entry.weight));
+      losses.add(juce::var(loss.release()));
+    }
+    object->setProperty("losses", losses);
+    juce::Array<juce::var> freezeIds;
+    for (const auto id : stage.freezeElementIds)
+      freezeIds.add(id);
+    object->setProperty("freeze_element_ids", freezeIds);
+    stages.add(juce::var(object.release()));
+  }
+  schedule->setProperty("stages", stages);
+  root->setProperty("loss_schedule", juce::var(schedule.release()));
   request->graphFragment = juce::JSON::toString(payload, true).toStdString();
   trainCoordinator.setDestination(trainPanel.destination);
   if (trainPanel.destination ==
@@ -1622,6 +1758,9 @@ void OpenYourBoxAudioProcessorEditor::reloadLiveGraphFromProcessor() {
     nodeGraph.restoreFromValueTree(restored);
   displayedConfiguration = audioProcessor.getRequestedConfiguration();
   graphInitialized = true;
+  if (audioProcessor.getTrainConfigJson().isNotEmpty())
+    trainPanel.applyConfig(
+        juce::JSON::parse(audioProcessor.getTrainConfigJson()));
   for (const auto &node : nodeGraph.getNodes()) {
     if (!openyourbox::graph::isExternalLoadNode(node) ||
         node.artifactPath.empty())

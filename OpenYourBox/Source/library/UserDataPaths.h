@@ -86,6 +86,13 @@ inline juce::File presetsDirectory() {
 }
 
 /**
+ * @brief Directory where named training configurations are stored.
+ */
+inline juce::File trainingConfigsDirectory() {
+  return ensureDirectory(userDataRoot().getChildFile("TrainingConfigs"));
+}
+
+/**
  * @brief Directory for downloaded cloud checkpoints and final artifacts.
  */
 inline juce::File cloudArtifactsDirectory() {

@@ -521,7 +521,7 @@ void TrainCoordinator::writeCommand(const juce::String &command) {
   if (!file.getFullPathName().isEmpty()) {
     auto object = std::make_unique<juce::DynamicObject>();
     object->setProperty("request_id", juce::String(requestId));
-    object->setProperty("operation", "train_steerable");
+    object->setProperty("operation", "train_graph");
     object->setProperty("command", command);
     file.replaceWithText(juce::JSON::toString(juce::var(object.release()), true));
   }

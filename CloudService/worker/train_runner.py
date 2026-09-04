@@ -53,8 +53,27 @@ def materialize_train_request(job: Job, work_dir: Path) -> dict[str, Any]:
         if name and not clip.get("path"):
             clip["path"] = str(work_dir / name)
 
+    bindings = manifest.get("data_loader_bindings")
+    if isinstance(bindings, dict):
+        for per_loader in bindings.values():
+            if not isinstance(per_loader, dict):
+                continue
+            for output in per_loader.values():
+                if not isinstance(output, dict):
+                    continue
+                for item in output.get("items", []) or []:
+                    if not isinstance(item, dict):
+                        continue
+                    raw = str(item.get("path", "") or "")
+                    name = Path(raw).name
+                    if name and (work_dir / name).is_file():
+                        item["path"] = str(work_dir / name)
+
     manifest["request_id"] = job.job_id
-    manifest["operation"] = "train_steerable"
+    operation = str(manifest.get("operation", "train_graph") or "train_graph").strip()
+    if operation not in {"train_graph", "train_steerable"}:
+        operation = "train_graph"
+    manifest["operation"] = operation
     options = manifest.setdefault("train_options", {})
     if not isinstance(options, dict):
         options = {}
@@ -113,7 +132,7 @@ def _fail(job: Job, message: str, error_code: str = "train_failed") -> None:
 
 
 def run_job(job_id: str) -> None:
-    """Materialize one claimed job and invoke shared mapping/reconstruction recipes."""
+    """Materialize one claimed job and invoke the shared train_graph recipe."""
     from CloudService.api.jobs import mark_job_stopped
 
     with STORE.lock:

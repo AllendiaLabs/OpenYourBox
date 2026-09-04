@@ -440,8 +440,11 @@ int main() {
   passed &= expect(graph.getNodes().size() == 6,
                    "UI graph shows one template plus its two boundary hubs");
 
-  const auto illegal = graph.createGroup({convA});
-  passed &= expect(!illegal.accepted, "grouping requires two members");
+  const auto nestedOne = graph.createGroup({convA});
+  passed &= expect(nestedOne.accepted,
+                   "a single already-grouped box can form a nested group");
+  passed &= expect(graph.ungroup(nestedOne.groupId).accepted,
+                   "ungroup the nested group-of-one before later checks");
 
   const auto act = graph.addNode(NodeType::activation, {300.0f, 80.0f});
   const auto added = graph.addToGroup(created.groupId, act);

@@ -18,7 +18,7 @@ Replace architecture-branded `train_steerable` + `objective` mapping|reconstruct
     "elements": [
       {
         "id": 12,
-        "type": "dataLoader",
+        "type": "data_loader",
         "label": "Data Loader",
         "properties": [
           { "key": "output_count", "value": 3 }
@@ -34,8 +34,7 @@ Replace architecture-branded `train_steerable` + `objective` mapping|reconstruct
         "type": "loss",
         "label": "MR-STFT",
         "properties": [
-          { "key": "loss_type", "value": "mr_stft" },
-          { "key": "weight", "value": 1.0 }
+          { "key": "loss_type", "value": "mr_stft" }
         ]
       }
     ],
@@ -97,7 +96,8 @@ Replace architecture-branded `train_steerable` + `objective` mapping|reconstruct
         "losses": [
           { "loss_node_id": 21, "weight": 1.0 },
           { "loss_node_id": 22, "weight": 0.1 }
-        ]
+        ],
+        "freeze_element_ids": []
       },
       {
         "name": "quality",
@@ -106,7 +106,8 @@ Replace architecture-branded `train_steerable` + `objective` mapping|reconstruct
           { "loss_node_id": 21, "weight": 1.0 },
           { "loss_node_id": 23, "weight": 1.0 },
           { "loss_node_id": 24, "weight": 10.0 }
-        ]
+        ],
+        "freeze_element_ids": [3, 5, 8]
       }
     ]
   },
@@ -136,11 +137,11 @@ Replace architecture-branded `train_steerable` + `objective` mapping|reconstruct
 
 ### Single-stage shorthand
 
-If `loss_schedule.stages` is empty or omitted, the worker MUST run one stage for `train_options.total_steps` (required in that case) using every validly wired loss at its node `weight`.
+If `loss_schedule.stages` is empty or omitted, the worker MUST run one stage for `train_options.total_steps` (required in that case) using every validly wired loss at weight **1.0**. Stage entries that omit `weight` MUST also default to **1.0**. Loss element properties MUST NOT be consulted for weight.
 
 ## Worker rules
 
-1. Build trainable module from `graph_fragment` processing elements on the data-loader path; apply grads only to `armed_element_ids`.
+1. Build trainable module from `graph_fragment` processing elements on the data-loader path; apply grads only to `armed_element_ids` minus each stage’s `freeze_element_ids` (rebuild optimizer at stage boundaries).
 2. Passthrough on-path nodes participate in forward without updates.
 3. Batch from active Data Loader bindings; zip connected outputs by example index.
 4. Evaluate active stage losses; optimize weighted sum (plus train-only discriminator steps when adversarial losses are active).

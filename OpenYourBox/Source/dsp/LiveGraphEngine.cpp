@@ -614,6 +614,10 @@ bool hasValidPortLayout(const openyourbox::graph::GraphNode &node) noexcept {
     return node.inputs.empty() && node.outputs.size() == 1;
   if (node.type == NodeType::audioOutput)
     return node.inputs.size() == 1 && node.outputs.empty();
+  if (node.type == NodeType::dataLoader)
+    return node.inputs.empty() && !node.outputs.empty();
+  if (node.type == NodeType::loss)
+    return node.inputs.size() >= 1 && node.outputs.empty();
   if (node.type == NodeType::knobInput)
     return node.inputs.empty() && node.outputs.size() >= 2;
   if (node.type == NodeType::xyTrackpad)
@@ -2019,6 +2023,8 @@ void LiveGraphRuntime::executeElement(std::size_t index,
   case openyourbox::graph::NodeType::mathExpression:
   case openyourbox::graph::NodeType::groupInput:
   case openyourbox::graph::NodeType::groupOutput:
+  case openyourbox::graph::NodeType::dataLoader:
+  case openyourbox::graph::NodeType::loss:
     break;
   }
 
@@ -2257,6 +2263,23 @@ LiveGraphEngine::compile(const graph::NodeGraph &graphDocument,
     if (node.id == 0 || !nodesById.emplace(node.id, &node).second)
       return failure(LiveGraphErrorCode::invalidGraph, node.id,
                      "Node identifiers must be unique and non-zero");
+    if (graph::isTrainOnlyType(node.type)) {
+      const auto addPin = [&](const graph::Pin &pin, graph::PinKind kind) {
+        return pin.id != 0 && pin.kind == kind &&
+               pins.emplace(pin.id, PinOwner{node.id, kind}).second;
+      };
+      for (const auto &pin : node.inputs) {
+        if (!addPin(pin, graph::PinKind::input))
+          return failure(LiveGraphErrorCode::invalidGraph, node.id,
+                         "Input pin is duplicated or malformed");
+      }
+      for (const auto &pin : node.outputs) {
+        if (!addPin(pin, graph::PinKind::output))
+          return failure(LiveGraphErrorCode::invalidGraph, node.id,
+                         "Output pin is duplicated or malformed");
+      }
+      continue;
+    }
     if ((node.type == NodeType::blackBox) &&
         (node.state != graph::NodeState::frozenGold))
       return failure(LiveGraphErrorCode::invalidGraph, node.id,
@@ -2319,6 +2342,12 @@ LiveGraphEngine::compile(const graph::NodeGraph &graphDocument,
         destination->second.kind != graph::PinKind::input)
       return failure(LiveGraphErrorCode::invalidGraph, 0,
                      "Link identifiers and endpoints must resolve uniquely");
+    const auto *sourceNode = nodesById.at(source->second.nodeId);
+    const auto *destinationNode = nodesById.at(destination->second.nodeId);
+    if (link.kind == graph::GraphLinkKind::dataLoader ||
+        graph::isTrainOnlyType(sourceNode->type) ||
+        graph::isTrainOnlyType(destinationNode->type))
+      continue;
     if (source->second.nodeId == destination->second.nodeId)
       return failure(LiveGraphErrorCode::cycle, source->second.nodeId,
                      "Self-connections are not permitted");
@@ -3304,6 +3333,9 @@ LiveGraphEngine::compile(const graph::NodeGraph &graphDocument,
         return failure(
             LiveGraphErrorCode::invalidGraph, node.id,
             "Group Input/Output hubs must be removed before live compilation");
+      case NodeType::dataLoader:
+      case NodeType::loss:
+        continue;
       }
 
       std::uint64_t upstreamReceptiveField = 1;

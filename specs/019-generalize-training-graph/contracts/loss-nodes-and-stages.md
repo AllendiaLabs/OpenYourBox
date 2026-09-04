@@ -2,7 +2,7 @@
 
 ## Purpose
 
-Define Loss palette elements, wiring, weights, and Training Configuration stage schedules so users can reproduce prior mapping and reconstruction (RAVE-like) recipes without architecture modes.
+Define Loss palette elements, wiring, and Training Configuration stage schedules (with weights) so users can reproduce prior mapping and reconstruction (RAVE-like) recipes without architecture modes.
 
 ## Loss node
 
@@ -12,26 +12,31 @@ Define Loss palette elements, wiring, weights, and Training Configuration stage 
   - `kl` — variational / bottleneck KL regularization
   - `adversarial` — train-only multi-scale discriminator loss
   - `feature_matching` — feature matching (typically paired with adversarial)
-- Pins: type-dependent **prediction** and **target/reference** (KL may attach to bottleneck stats only).
-- Property **weight** (float ≥ 0).
+- Pins: **prediction** (index 0) and **target** (index 1).
+- **No `weight` property on the box** — weights live only on the stage schedule.
 - Training-only: ignored on live audible path.
+- Loading legacy graphs MUST strip any persisted Loss `weight` property.
 
 ## Wiring rules
 
-- User connects loss prediction to architecture output (or intermediate) pins they want supervised.
-- Target feeds typically come from Data Loader outputs (same-data vs different-data is material choice, not a mode).
+| Source | Allowed Loss pin |
+|--------|------------------|
+| Live / processing path | **prediction** only |
+| Data Loader | **target** only |
+
+- Refuse Data Loader → prediction and live → target at connect time.
 - Start MUST refuse if no usable loss wiring exists.
-- Start MUST refuse if a loss prediction is outside the active data-loader-reachable path.
+- Start MUST refuse if a loss prediction is outside the active data-loader-reachable path (prediction must come from the train path, not the loader).
 
 ## Combining losses
 
-### Single stage (default)
+### Single stage (default / empty schedule)
 
-Weighted sum of all validly wired losses using each node’s `weight` for `total_steps`.
+Worker runs one stage for `total_steps` with every validly wired loss at weight **1.0**.
 
 ### Multi-stage schedule
 
-Training Configuration stores ordered stages:
+Training Configuration / Train panel stores ordered stages:
 
 ```json
 {
@@ -57,9 +62,20 @@ Training Configuration stores ordered stages:
 }
 ```
 
-- Stage `weight` overrides node default when present.
+- Each stage loss entry **MUST** carry `weight` (Train UI edits it next to the loss checkbox).
+- Each stage MAY include `freeze_element_ids` (armed element ids frozen for that stage).
+- Config persistence uses `losses: [{ loss_node_id, weight }]` and optional `freeze_element_ids` (legacy `loss_node_ids` arrays load with weight 1.0).
 - Missing/unwired `loss_node_id` in a stage → refuse Start with clear message.
 - Progress UI SHOULD show current stage name/index.
+
+## Per-stage freeze UI
+
+- Collapsed by default under each stage (`Freeze` tree).
+- Tree lists **only armable/trainable** leaves (and ancestor groups that contain them).
+- Disarmed armable leaves: checkbox **checked + disabled + gray**.
+- Group check → all armable descendants; partial selection → **mixed** (minus) parent checkbox.
+- Worker rebuilds trainable Adam param set at each stage boundary from `armed_element_ids ∖ freeze_element_ids`.
+- Train-tab group chrome: if all armable leaves under a group are transparent, the group box is transparent too.
 
 ## Train-only adversarial machinery
 
@@ -72,11 +88,12 @@ Training Configuration stores ordered stages:
 Users MUST be able to express:
 
 1. **Mapping-style**: Data Loader input≠target materials + `mr_stft` (or equivalent) + mapping-like HP defaults via example config.
-2. **Reconstruction-style**: same-data materials + spectral + KL (+ later adversarial/FM) with two-stage schedule matching prior defaults via example config.
+2. **Reconstruction-style**: same-data materials + spectral + KL (+ later adversarial/FM) with two-stage schedule and stage weights matching prior defaults via example config.
 
 ## Implementation anchors
 
-- `OpenYourBox/Source/graph/*` — loss element
-- `OpenYourBox/Source/ui/TrainPanel.cpp` — stage editor
-- `Backend/train_worker.py` — evaluate schedule; reuse spectral/GAN helpers
-- `Tests/test_train_worker.py`
+- `OpenYourBox/Source/graph/*` — loss element; connect pin rules
+- `OpenYourBox/Source/ui/TrainPanel.cpp` — stage editor with per-loss weight
+- `OpenYourBox/Source/PluginEditor.cpp` — `loss_schedule` packaging
+- `Backend/train_worker.py` — evaluate schedule; default weight 1.0
+- `Tests/test_train_worker.py` / `Tests/GeneralizedTrainGraphTests.cpp`

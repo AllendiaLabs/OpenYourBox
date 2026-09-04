@@ -40,7 +40,7 @@ openyourbox::state::PatchSnapshot makeSnapshot(int marker) {
   snapshot.graphDocument = juce::ValueTree{"GraphDocument"};
   snapshot.graphDocument.setProperty("version", 2, nullptr);
   snapshot.graphDocument.setProperty("marker", marker, nullptr);
-  snapshot.lastTrainObjective = "mapping";
+  snapshot.trainConfigJson = "{}";
   return snapshot;
 }
 } // namespace

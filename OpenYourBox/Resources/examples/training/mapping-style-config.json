@@ -1,0 +1,9 @@
+{
+  "label": "Example: mapping-style (template, not a Train mode)",
+  "total_steps": 2500,
+  "learning_rate": 0.001,
+  "segment_length": 228308,
+  "checkpoint_interval": 50,
+  "device": "auto",
+  "loss_stage_schedule": []
+}

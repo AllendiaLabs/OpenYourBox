@@ -1129,7 +1129,7 @@ int main() {
   const auto utilityOutput = utilityGraph.addNode(
       openyourbox::graph::NodeType::audioOutput, {360.0f, 0.0f});
   const auto *utilityNode = utilityGraph.findNode(utilityNodeId);
-  passed &= expect(utilityNode != nullptr && utilityNode->label == "Utility" &&
+  passed &= expect(utilityNode != nullptr && utilityNode->label == "Utility 1" &&
                        utilityNode->inputs.size() == 2,
                    "a new Utility element must default to two inputs");
   passed &= expect(utilityGraph.setProperty(utilityNodeId, "inputs", 1),

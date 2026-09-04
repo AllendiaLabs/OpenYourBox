@@ -730,6 +730,74 @@ public:
   [[nodiscard]] std::optional<TrainJobRequest> createTrainRequest() const;
 
   /**
+   * @brief Identifiers of Data Loader nodes on the canvas.
+   */
+  [[nodiscard]] std::vector<std::int32_t> getDataLoaderNodeIds() const;
+
+  /**
+   * @brief Identifiers of Loss nodes on the canvas.
+   */
+  [[nodiscard]] std::vector<std::int32_t> getLossNodeIds() const;
+
+  /**
+   * @brief Processing nodes reachable from the active Data Loader outputs.
+   * @param loaderId Active Data Loader node.
+   */
+  [[nodiscard]] std::vector<std::int32_t>
+  collectDataLoaderPathNodeIds(std::int32_t loaderId) const;
+
+  /**
+   * @brief Armed trainable nodes that also sit on the Data Loader path.
+   * @param loaderId Active Data Loader node.
+   */
+  [[nodiscard]] std::vector<std::int32_t>
+  collectArmedOnPathNodeIds(std::int32_t loaderId) const;
+
+  /**
+   * @brief User-facing Start refusal, or empty when preflight passes.
+   * @param activeDataLoaderId Train-panel active loader, or 0 to auto-select.
+   */
+  [[nodiscard]] std::string
+  validateTrainStart(std::int32_t activeDataLoaderId) const;
+
+  /**
+   * @brief Renames one Data Loader output pin.
+   * @param nodeId Data Loader id.
+   * @param pinIndex Output index.
+   * @param label New pin label.
+   */
+  bool setDataLoaderOutputLabel(std::int32_t nodeId, int pinIndex,
+                                const std::string &label);
+
+  /**
+   * @brief Replaces the binding on one Data Loader output.
+   * @param nodeId Data Loader id.
+   * @param pinIndex Output index.
+   * @param binding Materials or constant utility.
+   */
+  bool setDataLoaderBinding(std::int32_t nodeId, int pinIndex,
+                            TrainingMaterialBinding binding);
+
+  /**
+   * @brief Copies/repeats examples from one output onto another to equalize counts.
+   * @param nodeId Data Loader id.
+   * @param sourcePinIndex Output to copy from.
+   * @param targetPinIndex Output to overwrite.
+   */
+  bool equalizeDataLoaderOutput(std::int32_t nodeId, int sourcePinIndex,
+                                int targetPinIndex);
+
+  /**
+   * @brief Assigns a constant scalar copied across @p exampleCount examples.
+   * @param nodeId Data Loader id.
+   * @param pinIndex Output index.
+   * @param value Scalar.
+   * @param exampleCount Declared count (must be ≥ 1).
+   */
+  bool setDataLoaderConstant(std::int32_t nodeId, int pinIndex, float value,
+                             int exampleCount);
+
+  /**
    * @brief Returns true when an armed path can run reconstruction Train.
    *
    * Requires a variational bottleneck on a live path that can decode back
@@ -898,6 +966,13 @@ private:
   /** @brief Creates a fully initialized node without inserting it. */
   GraphNode makeNode(NodeType type, juce::Point<float> position);
   /**
+   * @brief Next free `"base n"` label among existing nodes.
+   * @param baseLabel Display name without a trailing number (`"Conv1D"`).
+   * @return `"base n"` for the smallest unused positive integer @c n.
+   */
+  [[nodiscard]] std::string
+  nextUniqueNumberedLabel(const std::string &baseLabel) const;
+  /**
    * @brief Creates an empty Gold TorchScript Load node without inserting it.
    * @param position Initial canvas position.
    */
@@ -929,6 +1004,12 @@ private:
    * @param knobCount Requested knob count, clamped to `[1, maximumKnobCount]`.
    */
   void setKnobOutputCount(GraphNode &node, int knobCount);
+  /**
+   * @brief Rebuilds Data Loader output pins and bindings to match Outputs.
+   * @param node Data Loader node to update.
+   * @param outputCount Requested output count, clamped to `[1, maximumDataLoaderOutputs]`.
+   */
+  void setDataLoaderOutputCount(GraphNode &node, int outputCount);
   /**
    * @brief Ensures the Knobs property, pins, and values agree on a Knob Input.
    * @param node Candidate node; ignored when not a Knob Input.

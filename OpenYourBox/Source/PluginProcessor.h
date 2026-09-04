@@ -365,14 +365,18 @@ public:
   /** @brief Stops capture and assembles the library pair when both clips exist. */
   void stopPairedRecording();
 
-  /** @brief Last-used Train objective for this instance. */
-  [[nodiscard]] openyourbox::graph::TrainObjective
-  getLastTrainObjective() const noexcept;
-
-  /** @brief Stores the last-used Train objective.
-   * @param objective Mapping or reconstruction.
+  /**
+   * @brief Returns the project training-config snapshot JSON.
    */
-  void setLastTrainObjective(openyourbox::graph::TrainObjective objective) noexcept;
+  [[nodiscard]] const juce::String &getTrainConfigJson() const noexcept {
+    return trainConfigJson;
+  }
+
+  /**
+   * @brief Stores the project training-config snapshot JSON.
+   * @param json Serialized Training Configuration object.
+   */
+  void setTrainConfigJson(juce::String json) { trainConfigJson = std::move(json); }
 
   /**
    * @brief Returns persisted cloud account settings for this instance.
@@ -656,9 +660,8 @@ private:
   bool libraryFocusRequested = false;
   /** @brief Latest capture status consumed by the editor. */
   juce::String captureStatusMessage;
-  /** @brief Last-used Train objective persisted with the project. */
-  openyourbox::graph::TrainObjective lastTrainObjective{
-      openyourbox::graph::TrainObjective::mapping};
+  /** @brief Project training-config snapshot JSON. */
+  juce::String trainConfigJson;
   /** @brief Linked platform session, URL overrides, and submitter ids. */
   openyourbox::train::CloudSettings cloudSettings;
   /** @brief True when the active take is unpaired Single capture. */

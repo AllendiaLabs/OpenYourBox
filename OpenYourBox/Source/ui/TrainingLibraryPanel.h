@@ -1,7 +1,6 @@
 #pragma once
 
 #include "../library/TrainingLibrary.h"
-#include "../graph/GraphTypes.h"
 
 #include <imgui.h>
 #include <JuceHeader.h>
@@ -41,9 +40,6 @@ public:
    */
   void render(library::TrainingLibrary &library, const Callbacks &callbacks,
               bool previewPlaying);
-
-  /** @brief Current Train objective used for warn/filter copy. */
-  graph::TrainObjective objective = graph::TrainObjective::mapping;
 
 private:
   /** @brief Identifier of the row shown in the detail pane. */

@@ -32,12 +32,18 @@ Define Data Loader element behavior, connection legality, cable visuals, binding
 
 | Destination | Data Loader connect |
 |-------------|---------------------|
-| Processing pin currently driven only by live **external** source (e.g. Audio In) | ALLOW (coexist with live cable) |
-| Knob / XY Trackpad / similar source feed into the graph | ALLOW |
+| Empty input pin (no live cable yet) | ALLOW |
+| Pin with live **Audio In** or **group-input** hub feed | ALLOW (coexist with live cable) |
 | Pin already driven by upstream **processing** node | REFUSE + tooltip reason |
-| Audio Output / loss-only nonsense targets | REFUSE if not a valid external replacement |
+| **Loss prediction** pin | REFUSE (Data Loader → **target** only; see `loss-nodes-and-stages.md`) |
+| **Loss target** pin | ALLOW |
+| Audio Output / another Data Loader | REFUSE |
 
 In chain A→B→C, if A’s external input is data-loader-fed, B/C MUST NOT accept data-loader on pins fed by A.
+
+### Group hub dedupe
+
+When a member pin has both a live Audio In cable and a Data Loader cable and the member is grouped, `groupBoundaryPorts` / hub creation MUST emit **one** group input hub for that `memberPinId` (both external cables retarget onto that hub; one interior hub→member cable). MUST NOT allocate one hub lane per crossing link.
 
 ## Cable visuals
 
@@ -58,7 +64,8 @@ In chain A→B→C, if A’s external input is data-loader-fed, B/C MUST NOT acc
 ## Implementation anchors
 
 - `OpenYourBox/Source/graph/FactoryPalette.h`
-- `OpenYourBox/Source/graph/GraphTypes.h` / `NodeGraph.cpp`
+- `OpenYourBox/Source/graph/GraphTypes.h` / `NodeGraph.cpp` (`connect`, `groupBoundaryPorts`)
 - `OpenYourBox/Source/graph/NodeRenderer.cpp` (cable color / RMS skip)
 - `OpenYourBox/Source/dsp/LiveGraphEngine.cpp` (exclude from live)
 - `OpenYourBox/Source/ui/TrainingLibraryPanel.*` (binding pickers as needed)
+- `Tests/GeneralizedTrainGraphTests.cpp`

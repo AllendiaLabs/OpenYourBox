@@ -1,0 +1,58 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<GraphDocument version="3" panX="0" panY="0" zoom="1.0" mapVisible="1">
+  <Node id="1" label="Audio Input" detail="Stereo" type="audio_input" state="live_blue" x="0" y="0" width="180" height="120" hasWeights="0" seed="42" armedForTraining="0">
+    <Pin id="1001" label="out" kind="output" channels="2" temporalRate="1" nBand="0"/>
+    <Property key="channels" label="Mode" value="2" minimum="0" maximum="2" kind="1" choices="Mono|Mirrored|Stereo" floatValue="0"/>
+  </Node>
+  <Node id="2" label="Audio Output" detail="Stereo" type="audio_output" state="live_blue" x="960" y="0" width="180" height="120" hasWeights="0" seed="42" armedForTraining="0">
+    <Pin id="1002" label="in" kind="input" channels="2" temporalRate="1" nBand="0"/>
+    <Property key="channels" label="Mode" value="2" minimum="0" maximum="2" kind="1" choices="Mono|Mirrored|Stereo" floatValue="0"/>
+  </Node>
+  <Node id="3" label="Conv1D" detail="Temporal convolution" type="conv1d" state="live_blue" x="240" y="0" width="180" height="120" hasWeights="1" seed="42" armedForTraining="1">
+    <Pin id="1003" label="in" kind="input" channels="0" temporalRate="1" nBand="0"/>
+    <Pin id="1004" label="out" kind="output" channels="0" temporalRate="1" nBand="0"/>
+    <Property key="channels" label="Channels" value="4" minimum="1" maximum="512" kind="0" choices="" floatValue="0"/>
+    <Property key="kernel_size" label="Kernel Size" value="3" minimum="1" maximum="512" kind="0" choices="" floatValue="0"/>
+    <Property key="dilation" label="Dilation" value="1" minimum="1" maximum="512" kind="0" choices="" floatValue="0"/>
+    <Property key="stride" label="Stride" value="2" minimum="1" maximum="512" kind="0" choices="" floatValue="0"/>
+  </Node>
+  <Node id="4" label="Variational Bottleneck" detail="Latent sample" type="variational_bottleneck" state="live_blue" x="480" y="0" width="180" height="120" hasWeights="1" seed="42" armedForTraining="1">
+    <Pin id="1005" label="features" kind="input" channels="0" temporalRate="1" nBand="0"/>
+    <Pin id="1006" label="z" kind="output" channels="128" temporalRate="0" nBand="0"/>
+    <Property key="latent_size" label="Latent" value="16" minimum="1" maximum="512" kind="0" choices="" floatValue="0"/>
+    <Property key="kernel_size" label="Kernel Size" value="5" minimum="1" maximum="512" kind="0" choices="" floatValue="0"/>
+  </Node>
+  <Node id="5" label="ConvTranspose1d" detail="Temporal upsampling" type="conv_transpose1d" state="live_blue" x="720" y="0" width="180" height="120" hasWeights="1" seed="42" armedForTraining="1">
+    <Pin id="1007" label="in" kind="input" channels="0" temporalRate="1" nBand="0"/>
+    <Pin id="1008" label="out" kind="output" channels="0" temporalRate="1" nBand="0"/>
+    <Property key="channels" label="Channels" value="2" minimum="1" maximum="512" kind="0" choices="" floatValue="0"/>
+    <Property key="kernel_size" label="Kernel Size" value="3" minimum="1" maximum="512" kind="0" choices="" floatValue="0"/>
+    <Property key="dilation" label="Dilation" value="1" minimum="1" maximum="512" kind="0" choices="" floatValue="0"/>
+    <Property key="stride" label="Stride" value="2" minimum="1" maximum="512" kind="0" choices="" floatValue="0"/>
+  </Node>
+  <Node id="6" label="Data Loader" detail="Training examples" type="data_loader" state="live_blue" x="0" y="180" width="180" height="120" hasWeights="0" seed="42" armedForTraining="0">
+    <Pin id="1009" label="input" kind="output" channels="0" temporalRate="1" nBand="0"/>
+    <Pin id="1010" label="target" kind="output" channels="0" temporalRate="1" nBand="0"/>
+    <Property key="output_count" label="Outputs" value="2" minimum="1" maximum="16" kind="0" choices="" floatValue="0"/>
+    <DataLoaderBinding kind="audio_list" scalarValue="0" exampleCount="0"/>
+    <DataLoaderBinding kind="audio_list" scalarValue="0" exampleCount="0"/>
+  </Node>
+  <Node id="7" label="Loss" detail="spectral_distance" type="loss" state="live_blue" x="720" y="180" width="180" height="120" hasWeights="0" seed="42" armedForTraining="0">
+    <Pin id="1011" label="prediction" kind="input" channels="0" temporalRate="1" nBand="0"/>
+    <Pin id="1012" label="target" kind="input" channels="0" temporalRate="1" nBand="0"/>
+    <Property key="loss_type" label="Loss" value="1" minimum="0" maximum="4" kind="1" choices="MR-STFT|Spectral Distance|KL|Adversarial|Feature Matching" floatValue="0"/>
+  </Node>
+  <Node id="8" label="Loss" detail="kl" type="loss" state="live_blue" x="480" y="180" width="180" height="120" hasWeights="0" seed="42" armedForTraining="0">
+    <Pin id="1013" label="prediction" kind="input" channels="0" temporalRate="1" nBand="0"/>
+    <Pin id="1014" label="target" kind="input" channels="0" temporalRate="1" nBand="0"/>
+    <Property key="loss_type" label="Loss" value="2" minimum="0" maximum="4" kind="1" choices="MR-STFT|Spectral Distance|KL|Adversarial|Feature Matching" floatValue="0"/>
+  </Node>
+  <Link id="2001" sourcePin="1001" destinationPin="1003"/>
+  <Link id="2002" sourcePin="1009" destinationPin="1003" kind="data_loader"/>
+  <Link id="2003" sourcePin="1004" destinationPin="1005"/>
+  <Link id="2004" sourcePin="1006" destinationPin="1007"/>
+  <Link id="2005" sourcePin="1008" destinationPin="1002"/>
+  <Link id="2006" sourcePin="1008" destinationPin="1011"/>
+  <Link id="2007" sourcePin="1006" destinationPin="1013"/>
+  <Link id="2008" sourcePin="1010" destinationPin="1012" kind="data_loader"/>
+</GraphDocument>

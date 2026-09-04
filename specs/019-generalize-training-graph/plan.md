@@ -8,7 +8,7 @@
 
 Next: `/speckit-tasks` (then `/speckit-implement`).
 
-Refactor train/inference to be **architecture-agnostic**: remove mapping/reconstruction modes and user-facing RAVE/steerable/TCN recipe branding from the Train workflow; introduce a **Data Loader** node (per-output bindings, equal-count at Run, distinct cables), **Loss** nodes (weighted + staged schedules), and a general **Training Configuration** surface (user library + project snapshot). Train only the **active data-loader path ∩ armed** set (passthrough otherwise; Gold always passthrough). Allow **group-of-one**; remove **TCN** and **Linear** from the palette. Ship example graph templates + training configs for prior mapping/reconstruction capability classes. Legacy project migration is out of scope. Local and cloud destinations consume the same generalized train package; VST remains the sole training UI.
+Refactor train/inference to be **architecture-agnostic**: remove mapping/reconstruction modes and user-facing RAVE/steerable/TCN recipe branding from the Train workflow; introduce a **Data Loader** node (per-output bindings, equal-count at Run, distinct cables), **Loss** nodes (stage-weighted + staged schedules), and a general **Training Configuration** surface (user library + project snapshot). Train only the **active data-loader path ∩ armed** set (passthrough otherwise; Gold always passthrough). Allow **group-of-one** with hub dedupe for shared live+loader pins; remove **TCN** and **Linear** from the palette. Ship example graph templates + training configs for prior mapping/reconstruction capability classes. Legacy project migration is out of scope. Local and cloud destinations consume the same generalized train package; VST remains the sole training UI.
 
 ## Technical Context
 
@@ -26,7 +26,7 @@ Refactor train/inference to be **architecture-agnostic**: remove mapping/reconst
 
 **Performance Goals**: 60 FPS UI under train load; zero audio-thread allocations; train never blocks `processBlock`; loss/progress UI ≥ ~1 Hz; live/Gold latency unchanged for non-rate-reducing graphs; Data Loader / Loss ignored on live audible path
 
-**Constraints**: VST-only Train UI; one active Data Loader per Run (Train panel picker); equal-count only at Start for connected outputs; data loader only on external/inference sources; no architecture mode selectors; no legacy project migration; copyright before first Train; mixed sample rates blocked
+**Constraints**: VST-only Train UI; one active Data Loader per Run (Train panel picker); equal-count only at Start for connected outputs; Data Loader on empty or Audio-In-fed pins (refuse processing-driven); Loss prediction=live / target=Data Loader; stage-only loss weights; per-stage `freeze_element_ids`; group hub dedupe for shared live+loader pins; no architecture mode selectors; no legacy project migration; copyright before first Train; mixed sample rates blocked
 
 **Scale/Scope**: One train job per master; multiple Data Loaders on canvas (one active); tens of nodes / several loss nodes; multi-stage schedules (e.g. RAVE-like 1e6+1e6); user config library disk-limited; example templates for mapping + reconstruction classes
 
@@ -37,7 +37,7 @@ Refactor train/inference to be **architecture-agnostic**: remove mapping/reconst
 - `Single Interface, Decoupled Compute`: **PASS** — Data Loader, Loss, Train config library, and examples live inside the VST; training remains a detached Python worker (local or cloud); no standalone train app.
 - `Dual-Engine Execution Model`: **PASS** — live Blue path ignores Data Loader/Loss; training uses worker-built module from graph fragment; success still auto-loads Gold; Unfreeze/Freeze unchanged in spirit.
 - `Manual Granular Freeze Policy`: **PASS** — train auto-load remains explicit completion; Gold on data-loader path is passthrough-only (cannot arm).
-- `Shape Integrity & Legal Constraints`: **PASS** — new connection rules refuse data-loader on internal pins; copyright acknowledgment reused; equal-count / missing-feed / loss / arm gates refuse Start with clear messages.
+- `Shape Integrity & Legal Constraints`: **PASS** — connect rules refuse data-loader on processing-driven pins and enforce Loss pin roles; group hubs dedupe shared live+loader pins; equal-count / missing-feed / loss / arm gates refuse Start with clear messages.
 - `Zero Audio Allocations / Non-Blocking Audio Thread`: **PASS** — train IPC, corpus packaging, config I/O, and path analysis off the audio thread; Data Loader/Loss never enter live `processBlock` audible path.
 - `Local vs cloud access`: **PASS** — same generalized package for both destinations; local remains account-free; cloud entitlement unchanged.
 
@@ -82,8 +82,8 @@ CloudService/
 Tests/
 ├── (C++ graph/data-loader/loss/group/palette tests)
 └── test_train_worker.py (stages, weighted losses, recipe-parity via configs)
-examples/ or OpenYourBox/Resources/examples/
-└── (graph templates + example training configs — location finalized in tasks)
+OpenYourBox/Resources/examples/training/
+└── graph templates + example training configs (T001)
 ```
 
 **Structure Decision**: Extend the existing OpenYourBox + Backend + CloudService layout. Do not add a separate train executable. Prefer one generalized IPC schema consumed by local and cloud workers.

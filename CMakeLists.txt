@@ -112,7 +112,7 @@ juce_add_plugin(OpenYourBox
     BUNDLE_ID "com.allendia.openyourbox"
     PLUGIN_MANUFACTURER_CODE Alnd
     PLUGIN_CODE OyBx
-    FORMATS AU VST3
+    FORMATS AU VST3 Standalone
     PRODUCT_NAME "OpenYourBox"
     DESCRIPTION "Live modular temporal convolution audio effect"
     IS_SYNTH FALSE
@@ -126,7 +126,13 @@ juce_add_plugin(OpenYourBox
 juce_generate_juce_header(OpenYourBox)
 
 juce_add_binary_data(OpenYourBoxResources
-    SOURCES Backend/freeze_worker.py Backend/train_worker.py)
+    SOURCES
+        Backend/freeze_worker.py
+        Backend/train_worker.py
+        OpenYourBox/Resources/examples/training/mapping-style-graph.xml
+        OpenYourBox/Resources/examples/training/mapping-style-config.json
+        OpenYourBox/Resources/examples/training/reconstruction-style-graph.xml
+        OpenYourBox/Resources/examples/training/reconstruction-style-config.json)
 
 target_sources(OpenYourBox PRIVATE
     OpenYourBox/Source/PluginEditor.cpp
@@ -153,6 +159,7 @@ target_sources(OpenYourBox PRIVATE
     OpenYourBox/Source/graph/NodeRenderer.cpp
     OpenYourBox/Source/library/CopyrightAcknowledgment.cpp
     OpenYourBox/Source/library/TrainingLibrary.cpp
+    OpenYourBox/Source/library/TrainingConfigLibrary.cpp
     OpenYourBox/Source/library/UserBoxLibrary.cpp
     OpenYourBox/Source/library/UserPresetLibrary.cpp
     OpenYourBox/Source/params/ParamLayout.cpp
@@ -462,6 +469,22 @@ if(BUILD_TESTING)
         juce::juce_recommended_config_flags
         juce::juce_recommended_warning_flags)
     add_test(NAME CloudTrain COMMAND OpenYourBoxCloudTrainTests)
+
+    juce_add_console_app(OpenYourBoxGeneralizedTrainTests PRODUCT_NAME "OpenYourBox Generalized Train Tests")
+    target_sources(OpenYourBoxGeneralizedTrainTests PRIVATE Tests/GeneralizedTrainGraphTests.cpp)
+    target_include_directories(OpenYourBoxGeneralizedTrainTests BEFORE PRIVATE
+        "${CMAKE_CURRENT_BINARY_DIR}/OpenYourBox_artefacts/JuceLibraryCode"
+        OpenYourBox/Source
+        "${TORCH_INCLUDE_DIRS}")
+    target_link_libraries(OpenYourBoxGeneralizedTrainTests PRIVATE
+        OpenYourBox
+        OpenYourBoxResources
+        juce::juce_audio_utils
+        juce::juce_dsp
+        juce::juce_opengl
+        juce::juce_recommended_config_flags
+        juce::juce_recommended_warning_flags)
+    add_test(NAME OpenYourBoxGeneralizedTrain COMMAND OpenYourBoxGeneralizedTrainTests)
 
     add_test(NAME OpenYourBoxCloudApi
         COMMAND "${Python3_EXECUTABLE}" -m pytest

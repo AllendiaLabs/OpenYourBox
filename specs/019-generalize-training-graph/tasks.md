@@ -32,8 +32,8 @@ description: "Task list for Generalize Training Graph"
 
 **Purpose**: Confirm layout and example resource location; no product behavior change yet.
 
-- [ ] T001 Decide and create example resource directory `OpenYourBox/Resources/examples/training/` (graph templates + configs) and note it in `specs/019-generalize-training-graph/plan.md`
-- [ ] T002 [P] List CMake/`Tests/` touchpoints for new graph/train tests in `specs/019-generalize-training-graph/quickstart.md` Prerequisites if missing
+- [X] T001 Decide and create example resource directory `OpenYourBox/Resources/examples/training/` (graph templates + configs) and note it in `specs/019-generalize-training-graph/plan.md`
+- [X] T002 [P] List CMake/`Tests/` touchpoints for new graph/train tests in `specs/019-generalize-training-graph/quickstart.md` Prerequisites if missing
 
 ---
 
@@ -43,15 +43,15 @@ description: "Task list for Generalize Training Graph"
 
 **⚠️ CRITICAL**: No user story work begins until this phase is complete
 
-- [ ] T003 Add `dataLoader` and `loss` node types, property keys, and `nodeTypeName` serialization in `OpenYourBox/Source/graph/GraphTypes.h`
-- [ ] T004 [P] Register Data Loader and Loss factory defaults (output count, loss_type, weight) in `OpenYourBox/Source/graph/FactoryPalette.h` (insertable stubs OK)
-- [ ] T005 Persist/load new node types in graph ValueTree paths in `OpenYourBox/Source/graph/NodeGraph.cpp` (and related snapshot helpers)
-- [ ] T006 Exclude `dataLoader` and `loss` from live audible compilation in `OpenYourBox/Source/dsp/LiveGraphEngine.cpp`
-- [ ] T007 Introduce `train_graph` request fields (`active_data_loader_id`, `data_loader_bindings`, `loss_schedule`, `schema_version`) skeleton in `OpenYourBox/Source/graph/NodeGraph.cpp` `createTrainRequest` (still may emit transitional data until later stories)
-- [ ] T008 [P] Accept `operation: "train_graph"` in local start path in `OpenYourBox/Source/train/TrainCoordinator.cpp` / `TrainCoordinator.h`
-- [ ] T009 [P] Accept `train_graph` in cloud package assembly in `OpenYourBox/Source/train/CloudJobPackage.cpp` / `CloudJobPackage.h`
-- [ ] T010 Remove `TrainObjective` / `lastTrainObjective` as required product state from `OpenYourBox/Source/graph/GraphTypes.h` and `OpenYourBox/Source/PluginProcessor.cpp` / `PluginProcessor.h` (migrate callers to no-objective flow)
-- [ ] T011 [P] Document foundational IPC shape against `specs/019-generalize-training-graph/contracts/generalized-train-ipc.md` (keep contract in sync if field names drift)
+- [X] T003 Add `dataLoader` and `loss` node types, property keys, and `nodeTypeName` serialization in `OpenYourBox/Source/graph/GraphTypes.h`
+- [X] T004 [P] Register Data Loader and Loss factory defaults (output count, loss_type, weight) in `OpenYourBox/Source/graph/FactoryPalette.h` (insertable stubs OK)
+- [X] T005 Persist/load new node types in graph ValueTree paths in `OpenYourBox/Source/graph/NodeGraph.cpp` (and related snapshot helpers)
+- [X] T006 Exclude `dataLoader` and `loss` from live audible compilation in `OpenYourBox/Source/dsp/LiveGraphEngine.cpp`
+- [X] T007 Introduce `train_graph` request fields (`active_data_loader_id`, `data_loader_bindings`, `loss_schedule`, `schema_version`) skeleton in `OpenYourBox/Source/graph/NodeGraph.cpp` `createTrainRequest` (still may emit transitional data until later stories)
+- [X] T008 [P] Accept `operation: "train_graph"` in local start path in `OpenYourBox/Source/train/TrainCoordinator.cpp` / `TrainCoordinator.h`
+- [X] T009 [P] Accept `train_graph` in cloud package assembly in `OpenYourBox/Source/train/CloudJobPackage.cpp` / `CloudJobPackage.h`
+- [X] T010 Remove `TrainObjective` / `lastTrainObjective` as required product state from `OpenYourBox/Source/graph/GraphTypes.h` and `OpenYourBox/Source/PluginProcessor.cpp` / `PluginProcessor.h` (migrate callers to no-objective flow)
+- [X] T011 [P] Document foundational IPC shape against `specs/019-generalize-training-graph/contracts/generalized-train-ipc.md` (keep contract in sync if field names drift)
 
 **Checkpoint**: Graph can insert stub Data Loader/Loss; live audio ignores them; train package can say `train_graph` without mapping/reconstruction enum
 
@@ -65,14 +65,14 @@ description: "Task list for Generalize Training Graph"
 
 ### Implementation for User Story 1
 
-- [ ] T012 [US1] Remove Mapping/Reconstruction objective combo and objective-specific library Start rules from `OpenYourBox/Source/ui/TrainPanel.cpp` / `TrainPanel.h`
-- [ ] T013 [US1] Remove reconstruction graph gate (`hasReconstructionTrainPath` / armed-bottleneck requirement) from Start preflight in `OpenYourBox/Source/PluginEditor.cpp` and `OpenYourBox/Source/graph/NodeGraph.cpp`
-- [ ] T014 [US1] Merge former mapping + reconstruction hyperparameter controls into one general Train HP surface in `OpenYourBox/Source/ui/TrainPanel.cpp` per `contracts/train-panel-generalized-ux.md`
-- [ ] T015 [US1] Replace Gold auto-load labels “Trained Steerable” / “Trained RAVE” with neutral naming (e.g. “Trained Graph”) in `OpenYourBox/Source/graph/NodeGraph.cpp` (absorb/success path)
-- [ ] T016 [P] [US1] Neutralize MLflow/default tags (`steerable` / `rave` / objective tags) in `OpenYourBox/Source/ui/TrainPanel.cpp` and train request assembly in `OpenYourBox/Source/PluginEditor.cpp`
-- [ ] T017 [US1] Update `Backend/train_worker.py` entry to prefer `train_graph` and stop requiring `train_options.objective` (temporary: if loss_schedule empty, fail clearly rather than mapping/reconstruction branch)
-- [ ] T018 [P] [US1] Align `CloudService/worker/train_runner.py` materialization with `train_graph` (no objective required) per `contracts/generalized-train-ipc.md`
-- [ ] T019 [US1] Strip user-facing architecture-mode copy from Train/Library messaging in `OpenYourBox/Source/ui/TrainingLibraryPanel.cpp` and related strings
+- [X] T012 [US1] Remove Mapping/Reconstruction objective combo and objective-specific library Start rules from `OpenYourBox/Source/ui/TrainPanel.cpp` / `TrainPanel.h`
+- [X] T013 [US1] Remove reconstruction graph gate (`hasReconstructionTrainPath` / armed-bottleneck requirement) from Start preflight in `OpenYourBox/Source/PluginEditor.cpp` and `OpenYourBox/Source/graph/NodeGraph.cpp`
+- [X] T014 [US1] Merge former mapping + reconstruction hyperparameter controls into one general Train HP surface in `OpenYourBox/Source/ui/TrainPanel.cpp` per `contracts/train-panel-generalized-ux.md`
+- [X] T015 [US1] Replace Gold auto-load labels “Trained Steerable” / “Trained RAVE” with neutral naming (e.g. “Trained Graph”) in `OpenYourBox/Source/graph/NodeGraph.cpp` (absorb/success path)
+- [X] T016 [P] [US1] Neutralize MLflow/default tags (`steerable` / `rave` / objective tags) in `OpenYourBox/Source/ui/TrainPanel.cpp` and train request assembly in `OpenYourBox/Source/PluginEditor.cpp`
+- [X] T017 [US1] Update `Backend/train_worker.py` entry to prefer `train_graph` and stop requiring `train_options.objective` (temporary: if loss_schedule empty, fail clearly rather than mapping/reconstruction branch)
+- [X] T018 [P] [US1] Align `CloudService/worker/train_runner.py` materialization with `train_graph` (no objective required) per `contracts/generalized-train-ipc.md`
+- [X] T019 [US1] Strip user-facing architecture-mode copy from Train/Library messaging in `OpenYourBox/Source/ui/TrainingLibraryPanel.cpp` and related strings
 
 **Checkpoint**: Train panel has no architecture/objective mode; Start no longer depends on RAVE/steerable gates; worker/cloud accept `train_graph`
 
@@ -86,16 +86,16 @@ description: "Task list for Generalize Training Graph"
 
 ### Implementation for User Story 2
 
-- [ ] T020 [US2] Implement Data Loader element UI (output count, rename outputs) in `OpenYourBox/Source/graph/NodeRenderer.cpp` and property panel paths
-- [ ] T021 [US2] Implement per-output `TrainingMaterialBinding` storage (audio_list + constant_scalar) on Data Loader in `OpenYourBox/Source/graph/NodeGraph.cpp` / `GraphTypes.h`
-- [ ] T022 [US2] Build binding editor UX (pick from Training Library / constant utility) in `OpenYourBox/Source/ui/` (new panel helper or `TrainingLibraryPanel.cpp` integration)
-- [ ] T023 [US2] Implement copy/repeat and constant/scalar-across-examples utilities for Data Loader outputs in `OpenYourBox/Source/graph/NodeGraph.cpp` (and UI triggers)
-- [ ] T024 [US2] Enforce equal-count **only at Start** for **connected** outputs of the active loader in `OpenYourBox/Source/PluginEditor.cpp` `handleTrainRun`
-- [ ] T025 [US2] Add Train panel **active Data Loader picker** (sole loader defaults active; multi without selection refuses) in `OpenYourBox/Source/ui/TrainPanel.cpp` / `TrainPanel.h`
-- [ ] T026 [US2] Refuse Start with clear message when no usable Data Loader / no active designation in `OpenYourBox/Source/PluginEditor.cpp`
-- [ ] T027 [US2] Resolve `data_loader_bindings` into the train package from the active loader in `OpenYourBox/Source/graph/NodeGraph.cpp` / `PluginEditor.cpp`
-- [ ] T028 [P] [US2] Worker reads `data_loader_bindings` and zips connected outputs by example index in `Backend/train_worker.py`
-- [ ] T029 [P] [US2] Add C++ tests for equal-count gate and sole/multi active-loader rules in `Tests/` (new or existing graph/train test file)
+- [X] T020 [US2] Implement Data Loader element UI (output count, rename outputs) in `OpenYourBox/Source/graph/NodeRenderer.cpp` and property panel paths
+- [X] T021 [US2] Implement per-output `TrainingMaterialBinding` storage (audio_list + constant_scalar) on Data Loader in `OpenYourBox/Source/graph/NodeGraph.cpp` / `GraphTypes.h`
+- [X] T022 [US2] Build binding editor UX (pick from Training Library / constant utility) in `OpenYourBox/Source/ui/` (new panel helper or `TrainingLibraryPanel.cpp` integration)
+- [X] T023 [US2] Implement copy/repeat and constant/scalar-across-examples utilities for Data Loader outputs in `OpenYourBox/Source/graph/NodeGraph.cpp` (and UI triggers)
+- [X] T024 [US2] Enforce equal-count **only at Start** for **connected** outputs of the active loader in `OpenYourBox/Source/PluginEditor.cpp` `handleTrainRun`
+- [X] T025 [US2] Add Train panel **active Data Loader picker** (sole loader defaults active; multi without selection refuses) in `OpenYourBox/Source/ui/TrainPanel.cpp` / `TrainPanel.h`
+- [X] T026 [US2] Refuse Start with clear message when no usable Data Loader / no active designation in `OpenYourBox/Source/PluginEditor.cpp`
+- [X] T027 [US2] Resolve `data_loader_bindings` into the train package from the active loader in `OpenYourBox/Source/graph/NodeGraph.cpp` / `PluginEditor.cpp`
+- [X] T028 [P] [US2] Worker reads `data_loader_bindings` and zips connected outputs by example index in `Backend/train_worker.py`
+- [X] T029 [P] [US2] Add C++ tests for equal-count gate and sole/multi active-loader rules in `Tests/` (new or existing graph/train test file)
 
 **Checkpoint**: Data Loader bindings drive batches; equal-count and active-loader gates match FR-002/003/004/017
 
@@ -109,16 +109,16 @@ description: "Task list for Generalize Training Graph"
 
 ### Implementation for User Story 3
 
-- [ ] T030 [US3] Implement data-loader path discovery (downstream from active loader outputs) in `OpenYourBox/Source/graph/NodeGraph.cpp`
-- [ ] T031 [US3] Change train snapshot / `armed_element_ids` to armed∩on-path; include on-path passthrough helpers in fragment in `OpenYourBox/Source/graph/NodeGraph.cpp`
-- [ ] T032 [US3] Enforce connection rules: allow data-loader on external/inference sources (incl. coexist with live); refuse internal upstream-fed pins in `OpenYourBox/Source/graph/NodeGraph.cpp` (connect API) + tooltip in `NodeRenderer.cpp`
-- [ ] T033 [US3] At Start, require every external source on the trainable path to have a data-loader feed or constant utility; refuse with message in `OpenYourBox/Source/PluginEditor.cpp`
-- [ ] T034 [US3] Keep arm checkbox; default new processing elements armed; refuse arming Gold; refuse Start if no armed on-path trainable in `OpenYourBox/Source/graph/NodeGraph.cpp` / `NodeRenderer.cpp` / `PluginEditor.cpp`
-- [ ] T035 [US3] Train-tab opacity: armed on-path normal; passthrough/off-path slightly transparent in `OpenYourBox/Source/graph/NodeRenderer.cpp` (Train tab active flag from `PluginEditor.cpp`)
-- [ ] T036 [US3] Distinct data-loader cable color and RMS N/A (skip fill) in `OpenYourBox/Source/graph/NodeRenderer.cpp`
-- [ ] T037 [P] [US3] Confirm live path ignores Data Loader/Loss (audible = live cables only) in `OpenYourBox/Source/dsp/LiveGraphEngine.cpp`
-- [ ] T038 [US3] Worker applies grads only to `armed_element_ids`; on-path others passthrough in `Backend/train_worker.py`
-- [ ] T039 [P] [US3] C++ tests for connect refuse/allow and path∩arm selection in `Tests/`
+- [X] T030 [US3] Implement data-loader path discovery (downstream from active loader outputs) in `OpenYourBox/Source/graph/NodeGraph.cpp`
+- [X] T031 [US3] Change train snapshot / `armed_element_ids` to armed∩on-path; include on-path passthrough helpers in fragment in `OpenYourBox/Source/graph/NodeGraph.cpp`
+- [X] T032 [US3] Enforce connection rules: allow data-loader on external/inference sources (incl. coexist with live); refuse internal upstream-fed pins in `OpenYourBox/Source/graph/NodeGraph.cpp` (connect API) + tooltip in `NodeRenderer.cpp`
+- [X] T033 [US3] At Start, require every external source on the trainable path to have a data-loader feed or constant utility; refuse with message in `OpenYourBox/Source/PluginEditor.cpp`
+- [X] T034 [US3] Keep arm checkbox; default new processing elements armed; refuse arming Gold; refuse Start if no armed on-path trainable in `OpenYourBox/Source/graph/NodeGraph.cpp` / `NodeRenderer.cpp` / `PluginEditor.cpp`
+- [X] T035 [US3] Train-tab opacity: armed on-path normal; passthrough/off-path slightly transparent in `OpenYourBox/Source/graph/NodeRenderer.cpp` (Train tab active flag from `PluginEditor.cpp`)
+- [X] T036 [US3] Distinct data-loader cable color and RMS N/A (skip fill) in `OpenYourBox/Source/graph/NodeRenderer.cpp`
+- [X] T037 [P] [US3] Confirm live path ignores Data Loader/Loss (audible = live cables only) in `OpenYourBox/Source/dsp/LiveGraphEngine.cpp`
+- [X] T038 [US3] Worker applies grads only to `armed_element_ids`; on-path others passthrough in `Backend/train_worker.py`
+- [X] T039 [P] [US3] C++ tests for connect refuse/allow and path∩arm selection in `Tests/`
 
 **Checkpoint**: SC-003/013/015/016/017/018/019 behaviors hold for path, arm, cables, and live isolation
 
@@ -132,21 +132,21 @@ description: "Task list for Generalize Training Graph"
 
 ### Implementation for User Story 4
 
-- [ ] T040 [US4] Complete Loss element UI (loss_type catalog, weight, pins) in `OpenYourBox/Source/graph/NodeRenderer.cpp` / `FactoryPalette.h` / `GraphTypes.h` per `contracts/loss-nodes-and-stages.md`
-- [ ] T041 [US4] Validate loss wiring at Start (usable loss on path; refuse incomplete/off-path supervision) in `OpenYourBox/Source/PluginEditor.cpp` / `NodeGraph.cpp`
-- [ ] T042 [US4] Add loss stage schedule editor to Train panel in `OpenYourBox/Source/ui/TrainPanel.cpp` / `TrainPanel.h`
-- [ ] T043 [US4] Serialize `loss_schedule` into train package in `OpenYourBox/Source/graph/NodeGraph.cpp` / `PluginEditor.cpp`
-- [ ] T044 [US4] Implement weighted single-stage and multi-stage loss evaluation in `Backend/train_worker.py` (reuse spectral/KL/GAN/FM helpers; no `objective` branch)
-- [ ] T045 [P] [US4] Progress events include stage name/index for multi-stage in `Backend/train_worker.py` and display in `OpenYourBox/Source/ui/TrainPanel.cpp`
-- [ ] T046 [US4] Implement user `TrainingConfigLibrary` persistence (list/save/load/rename/delete) in `OpenYourBox/Source/library/TrainingConfigLibrary.h` / `TrainingConfigLibrary.cpp`
-- [ ] T047 [US4] Wire Train panel Save/Load to user config library in `OpenYourBox/Source/ui/TrainPanel.cpp`
-- [ ] T048 [US4] Persist/restore project training-config snapshot in `OpenYourBox/Source/PluginProcessor.cpp` / `PluginProcessor.h`
-- [ ] T049 [US4] Forward-compatible config load (ignore unknown; defaults + warn for missing) in `OpenYourBox/Source/library/TrainingConfigLibrary.cpp` and Train panel
-- [ ] T050 [P] [US4] Update cloud runner to pass loss schedule through unchanged in `CloudService/worker/train_runner.py`
-- [ ] T051 [US4] Author mapping-style and reconstruction-style **example graph templates** under `OpenYourBox/Resources/examples/training/`
-- [ ] T052 [P] [US4] Author matching **example training configs** under `OpenYourBox/Resources/examples/training/` (clearly labeled examples, not modes)
-- [ ] T053 [US4] Expose example load entry points labeled as examples/templates in `OpenYourBox/Source/ui/TrainPanel.cpp` (and/or preset/library UI)
-- [ ] T054 [P] [US4] Python tests for weighted losses, stages, and recipe-parity smoke in `Tests/test_train_worker.py`
+- [X] T040 [US4] Complete Loss element UI (loss_type catalog, weight, pins) in `OpenYourBox/Source/graph/NodeRenderer.cpp` / `FactoryPalette.h` / `GraphTypes.h` per `contracts/loss-nodes-and-stages.md`
+- [X] T041 [US4] Validate loss wiring at Start (usable loss on path; refuse incomplete/off-path supervision) in `OpenYourBox/Source/PluginEditor.cpp` / `NodeGraph.cpp`
+- [X] T042 [US4] Add loss stage schedule editor to Train panel in `OpenYourBox/Source/ui/TrainPanel.cpp` / `TrainPanel.h`
+- [X] T043 [US4] Serialize `loss_schedule` into train package in `OpenYourBox/Source/graph/NodeGraph.cpp` / `PluginEditor.cpp`
+- [X] T044 [US4] Implement weighted single-stage and multi-stage loss evaluation in `Backend/train_worker.py` (reuse spectral/KL/GAN/FM helpers; no `objective` branch)
+- [X] T045 [P] [US4] Progress events include stage name/index for multi-stage in `Backend/train_worker.py` and display in `OpenYourBox/Source/ui/TrainPanel.cpp`
+- [X] T046 [US4] Implement user `TrainingConfigLibrary` persistence (list/save/load/rename/delete) in `OpenYourBox/Source/library/TrainingConfigLibrary.h` / `TrainingConfigLibrary.cpp`
+- [X] T047 [US4] Wire Train panel Save/Load to user config library in `OpenYourBox/Source/ui/TrainPanel.cpp`
+- [X] T048 [US4] Persist/restore project training-config snapshot in `OpenYourBox/Source/PluginProcessor.cpp` / `PluginProcessor.h`
+- [X] T049 [US4] Forward-compatible config load (ignore unknown; defaults + warn for missing) in `OpenYourBox/Source/library/TrainingConfigLibrary.cpp` and Train panel
+- [X] T050 [P] [US4] Update cloud runner to pass loss schedule through unchanged in `CloudService/worker/train_runner.py`
+- [X] T051 [US4] Author mapping-style and reconstruction-style **example graph templates** under `OpenYourBox/Resources/examples/training/`
+- [X] T052 [P] [US4] Author matching **example training configs** under `OpenYourBox/Resources/examples/training/` (clearly labeled examples, not modes)
+- [X] T053 [US4] Expose example load entry points labeled as examples/templates in `OpenYourBox/Source/ui/TrainPanel.cpp` (and/or preset/library UI)
+- [X] T054 [P] [US4] Python tests for weighted losses, stages, and recipe-parity smoke in `Tests/test_train_worker.py`
 
 **Checkpoint**: FR-008–012, FR-018, FR-020 and SC-008–011/014 satisfied for new graphs
 
@@ -160,9 +160,9 @@ description: "Task list for Generalize Training Graph"
 
 ### Implementation for User Story 5
 
-- [ ] T055 [US5] Lower `createGroup` minimum from 2 to 1 (keep Audio I/O exclusion) in `OpenYourBox/Source/graph/NodeGraph.cpp`
-- [ ] T056 [US5] Update group menu enablement (`canGroup`) for single selection in `OpenYourBox/Source/graph/NodeRenderer.cpp`
-- [ ] T057 [P] [US5] C++ test for one-member group create/ungroup/persist in `Tests/`
+- [X] T055 [US5] Lower `createGroup` minimum from 2 to 1 (keep Audio I/O exclusion) in `OpenYourBox/Source/graph/NodeGraph.cpp`
+- [X] T056 [US5] Update group menu enablement (`canGroup`) for single selection in `OpenYourBox/Source/graph/NodeRenderer.cpp`
+- [X] T057 [P] [US5] C++ test for one-member group create/ungroup/persist in `Tests/`
 
 **Checkpoint**: FR-013 / SC-004
 
@@ -176,10 +176,10 @@ description: "Task list for Generalize Training Graph"
 
 ### Implementation for User Story 6
 
-- [ ] T058 [US6] Remove TCN and Linear from insertable palette in `OpenYourBox/Source/graph/FactoryPalette.h`
-- [ ] T059 [P] [US6] Stop advertising TCN/Linear in any insert UI paths in `OpenYourBox/Source/graph/NodeRenderer.cpp` (and related menus)
-- [ ] T060 [US6] Ensure live/worker no longer require TCN/Linear for new graphs (leave dead handlers or remove safely) in `OpenYourBox/Source/dsp/LiveGraphEngine.cpp` / `Backend/train_worker.py` without adding migration
-- [ ] T061 [P] [US6] C++ test or assertion that palette insertion list excludes `tcn` and `linear` in `Tests/`
+- [X] T058 [US6] Remove TCN and Linear from insertable palette in `OpenYourBox/Source/graph/FactoryPalette.h`
+- [X] T059 [P] [US6] Stop advertising TCN/Linear in any insert UI paths in `OpenYourBox/Source/graph/NodeRenderer.cpp` (and related menus)
+- [X] T060 [US6] Ensure live/worker no longer require TCN/Linear for new graphs (leave dead handlers or remove safely) in `OpenYourBox/Source/dsp/LiveGraphEngine.cpp` / `Backend/train_worker.py` without adding migration
+- [X] T061 [P] [US6] C++ test or assertion that palette insertion list excludes `tcn` and `linear` in `Tests/`
 
 **Checkpoint**: FR-014 / SC-006; legacy migration still out of scope (FR-015)
 
@@ -189,11 +189,11 @@ description: "Task list for Generalize Training Graph"
 
 **Purpose**: End-to-end validation, docs sync, cleanup across stories.
 
-- [ ] T062 [P] Sync all five contracts under `specs/019-generalize-training-graph/contracts/` with final field names and UI copy
-- [ ] T063 Run and fix gaps against `specs/019-generalize-training-graph/quickstart.md` scenarios A–F
-- [ ] T064 [P] Remove dead `train_steerable` / `objective` call sites from `OpenYourBox/Source/`, `Backend/train_worker.py`, and `CloudService/` (keep only if needed for out-of-scope legacy—prefer delete per FR-015)
-- [ ] T065 Verify copyright gate and non-blocking live audio still hold during generalized train in `OpenYourBox/Source/ui/CopyrightModal.cpp` / `PluginEditor.cpp` / train coordinator paths
-- [ ] T066 [P] Update `CloudService/README.md` train package notes for `train_graph` if they still document objective modes
+- [X] T062 [P] Sync all five contracts under `specs/019-generalize-training-graph/contracts/` with final field names and UI copy
+- [X] T063 Run and fix gaps against `specs/019-generalize-training-graph/quickstart.md` scenarios A–F
+- [X] T064 [P] Remove dead `train_steerable` / `objective` call sites from `OpenYourBox/Source/`, `Backend/train_worker.py`, and `CloudService/` (keep only if needed for out-of-scope legacy—prefer delete per FR-015)
+- [X] T065 Verify copyright gate and non-blocking live audio still hold during generalized train in `OpenYourBox/Source/ui/CopyrightModal.cpp` / `PluginEditor.cpp` / train coordinator paths
+- [X] T066 [P] Update `CloudService/README.md` train package notes for `train_graph` if they still document objective modes
 
 ---
 
@@ -292,3 +292,16 @@ Foundational + **US1 + US2 + US3 + US4** (all P1) — required for a real train 
 - Discriminators stay worker-only (005/019 research)
 - Commit after each task or logical group
 - Stop at checkpoints to validate each story’s Independent Test criteria
+
+## Post-implement refinements (2026-09-05)
+
+Documented in Clarifications + contracts; already implemented in tree:
+
+| Change | Spec / contract | Code anchors |
+|--------|-----------------|--------------|
+| Loss weight on stage schedule only (no Loss-box weight) | FR-009/011; `loss-nodes-and-stages.md`; `train-panel-generalized-ux.md` | `TrainPanel.*`, `PluginEditor.cpp`, `train_worker.py` |
+| Data Loader: empty pin OK; refuse processing upstream; Audio In coexist | FR-006; `data-loader-graph-ui.md` | `NodeGraph::connect` |
+| Loss: Data Loader→target only; live→prediction only | FR-009; Decision 6a | `NodeGraph::connect` |
+| Group hub dedupe for shared Audio In + Data Loader | FR-013; Decision 11 | `groupBoundaryPorts` |
+| Per-stage freeze (structure tree, collapsed by default) | FR-009/009a; Decision 6b; SC-022 | `TrainPanel.*`, `PluginEditor.cpp`, `train_worker._apply_train_graph_grads` |
+| Tests | SC-013/020/021/022 | `Tests/GeneralizedTrainGraphTests.cpp`, `Tests/test_train_worker.py` |

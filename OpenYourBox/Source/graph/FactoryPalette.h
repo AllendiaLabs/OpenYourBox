@@ -55,12 +55,10 @@ inline constexpr PaletteItem layerPaletteItems[] = {
     {"Bottleneck", NodeType::variationalBottleneck},
     {"Conv1D", NodeType::convolution},
     {"ConvTranspose1d", NodeType::convTranspose},
-    {"Linear", NodeType::linear},
     {"Math Expression", NodeType::mathExpression},
     {"Noise Synth", NodeType::noiseSynthesizer},
     {"PQMF Analysis", NodeType::pqmfAnalysis},
     {"PQMF Synthesis", NodeType::pqmfSynthesis},
-    {"TCN", NodeType::tcn},
     {"Utility", NodeType::merge},
 };
 
@@ -70,12 +68,19 @@ inline constexpr PaletteItem sourcePaletteItems[] = {
     {"XY Trackpad", NodeType::xyTrackpad},
 };
 
+/** @brief Factory Training category (live-inaudible). */
+inline constexpr PaletteItem trainingPaletteItems[] = {
+    {"Data Loader", NodeType::dataLoader},
+    {"Loss", NodeType::loss},
+};
+
 /** @brief Ordered Factory catalog categories (single source of truth). */
 inline constexpr PaletteCategory paletteCategories[] = {
     {"Effects", effectsPaletteItems, std::size(effectsPaletteItems)},
     {"Neural / Sequence", neuralPaletteItems, std::size(neuralPaletteItems)},
     {"Layers", layerPaletteItems, std::size(layerPaletteItems)},
     {"Sources", sourcePaletteItems, std::size(sourcePaletteItems)},
+    {"Training", trainingPaletteItems, std::size(trainingPaletteItems)},
 };
 
 /**

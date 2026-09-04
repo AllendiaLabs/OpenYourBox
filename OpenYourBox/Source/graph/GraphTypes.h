@@ -60,11 +60,27 @@ enum class NodeType {
   /** Editor-only source hub declaring a group's external input lanes. */
   groupInput,
   /** Editor-only sink hub declaring a group's external output lanes. */
-  groupOutput
+  groupOutput,
+  /** @brief Training-only example source; ignored by live audible compilation. */
+  dataLoader,
+  /** @brief Training-only supervision node; ignored by live audible compilation. */
+  loss
 };
 
-/** @brief Train recipe selected in the unified Train panel. */
-enum class TrainObjective { mapping, reconstruction };
+/** @brief Catalog of Loss element supervision types. */
+enum class LossType {
+  mrStft = 0,
+  spectralDistance = 1,
+  kl = 2,
+  adversarial = 3,
+  featureMatching = 4
+};
+
+/** @brief Per-output Data Loader material binding kind. */
+enum class DataLoaderBindingKind { audioList, constantScalar };
+
+/** @brief Directed cable role (live vs training-only data-loader feed). */
+enum class GraphLinkKind { live, dataLoader };
 
 /** @brief Accelerator requested for the Python train worker. */
 enum class TrainDevice { automatic, cpu, mps, cuda };
@@ -221,6 +237,10 @@ inline const juce::Colour conditioningColour{180, 140, 255};
  *        PQMF, Noise Synth).
  */
 inline const juce::Colour helperLayerColour{185, 200, 55};
+/** @brief Training-only Data Loader / Loss chrome. */
+inline const juce::Colour trainOnlyColour{230, 140, 70};
+/** @brief Distinct data-loader cable colour (no RMS fill). */
+inline const juce::Colour dataLoaderCableColour{255, 120, 40};
 
 /** @brief Inclusive lower bound for Knob/XY conditioning scalars. */
 inline constexpr float conditioningMinimum = -10.0f;
@@ -372,6 +392,11 @@ inline bool isConditioningSourceType(NodeType type) noexcept {
 inline bool isControlSourceType(NodeType type) noexcept {
   return isFixedIoType(type) || isConditioningSourceType(type) ||
          isGroupBoundaryType(type);
+}
+
+/** @brief Returns true for Data Loader and Loss (live-inaudible) elements. */
+inline bool isTrainOnlyType(NodeType type) noexcept {
+  return type == NodeType::dataLoader || type == NodeType::loss;
 }
 
 /** @brief Returns true for live elements that own trainable parameters. */
@@ -702,24 +727,68 @@ inline float clampPriorMix(float value) noexcept {
 }
 
 /**
- * @brief Parses a persisted Train objective token.
- * @param name Objective string.
- * @return Mapping unless the token is reconstruction.
+ * @brief Parses a persisted Loss type token.
+ * @param name Catalog string (`mr_stft`, `spectral_distance`, …).
  */
-inline TrainObjective trainObjectiveFromName(const std::string &name) noexcept {
-  return name == "reconstruction" ? TrainObjective::reconstruction
-                                  : TrainObjective::mapping;
+inline LossType lossTypeFromName(const std::string &name) noexcept {
+  if (name == "spectral_distance")
+    return LossType::spectralDistance;
+  if (name == "kl")
+    return LossType::kl;
+  if (name == "adversarial")
+    return LossType::adversarial;
+  if (name == "feature_matching")
+    return LossType::featureMatching;
+  return LossType::mrStft;
 }
 
 /**
- * @brief Returns the persisted Train objective token.
- * @param objective Selected recipe.
- * @return `mapping` or `reconstruction`.
+ * @brief Returns the persisted Loss type token.
+ * @param type Catalog value.
  */
-inline const char *trainObjectiveName(TrainObjective objective) noexcept {
-  return objective == TrainObjective::reconstruction ? "reconstruction"
-                                                     : "mapping";
+inline const char *lossTypeName(LossType type) noexcept {
+  switch (type) {
+  case LossType::spectralDistance:
+    return "spectral_distance";
+  case LossType::kl:
+    return "kl";
+  case LossType::adversarial:
+    return "adversarial";
+  case LossType::featureMatching:
+    return "feature_matching";
+  case LossType::mrStft:
+    break;
+  }
+  return "mr_stft";
 }
+
+/**
+ * @brief Maps a Loss `loss_type` choice index to the catalog enum.
+ * @param choice Property integer 0..4.
+ */
+inline LossType lossTypeFromChoice(int choice) noexcept {
+  switch (choice) {
+  case 1:
+    return LossType::spectralDistance;
+  case 2:
+    return LossType::kl;
+  case 3:
+    return LossType::adversarial;
+  case 4:
+    return LossType::featureMatching;
+  default:
+    return LossType::mrStft;
+  }
+}
+
+/** @brief Default Data Loader output count on insert. */
+inline constexpr int defaultDataLoaderOutputCount = 2;
+/** @brief Inclusive upper bound for Data Loader outputs. */
+inline constexpr int maximumDataLoaderOutputs = 16;
+/** @brief Default Loss node weight. */
+inline constexpr float defaultLossWeight = 1.0f;
+/** @brief Train IPC schema consumed by local and cloud workers. */
+inline constexpr int trainGraphSchemaVersion = 2;
 
 /**
  * @brief Parses a train-worker device token.
@@ -862,6 +931,9 @@ inline juce::Colour chromeColourForType(NodeType type,
     return liveBlueColour;
   case NodeType::blackBox:
     return frozenGoldColour;
+  case NodeType::dataLoader:
+  case NodeType::loss:
+    return trainOnlyColour;
   }
   return liveBlueColour;
 }
@@ -1798,6 +1870,39 @@ struct GroupBoundaryPort {
   std::string label;
 };
 
+/** @brief One audio example referenced by a Data Loader output. */
+struct DataLoaderBindingEntry {
+  /** @brief Absolute filesystem path when resolved. */
+  std::string path;
+  /** @brief Training Library entry id when bound from the library. */
+  std::string libraryId;
+};
+
+/** @brief Ordered materials or constant utility on one Data Loader output. */
+struct TrainingMaterialBinding {
+  /** @brief Audio list vs constant scalar copied across examples. */
+  DataLoaderBindingKind kind = DataLoaderBindingKind::audioList;
+  /** @brief Ordered examples for `audio_list`. */
+  std::vector<DataLoaderBindingEntry> entries;
+  /** @brief Scalar copied across examples for `constant_scalar`. */
+  float scalarValue = 0.0f;
+  /**
+   * @brief Declared example count for constants (or derived from `entries`).
+   */
+  int exampleCount = 0;
+};
+
+/**
+ * @brief Example count used by the equal-count Start gate.
+ * @param binding Per-output binding.
+ */
+inline int dataLoaderBindingExampleCount(
+    const TrainingMaterialBinding &binding) noexcept {
+  if (binding.kind == DataLoaderBindingKind::constantScalar)
+    return std::max(0, binding.exampleCount);
+  return static_cast<int>(binding.entries.size());
+}
+
 /** @brief Editable visual and processing description of one operation. */
 struct GraphNode {
   /** @brief Stable graph-wide node identifier. */
@@ -1922,6 +2027,12 @@ struct GraphNode {
    * independent repeats that the UI never draws.
    */
   std::vector<RepeatWeightSlot> repeatSlots;
+  /**
+   * @brief Per-output training materials for Data Loader nodes.
+   *
+   * Indexed by output pin index. Empty on other node types.
+   */
+  std::vector<TrainingMaterialBinding> dataLoaderBindings;
 };
 
 /**
@@ -2022,6 +2133,8 @@ struct GraphLink {
   std::int32_t sourcePinId = 0;
   /** @brief Stable input pin identifier. */
   std::int32_t destinationPinId = 0;
+  /** @brief Live cable vs training-only data-loader feed. */
+  GraphLinkKind kind = GraphLinkKind::live;
 };
 
 /** @brief Persisted graph canvas navigation state. */

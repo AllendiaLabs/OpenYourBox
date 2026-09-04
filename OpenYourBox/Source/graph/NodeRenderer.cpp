@@ -940,20 +940,26 @@ void NodeRenderer::render(NodeGraph &graph,
         visualPinForLink(graph, link.sourcePinId, focusedGroupId);
     const auto destPin =
         visualPinForLink(graph, link.destinationPinId, focusedGroupId);
+    const bool dataLoaderCable =
+        link.kind == GraphLinkKind::dataLoader;
+    const auto cableColour =
+        dataLoaderCable ? ImColor(colourFor(dataLoaderCableColour))
+                        : ImColor(idleLinkColour);
     ed::Link(ed::LinkId(editorIdentifier(link.id)),
              ed::PinId(editorIdentifier(sourcePin)),
-             ed::PinId(editorIdentifier(destPin)),
-             ImColor(idleLinkColour), idleLinkThickness);
+             ed::PinId(editorIdentifier(destPin)), cableColour,
+             idleLinkThickness);
     liveLinkIds.insert(link.id);
     float targetFill = 0.0f;
-    if (outputRmsByNodeId != nullptr) {
+    if (!dataLoaderCable && outputRmsByNodeId != nullptr) {
       const auto found = outputRmsByNodeId->find(*sourceNode);
       if (found != outputRmsByNodeId->end())
         targetFill = rmsToLinkFill(found->second);
     }
     auto &displayed = displayedLinkFill[link.id];
     displayed += (targetFill - displayed) * fillSmooth;
-    drawDirectedLinkFill(link.id, displayed);
+    if (!dataLoaderCable)
+      drawDirectedLinkFill(link.id, displayed);
   }
   for (auto it = displayedLinkFill.begin(); it != displayedLinkFill.end();) {
     if (liveLinkIds.count(it->first) == 0)
@@ -1301,10 +1307,20 @@ void NodeRenderer::renderNode(NodeGraph &graph, GraphNode &node,
                               const NodeRendererCallbacks &callbacks) {
   (void)callbacks;
   positionedNodeIds.insert(node.id);
+  float alpha = 1.0f;
+  if (trainTabActive && !isTrainOnlyType(node.type) &&
+      !isControlSourceType(node.type)) {
+    const bool onPath = trainOnPathNodeIds.count(node.id) != 0;
+    const bool armedOnPath = trainArmedOnPathNodeIds.count(node.id) != 0;
+    if (!armedOnPath || !onPath)
+      alpha = 0.45f;
+  }
   const auto nodeColour = colourFor(node.colour);
   ed::PushStyleColor(ed::StyleColor_NodeBg,
-                     ImVec4(nodeColour.x, nodeColour.y, nodeColour.z, 0.28f));
-  ed::PushStyleColor(ed::StyleColor_NodeBorder, nodeColour);
+                     ImVec4(nodeColour.x, nodeColour.y, nodeColour.z, 0.28f * alpha));
+  ed::PushStyleColor(ed::StyleColor_NodeBorder,
+                     ImVec4(nodeColour.x, nodeColour.y, nodeColour.z, alpha));
+  ImGui::PushStyleVar(ImGuiStyleVar_Alpha, alpha);
   ed::BeginNode(ed::NodeId(editorIdentifier(node.id)));
   ImGui::PushID(node.id);
   reservePassiveBoxWidth(nodeBodyWidth);
@@ -1344,6 +1360,7 @@ void NodeRenderer::renderNode(NodeGraph &graph, GraphNode &node,
   ImGui::PopTextWrapPos();
   ImGui::PopID();
   ed::EndNode();
+  ImGui::PopStyleVar();
   ed::PopStyleColor(2);
 }
 
@@ -1436,16 +1453,38 @@ void NodeRenderer::renderGroup(NodeGraph &graph, GraphGroup &group,
                                const NodeRendererCallbacks &callbacks) {
   positionedGroupIds.insert(group.id);
   const auto highlight = dropTargetGroupId == group.id;
+  float alpha = 1.0f;
+  if (trainTabActive) {
+    bool anyArmable = false;
+    bool anyArmedOnPath = false;
+    for (const auto leafId : graph.collectLeafNodeIds(group.id)) {
+      const auto *leaf = graph.findNode(leafId);
+      if (leaf == nullptr || !leaf->hasWeights ||
+          leaf->state != NodeState::liveBlue ||
+          isControlSourceType(leaf->type) || isTrainOnlyType(leaf->type))
+        continue;
+      anyArmable = true;
+      if (trainArmedOnPathNodeIds.count(leafId) != 0)
+        anyArmedOnPath = true;
+    }
+    if (anyArmable && !anyArmedOnPath)
+      alpha = 0.45f;
+  }
   const auto frame = colourFor(highlight ? groupDropHighlightColour
                                          : groupFrameColour);
   ed::PushStyleColor(ed::StyleColor_NodeBg,
-                     ImVec4(frame.x, frame.y, frame.z, highlight ? 0.35f : 0.18f));
+                     ImVec4(frame.x, frame.y, frame.z,
+                            (highlight ? 0.35f : 0.18f) * alpha));
   ed::PushStyleColor(ed::StyleColor_NodeBorder,
-                     ImVec4(frame.x, frame.y, frame.z, highlight ? 1.0f : 0.85f));
+                     ImVec4(frame.x, frame.y, frame.z,
+                            (highlight ? 1.0f : 0.85f) * alpha));
   ed::PushStyleColor(ed::StyleColor_GroupBg,
-                     ImVec4(frame.x, frame.y, frame.z, highlight ? 0.22f : 0.10f));
+                     ImVec4(frame.x, frame.y, frame.z,
+                            (highlight ? 0.22f : 0.10f) * alpha));
   ed::PushStyleColor(ed::StyleColor_GroupBorder,
-                     ImVec4(frame.x, frame.y, frame.z, highlight ? 1.0f : 0.55f));
+                     ImVec4(frame.x, frame.y, frame.z,
+                            (highlight ? 1.0f : 0.55f) * alpha));
+  ImGui::PushStyleVar(ImGuiStyleVar_Alpha, alpha);
   ed::BeginNode(ed::NodeId(editorIdentifier(group.id)));
   ImGui::PushID(group.id);
   (void)callbacks;
@@ -1503,6 +1542,7 @@ void NodeRenderer::renderGroup(NodeGraph &graph, GraphGroup &group,
 
   ImGui::PopID();
   ed::EndNode();
+  ImGui::PopStyleVar();
   ed::PopStyleColor(4);
 }
 
@@ -1696,7 +1736,7 @@ void NodeRenderer::handleContextMenus(NodeGraph &graph,
         std::find(groupMembers.begin(), groupMembers.end(), contextNodeId) ==
             groupMembers.end())
       groupMembers.push_back(contextNodeId);
-    const auto canGroup = groupMembers.size() >= 2;
+    const auto canGroup = groupMembers.size() >= 1;
     if (ImGui::MenuItem("Group", nullptr, false, canGroup)) {
       const auto result = graph.createGroup(groupMembers);
       if (result.accepted) {
@@ -3338,6 +3378,81 @@ void NodeRenderer::renderNodeParameterEditors(
     ImGui::BeginDisabled();
   if (node.type == NodeType::xyTrackpad)
     renderXyPad(graph, node, callbacks);
+
+  if (node.type == NodeType::dataLoader) {
+    ImGui::TextUnformatted("Outputs");
+    for (std::size_t index = 0; index < node.outputs.size(); ++index) {
+      ImGui::PushID(static_cast<int>(index));
+      std::array<char, 64> label{};
+      std::snprintf(label.data(), label.size(), "%s",
+                    node.outputs[index].label.c_str());
+      if (ImGui::InputText("Name", label.data(), label.size()) && !readOnly)
+        graph.setDataLoaderOutputLabel(node.id, static_cast<int>(index),
+                                       label.data());
+      if (index >= node.dataLoaderBindings.size())
+        node.dataLoaderBindings.resize(node.outputs.size());
+      auto &binding = node.dataLoaderBindings[index];
+      const char *kindLabel =
+          binding.kind == DataLoaderBindingKind::constantScalar
+              ? "Constant"
+              : "Audio list";
+      if (ImGui::BeginCombo("Binding", kindLabel) && !readOnly) {
+        if (ImGui::Selectable("Audio list",
+                              binding.kind == DataLoaderBindingKind::audioList))
+          binding.kind = DataLoaderBindingKind::audioList;
+        if (ImGui::Selectable("Constant",
+                              binding.kind ==
+                                  DataLoaderBindingKind::constantScalar))
+          binding.kind = DataLoaderBindingKind::constantScalar;
+        ImGui::EndCombo();
+      }
+      if (binding.kind == DataLoaderBindingKind::constantScalar) {
+        ImGui::InputFloat("Value", &binding.scalarValue);
+        ImGui::InputInt("Example count", &binding.exampleCount);
+        binding.exampleCount = std::max(0, binding.exampleCount);
+      } else {
+        ImGui::Text("%d examples",
+                    dataLoaderBindingExampleCount(binding));
+        if (trainingLibrary != nullptr) {
+          for (const auto &entry : trainingLibrary->getEntries()) {
+            ImGui::PushID(entry.id.toRawUTF8());
+            bool included = false;
+            for (const auto &item : binding.entries) {
+              if (item.libraryId == entry.id.toStdString()) {
+                included = true;
+                break;
+              }
+            }
+            if (ImGui::Checkbox(entry.displayName.toRawUTF8(), &included) &&
+                !readOnly) {
+              if (included) {
+                DataLoaderBindingEntry item;
+                item.libraryId = entry.id.toStdString();
+                item.path = entry.xPath.toStdString();
+                binding.entries.push_back(std::move(item));
+              } else {
+                binding.entries.erase(
+                    std::remove_if(binding.entries.begin(),
+                                   binding.entries.end(),
+                                   [&entry](const DataLoaderBindingEntry &item) {
+                                     return item.libraryId ==
+                                            entry.id.toStdString();
+                                   }),
+                    binding.entries.end());
+              }
+            }
+            ImGui::PopID();
+          }
+        }
+        if (index > 0 && ImGui::SmallButton("Copy/repeat from previous") &&
+            !readOnly)
+          graph.equalizeDataLoaderOutput(node.id, static_cast<int>(index - 1),
+                                         static_cast<int>(index));
+      }
+      ImGui::PopID();
+    }
+    ImGui::Separator();
+  }
 
   int convStride = 1;
   if (node.type == NodeType::convolution ||

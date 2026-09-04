@@ -35,4 +35,5 @@
 - Clarification session 2026-09-04: 5/5 questions answered (loss nodes + capability no-regression; no legacy migration; active data loader designation; per-output bindings; user library + project config snapshots). Checklist items remain passing.
 - Clarification session 2026-09-04 (continued): 5/5 more questions (weighted+staged losses; train-only live path; equal-count at Run for connected outputs; shipped examples + external-only data-loader rule; Knob/Trackpad sources + scalar utilities + Train-tab transparency + fail if missing feeds). Checklist items remain passing.
 - Clarification session 2026-09-04 (more): 5/5 questions (arm = backprop / disarmed = passthrough; default armed; refuse if none armed; Gold always passthrough; active Data Loader chosen only in Train panel). Checklist items remain passing.
-- No unresolved `[NEEDS CLARIFICATION]` markers. Ready for `/speckit-plan`.
+- Clarification session 2026-09-05 (post-implement): stage-only loss weights; empty-pin Data Loader OK / refuse processing upstream; Loss prediction=live & target=Data Loader; group hub dedupe for shared live+loader pins; **per-stage freeze** (structure checkboxes, collapsed by default). Spec/contracts/data-model/research/plan/quickstart updated. Checklist items remain passing.
+- No unresolved `[NEEDS CLARIFICATION]` markers.

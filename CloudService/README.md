@@ -10,8 +10,9 @@ Training is always real. There is no mock/fake advancement worker and no
 ## Layout
 
 - `api/` — HTTPS JSON control plane (auth, entitlement, jobs, artifacts, retention)
-- `worker/` — real `train_runner` that materializes job packages and runs mapping
-  or reconstruction recipes
+- `worker/` — real `train_runner` that materializes job packages and runs the
+  shared `train_graph` recipe (`Backend/train_worker.py`). Legacy
+  `train_steerable` packages are still accepted for existing tests.
 - `storefront/` — WordPress customer + entitlement sync stubs (link/credits only;
   never fake train success)
 - `tests/` — entitlement, concurrency, Stop, crash-fail, retention, and short
@@ -74,8 +75,8 @@ port instead (no automatic TLS).
 ### Deploy
 
 1. Runpod console → **Pods** → **Deploy**.
-2. GPU: **RTX 4090** (or similar 24 GB) is enough for short mapping jobs; pick more
-   VRAM for long reconstruction runs.
+2. GPU: **RTX 4090** (or similar 24 GB) is enough for short `train_graph` jobs;
+   pick more VRAM for long staged runs.
 3. Template / container image: `YOUR_DOCKERHUB_USER/oyb-cloud-train:latest` (or your
    registry tag).
 4. **Expose HTTP Ports**: `8787` (max one HTTP proxy port is typical).

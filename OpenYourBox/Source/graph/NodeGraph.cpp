@@ -485,6 +485,8 @@ std::unordered_set<std::int32_t> collectTrainSnapshotNodeIds(
         node->state == NodeState::liveBlue)
       selected.insert(current);
     for (const auto &link : graph.getLinks()) {
+      if (link.kind == openyourbox::graph::GraphLinkKind::dataLoader)
+        continue;
       const auto source = graph.findNodeForPin(link.sourcePinId);
       const auto destination = graph.findNodeForPin(link.destinationPinId);
       if (source.has_value() && *source == current && destination.has_value())
@@ -1188,6 +1190,8 @@ int resolvePinChannels(const openyourbox::graph::NodeGraph &graph,
     for (const auto &link : graph.getLinks()) {
       if (link.destinationPinId != pinId)
         continue;
+      if (link.kind == openyourbox::graph::GraphLinkKind::dataLoader)
+        continue;
       return resolvePinChannels(graph, link.sourcePinId, visiting);
     }
     return 0;
@@ -1351,8 +1355,11 @@ const openyourbox::graph::Pin *
 findConnectedSourcePin(const openyourbox::graph::NodeGraph &graph,
                        std::int32_t destinationPinId) {
   for (const auto &link : graph.getLinks()) {
-    if (link.destinationPinId == destinationPinId)
-      return graph.findPin(link.sourcePinId);
+    if (link.destinationPinId != destinationPinId)
+      continue;
+    if (link.kind == openyourbox::graph::GraphLinkKind::dataLoader)
+      continue;
+    return graph.findPin(link.sourcePinId);
   }
   return nullptr;
 }
@@ -2488,6 +2495,8 @@ std::string incompatibilityMessageForLink(
   const auto *destination = graph.findPin(link.destinationPinId);
   if (source == nullptr || destination == nullptr)
     return {};
+  if (link.kind == openyourbox::graph::GraphLinkKind::dataLoader)
+    return {};
   const auto sourceShape = outgoingShapeOf(graph, *source);
   if (!sourceShape.isCompatibleWith(destination->shape)) {
     auto message = sourceShape.incompatibilityMessage(destination->shape);
@@ -2652,6 +2661,10 @@ const char *nodeTypeName(openyourbox::graph::NodeType type) noexcept {
     return "group_input";
   case NodeType::groupOutput:
     return "group_output";
+  case NodeType::dataLoader:
+    return "data_loader";
+  case NodeType::loss:
+    return "loss";
   }
   return "tcn";
 }
@@ -2709,6 +2722,10 @@ openyourbox::graph::NodeType nodeTypeFromName(const juce::String &name) {
     return NodeType::groupInput;
   if (name == "group_output")
     return NodeType::groupOutput;
+  if (name == "data_loader" || name == "dataLoader")
+    return NodeType::dataLoader;
+  if (name == "loss")
+    return NodeType::loss;
   return NodeType::tcn;
 }
 
@@ -2717,7 +2734,7 @@ openyourbox::graph::NodeType nodeTypeFromName(const juce::String &name) {
  * @param name ValueTree `type` token.
  */
 bool isKnownPersistedNodeType(const juce::String &name) {
-  static const std::array<const char *, 31> known{
+  static const std::array<const char *, 34> known{
       "audio_input",
       "audio_output",
       "linear",
@@ -2748,6 +2765,9 @@ bool isKnownPersistedNodeType(const juce::String &name) {
       "rnn",
       "group_input",
       "group_output",
+      "data_loader",
+      "dataLoader",
+      "loss",
       "tcn"};
   for (const auto *token : known) {
     if (name == token)
@@ -2940,6 +2960,26 @@ juce::ValueTree nodeToTree(const openyourbox::graph::GraphNode &node) {
     }
     tree.appendChild(child, nullptr);
   }
+  for (std::size_t index = 0; index < node.dataLoaderBindings.size(); ++index) {
+    const auto &binding = node.dataLoaderBindings[index];
+    juce::ValueTree bindingTree{"DataLoaderBinding"};
+    bindingTree.setProperty("pinIndex", static_cast<int>(index), nullptr);
+    bindingTree.setProperty(
+        "kind",
+        binding.kind == openyourbox::graph::DataLoaderBindingKind::constantScalar
+            ? "constant_scalar"
+            : "audio_list",
+        nullptr);
+    bindingTree.setProperty("scalarValue", binding.scalarValue, nullptr);
+    bindingTree.setProperty("exampleCount", binding.exampleCount, nullptr);
+    for (const auto &entry : binding.entries) {
+      juce::ValueTree item{"BindingEntry"};
+      item.setProperty("path", juce::String(entry.path), nullptr);
+      item.setProperty("libraryId", juce::String(entry.libraryId), nullptr);
+      bindingTree.appendChild(item, nullptr);
+    }
+    tree.appendChild(bindingTree, nullptr);
+  }
   return tree;
 }
 
@@ -3068,6 +3108,34 @@ openyourbox::graph::GraphNode nodeFromTree(const juce::ValueTree &tree) {
       slot.weightsPath = child["weightsPath"].toString().toStdString();
       slot.artifactPath = child["artifactPath"].toString().toStdString();
       node.repeatSlots.push_back(std::move(slot));
+    } else if (child.hasType("DataLoaderBinding")) {
+      TrainingMaterialBinding binding;
+      const auto kind = child.getProperty("kind", "audio_list").toString();
+      binding.kind = kind == "constant_scalar"
+                         ? DataLoaderBindingKind::constantScalar
+                         : DataLoaderBindingKind::audioList;
+      binding.scalarValue =
+          static_cast<float>(child.getProperty("scalarValue", 0.0));
+      binding.exampleCount =
+          static_cast<int>(child.getProperty("exampleCount", 0));
+      for (const auto item : child) {
+        if (!item.hasType("BindingEntry"))
+          continue;
+        DataLoaderBindingEntry entry;
+        entry.path = item.getProperty("path", "").toString().toStdString();
+        entry.libraryId =
+            item.getProperty("libraryId", "").toString().toStdString();
+        binding.entries.push_back(std::move(entry));
+      }
+      const auto pinIndex =
+          static_cast<int>(child.getProperty("pinIndex", -1));
+      if (pinIndex >= 0) {
+        if (static_cast<int>(node.dataLoaderBindings.size()) <= pinIndex)
+          node.dataLoaderBindings.resize(static_cast<std::size_t>(pinIndex + 1));
+        node.dataLoaderBindings[static_cast<std::size_t>(pinIndex)] =
+            std::move(binding);
+      } else
+        node.dataLoaderBindings.push_back(std::move(binding));
     } else if (child.hasType("Property")) {
       NodeProperty property;
       property.key = child["key"].toString().toStdString();
@@ -3149,6 +3217,17 @@ openyourbox::graph::GraphNode nodeFromTree(const juce::ValueTree &tree) {
   normalizeNoiseSynthesizerProperties(node);
   normalizePropertyBounds(node);
   normalizeHostIoProperties(node);
+  if (node.type == NodeType::loss) {
+    node.properties.erase(
+        std::remove_if(node.properties.begin(), node.properties.end(),
+                       [](const NodeProperty &property) {
+                         return property.key == "weight";
+                       }),
+        node.properties.end());
+  }
+  if (node.type == NodeType::dataLoader &&
+      node.dataLoaderBindings.size() < node.outputs.size())
+    node.dataLoaderBindings.resize(node.outputs.size());
   return node;
 }
 
@@ -3368,13 +3447,19 @@ juce::ValueTree linkToTree(const openyourbox::graph::GraphLink &link) {
   tree.setProperty("id", link.id, nullptr);
   tree.setProperty("sourcePin", link.sourcePinId, nullptr);
   tree.setProperty("destinationPin", link.destinationPinId, nullptr);
+  if (link.kind == openyourbox::graph::GraphLinkKind::dataLoader)
+    tree.setProperty("kind", "data_loader", nullptr);
   return tree;
 }
 
 openyourbox::graph::GraphLink linkFromTree(const juce::ValueTree &tree) {
-  return {static_cast<std::int32_t>(tree["id"]),
-          static_cast<std::int32_t>(tree["sourcePin"]),
-          static_cast<std::int32_t>(tree["destinationPin"])};
+  openyourbox::graph::GraphLink link{
+      static_cast<std::int32_t>(tree["id"]),
+      static_cast<std::int32_t>(tree["sourcePin"]),
+      static_cast<std::int32_t>(tree["destinationPin"])};
+  if (tree.getProperty("kind", "live").toString() == "data_loader")
+    link.kind = openyourbox::graph::GraphLinkKind::dataLoader;
+  return link;
 }
 
 /**
@@ -3880,6 +3965,8 @@ std::int32_t NodeGraph::insertConstructedNode(
   if (parentGroupId.has_value() && findGroup(*parentGroupId) == nullptr)
     parentGroupId.reset();
   node.parentGroupId = parentGroupId;
+  if (!isFixedIoType(node.type) && !isGroupBoundaryType(node.type))
+    node.label = nextUniqueNumberedLabel(node.label);
   const auto id = node.id;
   nodes.push_back(std::move(node));
   if (parentGroupId.has_value()) {
@@ -4710,6 +4797,15 @@ NodeGraph::groupBoundaryPorts(std::int32_t groupId) const {
                 return left.memberNodeId < right.memberNodeId;
               return left.memberPinId < right.memberPinId;
             });
+  // Live Audio In and Data Loader often share one member pin; one hub pin
+  // must mediate both external cables.
+  ports.erase(std::unique(ports.begin(), ports.end(),
+                          [](const GroupBoundaryPort &left,
+                             const GroupBoundaryPort &right) {
+                            return left.kind == right.kind &&
+                                   left.memberPinId == right.memberPinId;
+                          }),
+              ports.end());
   return ports;
 }
 
@@ -5016,8 +5112,8 @@ NodeGraph::createGroup(const std::vector<std::int32_t> &memberIds) {
     }
     unique.push_back(id);
   }
-  if (unique.size() < 2)
-    return {false, "Select at least two boxes to create a group", 0};
+  if (unique.size() < 1)
+    return {false, "Select at least one box to create a group", 0};
 
   const auto parentDepth =
       sharedParent.has_value() ? groupDepth(*this, *sharedParent) : 0;
@@ -5704,15 +5800,71 @@ ConnectionResult NodeGraph::connect(std::int32_t firstPinId,
   if (duplicate)
     return {false, "These ports are already connected"};
 
+  const bool sourceIsDataLoader =
+      sourceNodePtr != nullptr && sourceNodePtr->type == NodeType::dataLoader;
+  const auto proposedKind =
+      sourceIsDataLoader ? GraphLinkKind::dataLoader : GraphLinkKind::live;
+
+  if (sourceIsDataLoader) {
+    if (destinationNodePtr != nullptr &&
+        destinationNodePtr->type == NodeType::audioOutput)
+      return {false, "Data Loader cannot connect to Audio Output"};
+    if (destinationNodePtr != nullptr &&
+        destinationNodePtr->type == NodeType::dataLoader)
+      return {false, "Data Loader cannot connect to another Data Loader"};
+  }
+
+  if (destinationNodePtr != nullptr &&
+      destinationNodePtr->type == NodeType::loss) {
+    std::size_t lossPinIndex = destinationNodePtr->inputs.size();
+    for (std::size_t index = 0; index < destinationNodePtr->inputs.size();
+         ++index) {
+      if (destinationNodePtr->inputs[index].id == destination->id) {
+        lossPinIndex = index;
+        break;
+      }
+    }
+    const bool isPrediction = lossPinIndex == 0;
+    const bool isTarget = lossPinIndex == 1;
+    if (sourceIsDataLoader && !isTarget)
+      return {false, "Data Loader can only connect to the Loss target pin"};
+    if (!sourceIsDataLoader && !isPrediction)
+      return {false, "Only the Loss prediction pin accepts live connections"};
+  } else if (sourceIsDataLoader) {
+    // Empty pins and Audio In / group-hub feeds may take a Data Loader;
+    // a processing (or other non-control) live upstream blocks it.
+    for (const auto &link : links) {
+      if (link.destinationPinId != destination->id ||
+          link.kind == GraphLinkKind::dataLoader)
+        continue;
+      const auto liveSourceId = findNodeForPin(link.sourcePinId);
+      const auto *liveSource =
+          liveSourceId.has_value() ? findNode(*liveSourceId) : nullptr;
+      if (liveSource == nullptr)
+        continue;
+      if (liveSource->type == NodeType::audioInput ||
+          liveSource->type == NodeType::groupInput)
+        continue;
+      if (!isControlSourceType(liveSource->type) &&
+          !isTrainOnlyType(liveSource->type))
+        return {false,
+                "Data Loader cannot attach to a pin already driven by a "
+                "processing element"};
+    }
+  }
+
   const auto occupied = std::any_of(
-      links.begin(), links.end(), [destination](const GraphLink &link) {
-        return link.destinationPinId == destination->id;
+      links.begin(), links.end(),
+      [destination, proposedKind](const GraphLink &link) {
+        return link.destinationPinId == destination->id &&
+               link.kind == proposedKind;
       });
   if (occupied)
     return {false, "This input already has a connection"};
 
   const auto previouslyIllegal = incompatibleLinkIds(*this);
-  links.push_back({nextLinkId++, source->id, destination->id});
+  links.push_back(
+      {nextLinkId++, source->id, destination->id, proposedKind});
   refreshPropagatedPinShapes(*this);
   for (const auto &link : links) {
     auto message = incompatibilityMessageForLink(*this, link);
@@ -5842,6 +5994,13 @@ bool NodeGraph::setProperty(std::int32_t nodeId, const std::string &key,
     property->value = std::clamp(property->value, minimumPositiveProperty,
                                  maximumKnobCount);
     setKnobOutputCount(*node, property->value);
+  } else if (key == "output_count" && node->type == NodeType::dataLoader) {
+    property->value = std::clamp(property->value, minimumPositiveProperty,
+                                 maximumDataLoaderOutputs);
+    setDataLoaderOutputCount(*node, property->value);
+  } else if (key == "loss_type" && node->type == NodeType::loss) {
+    property->value = std::clamp(property->value, 0, 4);
+    node->detail = lossTypeName(lossTypeFromChoice(property->value));
   } else if (key == "inputs" && isMathExpressionType(node->type)) {
     const auto parsed = parseExpression(mathExpressionText(*node),
                                         ExpressionIdentContext::mathInputs,
@@ -7121,6 +7280,37 @@ std::string NodeGraph::toJson() const {
   return juce::JSON::toString(juce::var(root.release()), true).toStdString();
 }
 
+std::string
+NodeGraph::nextUniqueNumberedLabel(const std::string &baseLabel) const {
+  if (baseLabel.empty())
+    return "1";
+  const std::string stem = baseLabel + " ";
+  std::unordered_set<int> used;
+  for (const auto &node : nodes) {
+    if (node.label.compare(0, stem.size(), stem) != 0)
+      continue;
+    const auto suffix = node.label.substr(stem.size());
+    if (suffix.empty())
+      continue;
+    bool digitsOnly = true;
+    for (const char character : suffix) {
+      if (character < '0' || character > '9') {
+        digitsOnly = false;
+        break;
+      }
+    }
+    if (!digitsOnly)
+      continue;
+    const int value = std::stoi(suffix);
+    if (value > 0)
+      used.insert(value);
+  }
+  for (int index = 1;; ++index) {
+    if (used.count(index) == 0)
+      return stem + std::to_string(index);
+  }
+}
+
 GraphNode NodeGraph::makeNode(NodeType type, juce::Point<float> position) {
   if (type == NodeType::rateConv)
     type = NodeType::convolution;
@@ -7665,6 +7855,37 @@ GraphNode NodeGraph::makeNode(NodeType type, juce::Point<float> position) {
     }
     break;
   }
+  case NodeType::dataLoader: {
+    node.label = "Data Loader";
+    node.detail = "Training examples";
+    node.hasWeights = false;
+    node.armedForTraining = false;
+    node.properties.push_back(property(
+        "output_count", "Outputs", defaultDataLoaderOutputCount,
+        minimumPositiveProperty, maximumDataLoaderOutputs));
+    const char *defaultLabels[] = {"input", "target"};
+    for (int index = 0; index < defaultDataLoaderOutputCount; ++index) {
+      addOutput(defaultLabels[index]);
+      node.outputs.back().shape = flexibleTensorShape();
+      node.dataLoaderBindings.emplace_back();
+    }
+    break;
+  }
+  case NodeType::loss: {
+    node.label = "Loss";
+    node.detail = "mr_stft";
+    node.hasWeights = false;
+    node.armedForTraining = false;
+    addInput("prediction");
+    addInput("target");
+    node.inputs.front().shape = flexibleTensorShape();
+    node.inputs.back().shape = flexibleTensorShape();
+    node.properties.push_back(property(
+        "loss_type", "Loss", 0, 0, 4, PropertyKind::choice,
+        {"MR-STFT", "Spectral Distance", "KL", "Adversarial",
+         "Feature Matching"}));
+    break;
+  }
   }
   return node;
 }
@@ -8122,6 +8343,31 @@ void NodeGraph::setKnobOutputCount(GraphNode &node, int knobCount) {
   node.detail = knobInputDetail(count);
 }
 
+void NodeGraph::setDataLoaderOutputCount(GraphNode &node, int outputCount) {
+  if (node.type != NodeType::dataLoader)
+    return;
+  const auto count = std::clamp(outputCount, minimumPositiveProperty,
+                                maximumDataLoaderOutputs);
+  while (static_cast<int>(node.outputs.size()) > count) {
+    const auto pinId = node.outputs.back().id;
+    links.erase(std::remove_if(links.begin(), links.end(),
+                               [pinId](const GraphLink &link) {
+                                 return link.sourcePinId == pinId ||
+                                        link.destinationPinId == pinId;
+                               }),
+                links.end());
+    node.outputs.pop_back();
+  }
+  while (static_cast<int>(node.outputs.size()) < count) {
+    const auto index = static_cast<int>(node.outputs.size());
+    const auto label = "out " + std::to_string(index + 1);
+    node.outputs.push_back(
+        {nextPinId++, label, PinKind::output, flexibleTensorShape()});
+  }
+  node.dataLoaderBindings.resize(node.outputs.size());
+  node.detail = "Training examples";
+}
+
 void NodeGraph::syncKnobInputNode(GraphNode &node) {
   if (node.type != NodeType::knobInput)
     return;
@@ -8461,10 +8707,229 @@ std::vector<std::int32_t> NodeGraph::getArmedTrainableNodeIds() const {
 bool NodeGraph::setArmedForTraining(std::int32_t nodeId, bool armed) {
   auto *node = findNode(nodeId);
   if (node == nullptr || !node->hasWeights || isControlSourceType(node->type) ||
-      node->state == NodeState::frozenGold)
+      isTrainOnlyType(node->type) || node->state == NodeState::frozenGold)
     return false;
   node->armedForTraining = armed;
   return true;
+}
+
+std::vector<std::int32_t> NodeGraph::getDataLoaderNodeIds() const {
+  std::vector<std::int32_t> ids;
+  for (const auto &node : nodes) {
+    if (node.type == NodeType::dataLoader)
+      ids.push_back(node.id);
+  }
+  return ids;
+}
+
+std::vector<std::int32_t> NodeGraph::getLossNodeIds() const {
+  std::vector<std::int32_t> ids;
+  for (const auto &node : nodes) {
+    if (node.type == NodeType::loss)
+      ids.push_back(node.id);
+  }
+  return ids;
+}
+
+std::vector<std::int32_t>
+NodeGraph::collectDataLoaderPathNodeIds(std::int32_t loaderId) const {
+  const auto *loader = findNode(loaderId);
+  if (loader == nullptr || loader->type != NodeType::dataLoader)
+    return {};
+  std::unordered_set<std::int32_t> visited;
+  std::queue<std::int32_t> pending;
+  pending.push(loaderId);
+  while (!pending.empty()) {
+    const auto current = pending.front();
+    pending.pop();
+    if (!visited.insert(current).second)
+      continue;
+    for (const auto &link : links) {
+      const auto source = findNodeForPin(link.sourcePinId);
+      const auto destination = findNodeForPin(link.destinationPinId);
+      if (!source.has_value() || *source != current || !destination.has_value())
+        continue;
+      pending.push(*destination);
+    }
+  }
+  visited.erase(loaderId);
+  std::vector<std::int32_t> ids(visited.begin(), visited.end());
+  std::sort(ids.begin(), ids.end());
+  return ids;
+}
+
+std::vector<std::int32_t>
+NodeGraph::collectArmedOnPathNodeIds(std::int32_t loaderId) const {
+  std::vector<std::int32_t> armed;
+  const auto path = collectDataLoaderPathNodeIds(loaderId);
+  std::unordered_set<std::int32_t> onPath(path.begin(), path.end());
+  for (const auto nodeId : getArmedTrainableNodeIds()) {
+    if (onPath.count(nodeId) != 0)
+      armed.push_back(nodeId);
+  }
+  return armed;
+}
+
+bool NodeGraph::setDataLoaderOutputLabel(std::int32_t nodeId, int pinIndex,
+                                         const std::string &label) {
+  auto *node = findNode(nodeId);
+  if (node == nullptr || node->type != NodeType::dataLoader)
+    return false;
+  if (pinIndex < 0 || pinIndex >= static_cast<int>(node->outputs.size()))
+    return false;
+  node->outputs[static_cast<std::size_t>(pinIndex)].label = label;
+  return true;
+}
+
+bool NodeGraph::setDataLoaderBinding(std::int32_t nodeId, int pinIndex,
+                                     TrainingMaterialBinding binding) {
+  auto *node = findNode(nodeId);
+  if (node == nullptr || node->type != NodeType::dataLoader)
+    return false;
+  if (pinIndex < 0 || pinIndex >= static_cast<int>(node->outputs.size()))
+    return false;
+  if (node->dataLoaderBindings.size() < node->outputs.size())
+    node->dataLoaderBindings.resize(node->outputs.size());
+  node->dataLoaderBindings[static_cast<std::size_t>(pinIndex)] =
+      std::move(binding);
+  return true;
+}
+
+bool NodeGraph::equalizeDataLoaderOutput(std::int32_t nodeId, int sourcePinIndex,
+                                         int targetPinIndex) {
+  auto *node = findNode(nodeId);
+  if (node == nullptr || node->type != NodeType::dataLoader)
+    return false;
+  if (sourcePinIndex < 0 || targetPinIndex < 0 ||
+      sourcePinIndex >= static_cast<int>(node->dataLoaderBindings.size()) ||
+      targetPinIndex >= static_cast<int>(node->dataLoaderBindings.size()))
+    return false;
+  const auto &source =
+      node->dataLoaderBindings[static_cast<std::size_t>(sourcePinIndex)];
+  auto &target =
+      node->dataLoaderBindings[static_cast<std::size_t>(targetPinIndex)];
+  const auto sourceCount = dataLoaderBindingExampleCount(source);
+  if (sourceCount < 1)
+    return false;
+  if (target.kind == DataLoaderBindingKind::constantScalar) {
+    target.exampleCount = sourceCount;
+    return true;
+  }
+  if (target.entries.empty())
+    return false;
+  std::vector<DataLoaderBindingEntry> expanded;
+  expanded.reserve(static_cast<std::size_t>(sourceCount));
+  for (int index = 0; index < sourceCount; ++index)
+    expanded.push_back(target.entries[static_cast<std::size_t>(
+        index % static_cast<int>(target.entries.size()))]);
+  target.entries = std::move(expanded);
+  return true;
+}
+
+bool NodeGraph::setDataLoaderConstant(std::int32_t nodeId, int pinIndex,
+                                      float value, int exampleCount) {
+  TrainingMaterialBinding binding;
+  binding.kind = DataLoaderBindingKind::constantScalar;
+  binding.scalarValue = value;
+  binding.exampleCount = std::max(1, exampleCount);
+  return setDataLoaderBinding(nodeId, pinIndex, std::move(binding));
+}
+
+std::string NodeGraph::validateTrainStart(std::int32_t activeDataLoaderId) const {
+  auto loaders = getDataLoaderNodeIds();
+  if (loaders.empty())
+    return "Insert a Data Loader to feed training";
+  std::int32_t loaderId = activeDataLoaderId;
+  if (loaders.size() == 1)
+    loaderId = loaders.front();
+  if (loaderId == 0)
+    return "Choose the active Data Loader in the Train panel";
+  const auto *loader = findNode(loaderId);
+  if (loader == nullptr || loader->type != NodeType::dataLoader)
+    return "Choose the active Data Loader in the Train panel";
+
+  std::unordered_set<std::int32_t> connectedOutputs;
+  for (const auto &link : links) {
+    if (link.kind != GraphLinkKind::dataLoader)
+      continue;
+    const auto source = findNodeForPin(link.sourcePinId);
+    if (!source.has_value() || *source != loaderId)
+      continue;
+    for (std::size_t index = 0; index < loader->outputs.size(); ++index) {
+      if (loader->outputs[index].id == link.sourcePinId)
+        connectedOutputs.insert(static_cast<std::int32_t>(index));
+    }
+  }
+  int expected = -1;
+  for (const auto pinIndex : connectedOutputs) {
+    if (pinIndex < 0 ||
+        pinIndex >= static_cast<int>(loader->dataLoaderBindings.size()))
+      return "Connected Data Loader outputs need material bindings";
+    const auto count = dataLoaderBindingExampleCount(
+        loader->dataLoaderBindings[static_cast<std::size_t>(pinIndex)]);
+    if (count < 1)
+      return "Connected Data Loader outputs need at least one example";
+    if (expected < 0)
+      expected = count;
+    else if (count != expected)
+      return "Connected Data Loader outputs must have equal example counts";
+  }
+
+  const auto path = collectDataLoaderPathNodeIds(loaderId);
+  std::unordered_set<std::int32_t> onPath(path.begin(), path.end());
+  for (const auto &link : links) {
+    if (link.kind != GraphLinkKind::live)
+      continue;
+    const auto destId = findNodeForPin(link.destinationPinId);
+    const auto sourceId = findNodeForPin(link.sourcePinId);
+    if (!destId.has_value() || !sourceId.has_value())
+      continue;
+    if (onPath.count(*destId) == 0)
+      continue;
+    const auto *source = findNode(*sourceId);
+    if (source == nullptr ||
+        !(isFixedIoType(source->type) || isConditioningSourceType(source->type)))
+      continue;
+    bool hasFeed = false;
+    for (const auto &candidate : links) {
+      if (candidate.destinationPinId != link.destinationPinId)
+        continue;
+      if (candidate.kind == GraphLinkKind::dataLoader)
+        hasFeed = true;
+    }
+    if (!hasFeed)
+      return "Every external source on the training path needs a Data Loader "
+             "feed or constant utility";
+  }
+
+  bool usableLoss = false;
+  for (const auto &node : nodes) {
+    if (node.type != NodeType::loss)
+      continue;
+    bool predictionWired = false;
+    for (const auto &link : links) {
+      if (node.inputs.empty() || link.destinationPinId != node.inputs.front().id)
+        continue;
+      const auto source = findNodeForPin(link.sourcePinId);
+      if (source.has_value() && onPath.count(*source) != 0)
+        predictionWired = true;
+    }
+    if (predictionWired)
+      usableLoss = true;
+    else if (!node.inputs.empty()) {
+      for (const auto &link : links) {
+        if (link.destinationPinId != node.inputs.front().id)
+          continue;
+        return "Loss prediction must be reachable from the active Data Loader";
+      }
+    }
+  }
+  if (!usableLoss)
+    return "Wire at least one Loss to the training path";
+
+  if (collectArmedOnPathNodeIds(loaderId).empty())
+    return "Arm at least one trainable element on the Data Loader path";
+  return {};
 }
 
 bool NodeGraph::setWeightsPath(std::int32_t nodeId, const std::string &path) {
@@ -8506,7 +8971,17 @@ std::optional<TrainJobRequest> NodeGraph::createTrainRequest() const {
     auto prepared = withInvisibleRepeatsMaterialized();
     return prepared.createTrainRequest();
   }
-  const auto armed = getArmedTrainableNodeIds();
+  auto armed = getArmedTrainableNodeIds();
+  std::int32_t soleDataLoaderId = 0;
+  int dataLoaderCount = 0;
+  for (const auto &node : nodes) {
+    if (node.type != NodeType::dataLoader)
+      continue;
+    ++dataLoaderCount;
+    soleDataLoaderId = node.id;
+  }
+  if (dataLoaderCount == 1)
+    armed = collectArmedOnPathNodeIds(soleDataLoaderId);
   if (armed.empty())
     return std::nullopt;
 
@@ -8516,15 +8991,24 @@ std::optional<TrainJobRequest> NodeGraph::createTrainRequest() const {
 
   auto root = std::make_unique<juce::DynamicObject>();
   root->setProperty("request_id", juce::String(request.requestId));
-  root->setProperty("operation", "train_steerable");
+  root->setProperty("operation", "train_graph");
   root->setProperty("command", "start");
+  root->setProperty("schema_version", trainGraphSchemaVersion);
+
+  if (dataLoaderCount == 1)
+    root->setProperty("active_data_loader_id", soleDataLoaderId);
 
   juce::Array<juce::var> armedIds;
   juce::Array<juce::var> elements;
   const auto snapshot = collectTrainSnapshotNodeIds(*this);
   for (const auto nodeId : armed)
     armedIds.add(nodeId);
-  for (const auto nodeId : snapshot) {
+  std::unordered_set<std::int32_t> fragmentIds(snapshot.begin(), snapshot.end());
+  for (const auto &node : nodes) {
+    if (isTrainOnlyType(node.type))
+      fragmentIds.insert(node.id);
+  }
+  for (const auto nodeId : fragmentIds) {
     const auto *node = findNode(nodeId);
     if (node == nullptr)
       continue;
@@ -8546,6 +9030,16 @@ std::optional<TrainJobRequest> NodeGraph::createTrainRequest() const {
       properties.add(juce::var(serialized.release()));
     }
     element->setProperty("properties", properties);
+    if (node->type == NodeType::dataLoader) {
+      juce::Array<juce::var> outputs;
+      for (std::size_t index = 0; index < node->outputs.size(); ++index) {
+        auto output = std::make_unique<juce::DynamicObject>();
+        output->setProperty("pin_index", static_cast<int>(index));
+        output->setProperty("label", juce::String(node->outputs[index].label));
+        outputs.add(juce::var(output.release()));
+      }
+      element->setProperty("outputs", outputs);
+    }
     elements.add(juce::var(element.release()));
   }
   root->setProperty("armed_element_ids", armedIds);
@@ -8561,9 +9055,9 @@ std::optional<TrainJobRequest> NodeGraph::createTrainRequest() const {
     const auto destinationNode = findNodeForPin(link.destinationPinId);
     if (!sourceNode.has_value() || !destinationNode.has_value())
       continue;
-    const auto sourceArmed = snapshot.count(*sourceNode) != 0;
-    const auto destinationArmed = snapshot.count(*destinationNode) != 0;
-    if (sourceArmed && destinationArmed) {
+    const auto sourceInFragment = fragmentIds.count(*sourceNode) != 0;
+    const auto destinationInFragment = fragmentIds.count(*destinationNode) != 0;
+    if (sourceInFragment && destinationInFragment) {
       auto connection = std::make_unique<juce::DynamicObject>();
       connection->setProperty("source_element_id", *sourceNode);
       connection->setProperty("destination_element_id", *destinationNode);
@@ -8571,10 +9065,20 @@ std::optional<TrainJobRequest> NodeGraph::createTrainRequest() const {
         connection->setProperty(
             "destination_pin_index",
             inputPinIndexForId(*dest, link.destinationPinId));
+      if (link.kind == GraphLinkKind::dataLoader)
+        connection->setProperty("kind", "data_loader");
+      else if (destinationNode.has_value()) {
+        const auto *dest = findNode(*destinationNode);
+        if (dest != nullptr && dest->type == NodeType::loss) {
+          const auto pinIndex = inputPinIndexForId(*dest, link.destinationPinId);
+          connection->setProperty(
+              "kind", pinIndex == 0 ? "loss_prediction" : "loss_target");
+        }
+      }
       connections.add(juce::var(connection.release()));
-    } else if (!sourceArmed && destinationArmed)
+    } else if (!sourceInFragment && destinationInFragment)
       audioInputs.add(*destinationNode);
-    else if (sourceArmed && !destinationArmed)
+    else if (sourceInFragment && !destinationInFragment)
       audioOutputs.add(*sourceNode);
   }
   fragment->setProperty("connections", connections);
@@ -8584,6 +9088,42 @@ std::optional<TrainJobRequest> NodeGraph::createTrainRequest() const {
   io->setProperty("conditioning_inputs", conditioningInputs);
   fragment->setProperty("io_boundary", juce::var(io.release()));
   root->setProperty("graph_fragment", juce::var(fragment.release()));
+
+  auto bindingsRoot = std::make_unique<juce::DynamicObject>();
+  for (const auto &node : nodes) {
+    if (node.type != NodeType::dataLoader)
+      continue;
+    auto perLoader = std::make_unique<juce::DynamicObject>();
+    for (std::size_t index = 0; index < node.dataLoaderBindings.size();
+         ++index) {
+      const auto &binding = node.dataLoaderBindings[index];
+      auto perOutput = std::make_unique<juce::DynamicObject>();
+      if (binding.kind == DataLoaderBindingKind::constantScalar) {
+        perOutput->setProperty("kind", "constant_scalar");
+        perOutput->setProperty("value", binding.scalarValue);
+        perOutput->setProperty("example_count",
+                               dataLoaderBindingExampleCount(binding));
+      } else {
+        perOutput->setProperty("kind", "audio_list");
+        juce::Array<juce::var> items;
+        for (const auto &entry : binding.entries) {
+          auto item = std::make_unique<juce::DynamicObject>();
+          item->setProperty("path", juce::String(entry.path));
+          item->setProperty("library_id", juce::String(entry.libraryId));
+          items.add(juce::var(item.release()));
+        }
+        perOutput->setProperty("items", items);
+      }
+      perLoader->setProperty(juce::String(static_cast<int>(index)),
+                             juce::var(perOutput.release()));
+    }
+    bindingsRoot->setProperty(juce::String(node.id),
+                              juce::var(perLoader.release()));
+  }
+  root->setProperty("data_loader_bindings", juce::var(bindingsRoot.release()));
+  auto schedule = std::make_unique<juce::DynamicObject>();
+  schedule->setProperty("stages", juce::Array<juce::var>{});
+  root->setProperty("loss_schedule", juce::var(schedule.release()));
   request.graphFragment =
       juce::JSON::toString(juce::var(root.release()), true).toStdString();
   return request;
@@ -8665,7 +9205,7 @@ NodeGraph::absorbArmedChain(const TrainJobResult &result) {
   }
 
   auto box = makeNode(NodeType::blackBox, centroid);
-  box.label = result.hasEncodeDecode ? "Trained RAVE" : "Trained Steerable";
+  box.label = nextUniqueNumberedLabel("Trained Graph");
   box.detail = "Locked";
   box.state = NodeState::frozenGold;
   box.colour = colourForType(box.type, box.state);

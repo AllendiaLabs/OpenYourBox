@@ -298,8 +298,7 @@ OpenYourBoxAudioProcessor::capturePatchSnapshot() {
   }
   snapshot.randomizationCounter =
       randomizationCounter.load(std::memory_order_acquire);
-  snapshot.lastTrainObjective = juce::String(
-      openyourbox::graph::trainObjectiveName(lastTrainObjective));
+  snapshot.trainConfigJson = trainConfigJson;
 
   const auto published = modelBuilder.getPublishedModel();
   if (published != nullptr && published->model != nullptr) {
@@ -359,8 +358,7 @@ bool OpenYourBoxAudioProcessor::applyPatchSnapshot(
     persistedGraphState = incoming.graphDocument.createCopy();
   }
   parameters.replaceState(incoming.parameterState.createCopy());
-  lastTrainObjective = openyourbox::graph::trainObjectiveFromName(
-      incoming.lastTrainObjective.toStdString());
+  trainConfigJson = incoming.trainConfigJson;
   randomizationCounter.store(incoming.randomizationCounter,
                              std::memory_order_release);
   restoringState.store(false, std::memory_order_release);
@@ -1358,16 +1356,6 @@ void OpenYourBoxAudioProcessor::startSingleRecording() {
     return;
   }
   requestTransportStartIfNeeded();
-}
-
-openyourbox::graph::TrainObjective
-OpenYourBoxAudioProcessor::getLastTrainObjective() const noexcept {
-  return lastTrainObjective;
-}
-
-void OpenYourBoxAudioProcessor::setLastTrainObjective(
-    openyourbox::graph::TrainObjective objective) noexcept {
-  lastTrainObjective = objective;
 }
 
 openyourbox::train::CloudSettings &

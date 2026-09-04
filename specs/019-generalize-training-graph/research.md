@@ -6,7 +6,7 @@
 
 ## Decision 1: Replace objective modes with graph + config
 
-**Decision**: Remove `TrainObjective { mapping, reconstruction }` from the Train panel and from start gates. Training intent is expressed only by (1) Data Loader material bindings, (2) Loss node wiring + weights, and (3) Training Configuration (including optional loss stage schedules). Worker no longer branches on `objective`.
+**Decision**: Remove `TrainObjective { mapping, reconstruction }` from the Train panel and from start gates. Training intent is expressed only by (1) Data Loader material bindings, (2) Loss node wiring + **stage** weights, and (3) Training Configuration (including optional loss stage schedules). Worker no longer branches on `objective`.
 
 **Rationale**: Spec FR-001/FR-008 require architecture-agnostic train without reconstruction/mapping selectors; capability parity is via wiring + configs (FR-018), not legacy modes.
 
@@ -35,13 +35,16 @@
 - Per-node “Active” toggle on the Data Loader — rejected; Train panel picker only.
 - Auto-equalize counts silently — rejected; user-initiated utilities (product may suggest).
 
-## Decision 4: External-only data-loader connections
+## Decision 4: Data-loader connection gates
 
-**Decision**: Data Loader cables may attach to **external/inference source inputs** (Audio In destination pins, Knob, XY Trackpad, and similar sources), including when a live cable already exists on that pin. Refuse connection when the destination pin is already driven by an upstream **processing** node. Downstream nodes receive training data through the upstream feed. Missing required external feeds on the trainable path → refuse Start.
+**Decision**: Data Loader cables may attach to an **empty** input pin or to a pin already fed by **Audio In** / **group-input** hub (coexist with live). Refuse when the destination pin is already driven by an upstream **processing** node. Downstream nodes receive training data through the upstream feed. Missing required external feeds on the trainable path → refuse Start.
 
-**Rationale**: FR-006 / SC-013; prevents ambiguous double-feeds on internal edges.
+**Loss pins** (Decision 6a): Data Loader may connect only to Loss **target**; live/path only to Loss **prediction**.
+
+**Rationale**: FR-006 / FR-009 / SC-013 / SC-020; prevents ambiguous double-feeds on internal edges while allowing author-before-Audio-In wiring.
 
 **Alternatives considered**:
+- Require Audio In before Data Loader — rejected (2026-09-05); empty pins must be allowed.
 - Allow data loader anywhere and override live — rejected; breaks live/train duality and chain semantics.
 - Special “conditioning pin” on removed TCN — rejected; sources are first-class (Knob/XY).
 
@@ -67,13 +70,30 @@
 | `adversarial` | Train-only multi-scale discriminator hinge (stage 2) |
 | `feature_matching` | Discriminator feature matching (paired with adversarial) |
 
-Each loss node exposes a **weight** and typed properties (FFT sizes, spectral windows, etc.). Training Configuration holds an ordered **loss stage schedule**: each stage has `steps` and a list of `{ loss_node_id, weight_override? }`. If no schedule is set, a single stage runs the weighted sum of all validly wired losses for `total_steps`. Adversarial discriminators remain **worker-only** (never in VST live engine).
+Loss nodes expose `loss_type` (+ type properties) **without** an on-box weight. Training Configuration / Train panel holds an ordered **loss stage schedule**: each stage has `steps` and `{ loss_node_id, weight }`. If no schedule is set, a single stage runs all validly wired losses at weight **1.0** for `total_steps`. Adversarial discriminators remain **worker-only** (never in VST live engine).
 
 **Rationale**: FR-009/011/018; SC-011; reuse existing `train_worker` spectral/GAN helpers without hard-coding stages in an objective enum.
 
 **Alternatives considered**:
+- Weight on the Loss box with optional stage override — rejected (2026-09-05); weights live only on stages.
 - One mega “Loss” node with checkboxes for all terms — rejected; less graph-explicit, harder to stage.
 - Stages as separate graph timeline nodes — deferred; config-side schedule is enough and matches “training configuration” entity.
+
+## Decision 6a: Loss pin roles
+
+**Decision**: Connect-time enforcement — Data Loader → target only; live/path → prediction only.
+
+**Rationale**: Clarification 2026-09-05; prediction is the model output, target is supervised material from the loader.
+
+## Decision 6b: Per-stage freeze
+
+**Decision**: Each `loss_schedule` stage MAY include `freeze_element_ids`. At stage entry, worker sets `requires_grad` for `armed ∖ freeze` and rebuilds Adam. Train UI: collapsed **Freeze** tree per stage (Project Structure); unarmed force-checked/disabled; group cascade; mixed parent checkbox.
+
+**Rationale**: RAVE quality stage freezes the encoder in one job (FR-009 / FR-009a / SC-022) without a second Run.
+
+**Alternatives considered**:
+- Two separate Runs with re-arm — works but not one procedure.
+- Global freeze only — insufficient for stage-varying encoder freeze.
 
 ## Decision 7: Live path ignores Data Loader and Loss
 
@@ -116,13 +136,13 @@ Load applies known fields, ignores unknown, warns on missing → defaults (edge 
 **Alternatives considered**:
 - Keep types hidden but loadable — unnecessary if legacy migration is out of scope; prefer hard remove from palette for clarity.
 
-## Decision 11: Group of one
+## Decision 11: Group of one (+ shared-pin hub)
 
-**Decision**: Lower minimum selection size for `createGroup` from 2 to 1. Audio I/O exclusion and hub rules unchanged (006).
+**Decision**: Lower minimum selection size for `createGroup` from 2 to 1. Audio I/O exclusion unchanged. When discovering boundary ports, **dedupe by `(kind, memberPinId)`** so live Audio In + Data Loader on the same member pin yield **one** group input hub (both external cables on that hub; one interior cable).
 
-**Rationale**: FR-013 / SC-004.
+**Rationale**: FR-013 / SC-004 / SC-021.
 
-**Alternatives considered**: None material.
+**Alternatives considered**: One hub per crossing link — rejected; creates unused duplicate pins.
 
 ## Decision 12: Example templates and configs (no modes)
 

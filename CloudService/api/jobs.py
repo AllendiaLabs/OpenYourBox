@@ -67,9 +67,12 @@ def _client_instance_id(manifest: dict[str, Any]) -> str:
 
 
 def _objective(manifest: dict[str, Any]) -> str:
+    operation = str(manifest.get("operation", "train_graph") or "train_graph").strip()
     options = manifest.get("train_options")
     if not isinstance(options, dict):
         options = {}
+    if operation == "train_graph":
+        return "graph"
     value = str(options.get("objective", "mapping") or "mapping").strip().lower()
     if value not in {"mapping", "reconstruction"}:
         raise CloudAPIError(400, "validation_failed", "Unknown train objective.")
@@ -80,6 +83,17 @@ def _total_steps(manifest: dict[str, Any], objective: str) -> int:
     options = manifest.get("train_options")
     if not isinstance(options, dict):
         options = {}
+    if objective == "graph":
+        schedule = manifest.get("loss_schedule")
+        stages = schedule.get("stages") if isinstance(schedule, dict) else []
+        if isinstance(stages, list) and stages:
+            total = 0
+            for stage in stages:
+                if isinstance(stage, dict):
+                    total += max(1, int(stage.get("steps", 1) or 1))
+            if total:
+                return total
+        return max(1, int(options.get("total_steps", 100) or 100))
     if objective == "reconstruction":
         recipe = options.get("reconstruction")
         if not isinstance(recipe, dict):
@@ -96,6 +110,16 @@ def _validate_capture(manifest: dict[str, Any], objective: str) -> None:
         capture = {}
     pairs = capture.get("pairs") or []
     clips = capture.get("clips") or []
+    if objective == "graph":
+        bindings = manifest.get("data_loader_bindings")
+        has_bindings = isinstance(bindings, dict) and bool(bindings)
+        if not has_bindings and not pairs and not clips:
+            raise CloudAPIError(
+                400,
+                "validation_failed",
+                "train_graph jobs require data_loader_bindings or capture files.",
+            )
+        return
     if objective == "mapping":
         if not pairs:
             raise CloudAPIError(
@@ -326,7 +350,8 @@ async def submit_job(request: Request, session: Session = Depends(require_sessio
         )
 
     manifest, files, corpus_id = await _read_manifest_and_files(request)
-    if str(manifest.get("operation", "train_steerable") or "") != "train_steerable":
+    operation = str(manifest.get("operation", "train_graph") or "").strip()
+    if operation not in {"train_graph", "train_steerable"}:
         raise CloudAPIError(400, "validation_failed", "Unsupported operation.")
     objective = _objective(manifest)
     _validate_capture(manifest, objective)

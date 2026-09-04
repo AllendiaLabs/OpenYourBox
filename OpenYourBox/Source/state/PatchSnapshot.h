@@ -51,8 +51,8 @@ struct PatchSnapshot {
   juce::String architectureHash;
   /** @brief Randomization counter for deterministic seed recall. */
   std::uint64_t randomizationCounter = 0;
-  /** @brief Last train objective name persisted with the patch. */
-  juce::String lastTrainObjective{"mapping"};
+  /** @brief Project training-config snapshot JSON (empty when unset). */
+  juce::String trainConfigJson;
 
   /**
    * @brief Returns true when parameter and graph documents are usable.
