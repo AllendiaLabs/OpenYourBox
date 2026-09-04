@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from fastapi.testclient import TestClient
+
 from CloudService.api.state import STORE
 from CloudService.tests.conftest import link_headers
 
@@ -20,6 +22,29 @@ def test_unauthenticated_jobs_are_unauthorized(client) -> None:
     response = client.post("/v1/jobs", json=_mapping_manifest())
     assert response.status_code == 401
     assert response.json()["error_code"] == "unauthorized"
+
+
+def test_anonymous_submit_allowed_when_enabled(
+    client, monkeypatch, tmp_path
+) -> None:
+    monkeypatch.setenv("CLOUD_ALLOW_ANONYMOUS", "1")
+    monkeypatch.setenv("CLOUD_DATA_DIR", str(tmp_path))
+    STORE.reset()
+    from CloudService.api.app import create_app
+
+    files = {
+        "manifest": (
+            None,
+            __import__("json").dumps(_mapping_manifest()),
+            "application/json",
+        ),
+        "file:x.wav": ("x.wav", b"RIFF....", "application/octet-stream"),
+        "file:y.wav": ("y.wav", b"RIFF....", "application/octet-stream"),
+    }
+    with TestClient(create_app()) as anon_client:
+        response = anon_client.post("/v1/jobs", files=files)
+    assert response.status_code == 202
+    assert response.json()["status"] == "queued"
 
 
 def test_insufficient_entitlement_refuses_submit(client) -> None:

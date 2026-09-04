@@ -436,11 +436,24 @@ class SteerableTCN(nn.Module):
 class ConditionedSequential(nn.Module):
     """Sequential graph that forwards optional conditioning into TCN blocks."""
 
-    def __init__(self, modules: list[nn.Module], cond_dim: int) -> None:
-        """Store ordered modules and the conditioning width."""
+    def __init__(
+        self,
+        modules: list[nn.Module],
+        cond_dim: int,
+        fragment: dict[str, Any] | None = None,
+        input_channels: int = 1,
+    ) -> None:
+        """Store ordered modules, conditioning width, and the source fragment.
+
+        ``fragment`` / ``input_channels`` let export rebuild a clone instead of
+        deepcopying a CUDA training graph (which can alias weights and then
+        fail TorchScript with a channel mismatch).
+        """
         super().__init__()
         self.layers = nn.ModuleList(modules)
         self.cond_dim = cond_dim
+        self.fragment = fragment
+        self.input_channels = max(1, int(input_channels))
 
     def forward(self, samples: torch.Tensor, cond: torch.Tensor | None = None) -> torch.Tensor:
         """Run each layer, passing ``cond`` into steerable TCN modules."""
@@ -452,7 +465,7 @@ class ConditionedSequential(nn.Module):
                 device=samples.device,
                 dtype=samples.dtype,
             )
-        value = samples
+        value = match_input_channels(samples, int(self.input_channels))
         for layer in self.layers:
             if isinstance(layer, SteerableTCN):
                 value = layer(value, cond)
@@ -498,6 +511,16 @@ def _properties(element: dict[str, Any]) -> dict[str, Any]:
 
 
 _UTILITY_TYPES = frozenset({"utility", "merge", "sum", "multiply"})
+_SKIP_GRAPH_IO_TYPES = frozenset(
+    {
+        "audio_input",
+        "audio_output",
+        "knob_input",
+        "xy_trackpad",
+        "group_input",
+        "group_output",
+    }
+)
 
 
 @torch.jit.script
@@ -516,6 +539,33 @@ def match_time_to(value: torch.Tensor, reference: torch.Tensor) -> torch.Tensor:
     if current > samples:
         return value.narrow(2, current - samples, samples)
     return torch.nn.functional.pad(value, (samples - current, 0))
+
+
+@torch.jit.script
+def match_input_channels(samples: torch.Tensor, channels: int) -> torch.Tensor:
+    """Fold or pad ``[B, C, T]`` to ``channels`` without baking the example width.
+
+    Used by mapping export so a mono 1x1 expander (user-library TCN-with-conv)
+    can be traced even if TorchScript is handed a stereo crop.
+    """
+    current = int(samples.size(1))
+    width = int(channels)
+    if current == width:
+        return samples
+    if width == 1:
+        return samples.mean(dim=1, keepdim=True)
+    if current == 1:
+        return samples.repeat(1, width, 1)
+    if current > width:
+        return samples[:, :width, :]
+    pad = torch.zeros(
+        int(samples.size(0)),
+        width - current,
+        int(samples.size(2)),
+        dtype=samples.dtype,
+        device=samples.device,
+    )
+    return torch.cat((samples, pad), 1)
 
 
 @torch.jit.script
@@ -1157,7 +1207,7 @@ def build_module(
     for element in _topological_elements(fragment):
         element_type = str(element["type"])
         properties = _properties(element)
-        if element_type in {"audio_input", "audio_output", "knob_input", "xy_trackpad"}:
+        if element_type in _SKIP_GRAPH_IO_TYPES:
             continue
         if element_type == "activation":
             modules.append(_activation(int(properties.get("activation", 0)), channels,
@@ -1214,7 +1264,11 @@ def build_module(
             module, channels = built
             modules.append(module)
 
-    return ConditionedSequential(modules, cond_dim) if modules else nn.Identity()
+    if not modules:
+        return nn.Identity()
+    return ConditionedSequential(
+        modules, cond_dim, fragment=fragment, input_channels=input_channels
+    )
 
 
 def _module_receptive_field(module: nn.Module) -> int:
@@ -2432,6 +2486,39 @@ def _clone_rave_from_fragment(module: RaveGraphModule) -> RaveGraphModule:
     return clone
 
 
+def _clone_conditioned_from_fragment(module: ConditionedSequential) -> ConditionedSequential:
+    """Rebuild a mapping graph from its fragment and copy trained weights.
+
+    Avoids ``deepcopy`` of a live CUDA module, which can alias convolution
+    weights so TorchScript sees a 1-channel kernel while the example is stereo.
+    """
+    if not isinstance(module.fragment, dict):
+        raise ValueError("mapping export requires the original graph fragment")
+    clone = build_module(module.fragment, module.input_channels, module.cond_dim)
+    if not isinstance(clone, ConditionedSequential):
+        raise ValueError("mapping export rebuilt an empty graph")
+    original_has_weight_norm = any(
+        _has_weight_norm(child) for child in module.modules()
+    )
+    if not original_has_weight_norm:
+        strip_weight_norm(clone)
+    clone.load_state_dict(_clone_state_dict(module))
+    strip_weight_norm(clone)
+    return clone
+
+
+def _first_conv_in_channels(module: nn.Module, fallback: int) -> int:
+    """Return the first ``Conv1d`` input width so trace examples match weights.
+
+    User-library graphs such as TCN-with-conv start with a 1x1 expander whose
+    ``in_channels`` may be 1 (mono box) even when the DAW bus is stereo.
+    """
+    for child in module.modules():
+        if isinstance(child, nn.Conv1d):
+            return max(1, int(child.in_channels))
+    return max(1, int(fallback))
+
+
 def _clone_state_dict(module: nn.Module) -> dict[str, torch.Tensor]:
     """Return a detached CPU copy of ``module`` parameters and buffers."""
     return {
@@ -2440,15 +2527,46 @@ def _clone_state_dict(module: nn.Module) -> dict[str, torch.Tensor]:
     }
 
 
+def _cpu_mapping_export_module(module: nn.Module) -> nn.Module:
+    """Build a CPU-only mapping clone that does not alias the live CUDA graph.
+
+    Reads ``state_dict`` first so ``eval()`` / ``to('cpu')`` never run on the
+    training module. TorchScript on CUDA has been observed to invoke the first
+    conv with the previous crop (``[1, 2, 16384]``) when the live module is
+    traced or deepcopy-aliased.
+    """
+    state = _clone_state_dict(module)
+    fragment = getattr(module, "fragment", None)
+    input_channels = int(getattr(module, "input_channels", 1) or 1)
+    cond_dim = int(getattr(module, "cond_dim", 1) or 1)
+    if isinstance(module, ConditionedSequential) and isinstance(fragment, dict):
+        clone = build_module(fragment, input_channels, cond_dim)
+        if not isinstance(clone, ConditionedSequential):
+            raise ValueError("mapping export rebuilt an empty graph")
+        if not any(_has_weight_norm(child) for child in module.modules()):
+            strip_weight_norm(clone)
+        clone.load_state_dict(state)
+        strip_weight_norm(clone)
+        return clone.to("cpu").eval()
+    clone = copy.deepcopy(module)
+    strip_weight_norm(clone)
+    clone.load_state_dict(state, strict=False)
+    return clone.to("cpu").eval()
+
+
 def _clone_module_for_export(module: nn.Module) -> nn.Module:
     """Clone a module for TorchScript without mutating the training graph."""
     _clear_nonleaf_caches(module)
     if isinstance(module, RaveGraphModule):
         cloned = _clone_rave_from_fragment(module)
+    elif isinstance(module, ConditionedSequential) and isinstance(
+        getattr(module, "fragment", None), dict
+    ):
+        cloned = _cpu_mapping_export_module(module)
     else:
         cloned = copy.deepcopy(module)
         strip_weight_norm(cloned)
-    return cloned.to("cpu")
+    return cloned.to("cpu").eval()
 
 
 def _export_rave_scripted(module: RaveGraphModule, input_channels: int, path: Path) -> None:
@@ -2603,7 +2721,7 @@ def _last_declared_audio_channels(fragment: dict[str, Any]) -> int | None:
     last: int | None = None
     for element in elements:
         element_type = str(element.get("type", ""))
-        if element_type in {"audio_input", "audio_output", "knob_input", "xy_trackpad"}:
+        if element_type in _SKIP_GRAPH_IO_TYPES:
             continue
         properties = _properties(element)
         if element_type in {"conv_transpose1d", "conv1d", "rate_conv"} and "channels" in properties:
@@ -2634,6 +2752,21 @@ def _reconstruction_io_mode(
     if host >= 2:
         return "stereo"
     return "mono" if int(clip_channels) <= 1 else "stereo"
+
+
+def _mapping_input_channels(
+    fragment: dict[str, Any], options: dict[str, Any], clip_channels: int
+) -> int:
+    """Return the channel count used to build and export a mapping module.
+
+    Prefer an explicit plugin host width. When that is missing, infer from the
+    graph (Audio Input, then last conv/linear width) so a 1-channel user-library
+    TCN-with-conv box is not traced with stereo library WAVs.
+    """
+    host = int(options.get("host_input_channels", 0) or 0)
+    if host >= 1:
+        return host
+    return _host_io_channels(_reconstruction_io_mode(fragment, options, clip_channels))
 
 
 def _load_reconstruction_clips(
@@ -3236,17 +3369,34 @@ def _export_scripted(
 ) -> None:
     """Trace, freeze, and atomically save a conditioned TorchScript module.
 
-    The example control tensor matches the audio time length so freeze does not
-    specialise FiLM to a single global value per call.
+    Mapping graphs are cloned onto CPU from the fragment before tracing so the
+    live CUDA crop cannot leak into TorchScript as ``[1, 2, 16384]``.
     """
     was_training = bool(module.training)
-    module.eval()
-    export_module = _clone_module_for_export(module)
+    if isinstance(module, ConditionedSequential):
+        export_module = _cpu_mapping_export_module(module)
+    else:
+        module.eval()
+        export_module = _clone_module_for_export(module)
     example_samples = 256
-    example_x = torch.zeros(1, input_channels, example_samples)
-    example_c = torch.zeros(1, max(1, cond_dim), example_samples)
-    with torch.inference_mode():
-        scripted = torch.jit.trace(export_module, (example_x, example_c), strict=False)
+    traced_channels = _first_conv_in_channels(
+        export_module, int(getattr(module, "input_channels", input_channels) or input_channels)
+    )
+    example_x = torch.zeros(
+        1, traced_channels, example_samples, dtype=torch.float32, device="cpu"
+    )
+    example_c = torch.zeros(
+        1, max(1, cond_dim), example_samples, dtype=torch.float32, device="cpu"
+    )
+    export_module = export_module.to("cpu").eval()
+    with torch.no_grad():
+        _ = export_module(example_x, example_c)
+        scripted = torch.jit.trace(
+            export_module,
+            (example_x, example_c),
+            strict=False,
+            check_trace=False,
+        )
         scripted = torch.jit.freeze(scripted)
         output = scripted(example_x, example_c)
         if output.dim() != 3:
@@ -3737,8 +3887,10 @@ def train_request(request: dict[str, Any], artifact_dir: Path, command_file: Pat
         x_batch = torch.cat([x_batch, extra_x], dim=-1)
         y_batch = torch.cat([y_batch, extra_y], dim=-1)
 
-    input_channels = int(options.get("host_input_channels", x_batch.shape[1]))
-    input_channels = max(1, input_channels)
+    fragment = request.get("graph_fragment", {})
+    if not isinstance(fragment, dict):
+        fragment = {}
+    input_channels = _mapping_input_channels(fragment, options, int(x_batch.shape[1]))
     x_batch = _match_channels(x_batch, input_channels)
     y_batch = _match_channels(y_batch, input_channels)
     device, requested_device, effective_device = resolve_train_device(
@@ -3746,7 +3898,7 @@ def train_request(request: dict[str, Any], artifact_dir: Path, command_file: Pat
     )
     x_batch = x_batch.to(device)
     y_batch = y_batch.to(device)
-    module = build_module(request["graph_fragment"], input_channels, cond_dim)
+    module = build_module(fragment, input_channels, cond_dim)
     module.to(device)
     receptive_field = _module_receptive_field(module)
     if auraloss is None:
@@ -3903,7 +4055,7 @@ def train_request(request: dict[str, Any], artifact_dir: Path, command_file: Pat
                 module.train()
                 event["artifact_path"] = str(checkpoint_path)
                 event["blackbox_metadata"] = _blackbox_metadata(
-                    input_channels,
+                    _first_conv_in_channels(module, input_channels),
                     input_channels,
                     cond_dim,
                     receptive_field,
@@ -3922,7 +4074,8 @@ def train_request(request: dict[str, Any], artifact_dir: Path, command_file: Pat
         module.load_state_dict(best_state)
         _export_scripted(module, input_channels, cond_dim, artifact_path)
         tracker.save(str(artifact_path))
-        example_x = torch.zeros(1, input_channels, 256, device=device)
+        probe_channels = _first_conv_in_channels(module, input_channels)
+        example_x = torch.zeros(1, probe_channels, 256, device=device)
         example_c = torch.zeros(1, cond_dim, 1, device=device)
         with torch.inference_mode():
             output = module(example_x, example_c)
@@ -3944,7 +4097,7 @@ def train_request(request: dict[str, Any], artifact_dir: Path, command_file: Pat
             "artifact_path": str(artifact_path),
             **train_device_event_fields(device, requested_device),
             "blackbox_metadata": _blackbox_metadata(
-                input_channels,
+                probe_channels,
                 int(output.size(1)),
                 cond_dim,
                 receptive_field,

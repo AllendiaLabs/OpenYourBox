@@ -235,6 +235,117 @@ class TrainWorkerRecipeTests(unittest.TestCase):
         self.assertFalse(torch.allclose(out_ramp, out_mid, atol=1.0e-4))
         self.assertFalse(torch.allclose(out_ramp[..., :1], out_ramp[..., -1:], atol=1.0e-4))
 
+    def _tcn_with_conv_fragment(self) -> dict:
+        """Return a flattened user-library TCN-with-conv graph (1x1 expand, inner, 1x1 project)."""
+        return {
+            "elements": [
+                {
+                    "id": 1,
+                    "type": "conv1d",
+                    "properties": [
+                        {"key": "channels", "value": 4},
+                        {"key": "kernel_size", "value": 1},
+                        {"key": "dilation", "value": 1},
+                        {"key": "stride", "value": 1},
+                    ],
+                },
+                {
+                    "id": 2,
+                    "type": "conv1d",
+                    "properties": [
+                        {"key": "channels", "value": 4},
+                        {"key": "kernel_size", "value": 4},
+                        {"key": "dilation", "value": 1},
+                        {"key": "stride", "value": 1},
+                    ],
+                },
+                {
+                    "id": 3,
+                    "type": "activation",
+                    "properties": [{"key": "activation", "value": 0}],
+                },
+                {
+                    "id": 4,
+                    "type": "conv1d",
+                    "properties": [
+                        {"key": "channels", "value": 1},
+                        {"key": "kernel_size", "value": 1},
+                        {"key": "dilation", "value": 1},
+                        {"key": "stride", "value": 1},
+                    ],
+                },
+            ],
+            "connections": [
+                {"source_element_id": 1, "destination_element_id": 2},
+                {"source_element_id": 2, "destination_element_id": 3},
+                {"source_element_id": 3, "destination_element_id": 4},
+            ],
+        }
+
+    def test_export_scripted_matches_first_conv_not_host_width(self) -> None:
+        """TCN-with-conv 1x1 expander must not be traced with a stereo dummy."""
+        fragment = self._tcn_with_conv_fragment()
+        module = train_worker.build_module(fragment, 1, cond_dim=2)
+        first = next(
+            child
+            for child in module.modules()
+            if isinstance(child, torch.nn.Conv1d)
+        )
+        self.assertEqual(int(first.in_channels), 1)
+        self.assertEqual(int(first.out_channels), 4)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "model.pt"
+            train_worker._export_scripted(module, 2, 2, path)
+            loaded = torch.jit.load(str(path))
+            with torch.inference_mode():
+                out = loaded(torch.zeros(1, 1, 256), torch.zeros(1, 2, 256))
+        self.assertEqual(tuple(out.shape), (1, 1, 256))
+
+    def test_mono_expander_export_survives_stereo_training_crop(self) -> None:
+        """A 1-channel TCN-with-conv module must export after a stereo [1, 2, 16384] call."""
+        fragment = self._tcn_with_conv_fragment()
+        module = train_worker.build_module(fragment, 1, cond_dim=2)
+        stereo_crop = torch.zeros(1, 2, 16384)
+        cond = torch.zeros(1, 2, 1)
+        with torch.no_grad():
+            trained = module(stereo_crop, cond)
+        self.assertEqual(tuple(trained.shape[:2]), (1, 1))
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "model.pt"
+            train_worker._export_scripted(module, 2, 2, path)
+            loaded = torch.jit.load(str(path))
+            with torch.inference_mode():
+                out = loaded(stereo_crop, torch.zeros(1, 2, 16384))
+        self.assertEqual(int(out.size(1)), 1)
+        self.assertEqual(int(out.size(-1)), 16384)
+
+    def test_clone_conditioned_export_does_not_alias_live_weights(self) -> None:
+        """Mapping export must rebuild from the fragment instead of deepcopy."""
+        fragment = self._tcn_with_conv_fragment()
+        module = train_worker.build_module(fragment, 1, cond_dim=2)
+        first = next(
+            child
+            for child in module.modules()
+            if isinstance(child, torch.nn.Conv1d)
+        )
+        with torch.no_grad():
+            first.weight.fill_(0.25)
+        cloned = train_worker._clone_module_for_export(module)
+        cloned_first = next(
+            child
+            for child in cloned.modules()
+            if isinstance(child, torch.nn.Conv1d)
+        )
+        with torch.no_grad():
+            cloned_first.weight.fill_(0.0)
+        self.assertTrue(torch.allclose(first.weight, torch.full_like(first.weight, 0.25)))
+
+    def test_mapping_input_channels_infers_mono_from_last_conv(self) -> None:
+        """A 1-channel projector graph should train mono when host width is omitted."""
+        fragment = self._tcn_with_conv_fragment()
+        width = train_worker._mapping_input_channels(fragment, {}, 2)
+        self.assertEqual(width, 1)
+
     def test_checkpoint_metadata_requires_conditioning(self) -> None:
         """Hear-while-training checkpoints must advertise the (audio, cond) signature."""
         metadata = train_worker._blackbox_metadata(2, 2, 2, 16)

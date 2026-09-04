@@ -33,13 +33,11 @@ void TrainPanel::render(const train::TrainCoordinator &coordinator,
   const bool reconstructionBlocked =
       objective == graph::TrainObjective::reconstruction &&
       gates.reconstructionPathInvalid;
-  const bool cloudBlocked =
-      destination == graph::TrainDestination::cloud &&
-      (!gates.cloudLinked || gates.entitlementUnavailable);
+  // Temporary: Cloud Run does not require Allendia sign-in / credits.
   const bool gated =
       !gates.copyrightAcknowledged || gates.selectedPairCount < 1 ||
       gates.armedElementCount < 1 || mixed || unpairedMapping ||
-      reconstructionBlocked || cloudBlocked;
+      reconstructionBlocked;
 
   const char *objectiveLabel =
       objective == graph::TrainObjective::reconstruction ? "Reconstruction"
@@ -72,16 +70,16 @@ void TrainPanel::render(const train::TrainCoordinator &coordinator,
     ImGui::EndCombo();
   }
   if (destination == graph::TrainDestination::cloud) {
-    if (!gates.cloudLinked)
-      ImGui::TextColored(ImVec4(1.0f, 0.72f, 0.25f, 1.0f),
-                         "Sign in with Allendia to run cloud training.");
-    else if (gates.entitlementUnavailable) {
-      ImGui::TextColored(ImVec4(1.0f, 0.72f, 0.25f, 1.0f),
-                         "Allendia credits unavailable.");
-      if (ImGui::SmallButton("Manage account") && callbacks.openStorefront)
-        callbacks.openStorefront();
-    } else
-      ImGui::TextDisabled("Credits: available");
+    ImGui::TextDisabled("Allendia sign-in optional for now.");
+    if (gates.cloudLinked) {
+      if (gates.entitlementUnavailable) {
+        ImGui::TextColored(ImVec4(1.0f, 0.72f, 0.25f, 1.0f),
+                           "Allendia credits unavailable (ignored for now).");
+        if (ImGui::SmallButton("Manage account") && callbacks.openStorefront)
+          callbacks.openStorefront();
+      } else
+        ImGui::TextDisabled("Credits: available");
+    }
     if (train::exceedsSoftUploadWarn(gates.selectedUploadBytes,
                                      gates.softUploadWarnBytes))
       ImGui::TextColored(

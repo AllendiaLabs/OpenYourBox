@@ -16,7 +16,7 @@ Training is always real. There is no mock/fake advancement worker and no
   never fake train success)
 - `tests/` — entitlement, concurrency, Stop, crash-fail, retention, and short
   real-train smoke tests
-- `Dockerfile` + `runpod/entrypoint.sh` — CUDA image for a RunPod GPU pod
+- `Dockerfile` — CUDA image for a RunPod GPU pod
 
 ## Staging environment
 
@@ -29,6 +29,7 @@ Training is always real. There is no mock/fake advancement worker and no
 | `CLOUD_DATA_DIR` | File-backed job/corpus/artifact store (persist across restarts for retention) | temp / in-memory; `/workspace/oyb-cloud-data` in the GPU image |
 | `CLOUD_MOCK_ENTITLEMENT` | Staging ledger stub: `1` sufficient / `0` insufficient for new customers | `1` |
 | `CLOUD_AUTO_WORKER` | `1` claims queued jobs and runs real training; `0` leaves jobs queued (tests) | `1` |
+| `CLOUD_ALLOW_ANONYMOUS` | `1` allows Cloud jobs without Allendia sign-in (guest session) | `0` locally; `1` in the GPU image |
 | `CLOUD_HEARTBEAT_TIMEOUT_SECONDS` | Stale worker heartbeat → `failed` / `worker_lost` | `120` |
 | `CLOUD_DOWNLOAD_SECRET` | HMAC material for download tokens (never placed in query strings) | staging default |
 | `RUNPOD_POD_ID` | Set by RunPod. Used only to derive the HTTPS proxy origin when `CLOUD_API_PUBLIC_URL` is unset | — |
@@ -44,6 +45,9 @@ Apply endpoint, then Sign in. The same keys can still be edited in user-data
 `cloud.xml` (`apiBaseUrlOverride`, `storefrontUrlOverride`).
 
 Train controls are **Run** and **Stop** only (no Pause/Resume) for Local and Cloud.
+
+With `CLOUD_ALLOW_ANONYMOUS=1` (default in the RunPod image), the plugin can Cloud
+**Run** without Allendia sign-in. Sign-in remains available but optional.
 
 ## Run (staging)
 
@@ -67,31 +71,20 @@ request timeout is compatible with job progress. Prefer the HTTPS proxy URL for
 TLS. Large corpus uploads that cannot finish in ~100 seconds should use a TCP
 port instead (no automatic TLS).
 
-### Build and push (linux/amd64)
-
-RunPod hosts are x86_64. On Apple Silicon, always pass `--platform linux/amd64`.
-
-```bash
-# from the repository root
-docker build --platform linux/amd64 -f CloudService/Dockerfile -t YOUR_DOCKERHUB_USER/oyb-cloud-train:latest .
-docker push YOUR_DOCKERHUB_USER/oyb-cloud-train:latest
-```
-
-Register a private registry credential in the RunPod console if the image is not
-public.
-
 ### Deploy
 
 1. Runpod console → **Pods** → **Deploy**.
 2. GPU: **RTX 4090** (or similar 24 GB) is enough for short mapping jobs; pick more
    VRAM for long reconstruction runs.
-3. Template / container image: `YOUR_DOCKERHUB_USER/oyb-cloud-train:latest`.
+3. Template / container image: `YOUR_DOCKERHUB_USER/oyb-cloud-train:latest` (or your
+   registry tag).
 4. **Expose HTTP Ports**: `8787` (max one HTTP proxy port is typical).
 5. Container disk ≥ 40 GB. Attach a network volume at `/workspace` if you want
    `CLOUD_DATA_DIR` to survive stop/terminate.
 6. Environment:
    - `CLOUD_DOWNLOAD_SECRET` = a long random string (required before any real use)
    - `CLOUD_MOCK_ENTITLEMENT` = `1` for staging credits
+   - `CLOUD_ALLOW_ANONYMOUS` = `1` if Cloud Run should work without Allendia sign-in
    - Optional: `CLOUD_API_PUBLIC_URL` if you are not using the HTTP proxy
 7. Deploy on-demand. Wait until `GET /v1/health` returns `"ok": true` and
    `"cuda": true`.
@@ -134,7 +127,7 @@ In Train → Allendia account → **Cloud endpoint (staging / RunPod)**:
 
 - API base URL = `https://<POD_ID>-8787.proxy.runpod.net`
 - Storefront / link URL = the same origin
-- **Apply endpoint**, then **Sign in with Allendia**
+- **Apply endpoint** (Allendia sign-in optional when `CLOUD_ALLOW_ANONYMOUS=1`)
 
 (Or set the same keys in user-data `cloud.xml`.) Cloud **Run** then submits a
 real GPU job.

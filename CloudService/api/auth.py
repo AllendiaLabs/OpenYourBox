@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import os
 import time
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends
 from fastapi.responses import JSONResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
@@ -12,6 +13,31 @@ from CloudService.api.state import STORE, Session
 
 router = APIRouter()
 _bearer = HTTPBearer(auto_error=False)
+
+# Stable guest identity used when CLOUD_ALLOW_ANONYMOUS is enabled.
+GUEST_ACCESS_TOKEN = "tok-anonymous-guest"
+GUEST_CUSTOMER_ID = "cust-anonymous"
+
+
+def anonymous_allowed() -> bool:
+    """Return True when Cloud jobs may run without an Allendia link."""
+    return os.environ.get("CLOUD_ALLOW_ANONYMOUS", "0") != "0"
+
+
+def ensure_guest_session() -> Session:
+    """Return the process-wide anonymous session, creating it if needed."""
+    with STORE.lock:
+        session = STORE.sessions.get(GUEST_ACCESS_TOKEN)
+        if session is None or session.revoked:
+            session = Session(
+                access_token=GUEST_ACCESS_TOKEN,
+                customer_id=GUEST_CUSTOMER_ID,
+                refresh_token="",
+                revoked=False,
+                expires_at=0.0,
+            )
+            STORE.sessions[GUEST_ACCESS_TOKEN] = session
+        return session
 
 
 class CloudAPIError(Exception):
@@ -42,16 +68,13 @@ async def cloud_api_error_handler(_request: Request, exc: CloudAPIError) -> JSON
     return error_response(exc.status_code, exc.error_code, exc.error_message)
 
 
-def bearer_token(
+def optional_bearer_token(
     credentials: HTTPAuthorizationCredentials | None = Depends(_bearer),
 ) -> str:
-    """Extract a Bearer access token or raise unauthorized."""
+    """Extract a Bearer token, or empty string when none was sent."""
     if credentials is None or credentials.scheme.lower() != "bearer":
-        raise CloudAPIError(401, "unauthorized", "Linked session required.")
-    token = (credentials.credentials or "").strip()
-    if not token:
-        raise CloudAPIError(401, "unauthorized", "Linked session required.")
-    return token
+        return ""
+    return (credentials.credentials or "").strip()
 
 
 def lookup_session(access_token: str) -> Session:
@@ -69,8 +92,12 @@ def lookup_session(access_token: str) -> Session:
         return session
 
 
-def require_session(token: str = Depends(bearer_token)) -> Session:
-    """FastAPI dependency: authenticated platform-customer session."""
+def require_session(token: str = Depends(optional_bearer_token)) -> Session:
+    """FastAPI dependency: linked session, or anonymous guest when allowed."""
+    if not token:
+        if anonymous_allowed():
+            return ensure_guest_session()
+        raise CloudAPIError(401, "unauthorized", "Linked session required.")
     return lookup_session(token)
 
 

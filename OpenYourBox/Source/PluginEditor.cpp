@@ -1139,23 +1139,7 @@ void OpenYourBoxAudioProcessorEditor::handleTrainRun() {
   if (trainPanel.destination ==
       openyourbox::graph::TrainDestination::cloud) {
     auto &cloudSettings = audioProcessor.getCloudSettings();
-    if (!cloudSettings.isLinked()) {
-      showError("Link a platform customer account before Cloud Run.");
-      return;
-    }
-    openyourbox::train::CloudApiError error;
-    const auto entitlement = cloudTrainClient.probeEntitlement(error);
-    if (!entitlement.has_value()) {
-      showError(error.message.isNotEmpty()
-                    ? error.message
-                    : juce::String("Authentication error. Sign in with Allendia again."));
-      return;
-    }
-    if (!entitlement->sufficient) {
-      showError("Allendia credits unavailable. Manage your account "
-                "to purchase credits.");
-      return;
-    }
+    // Temporary: Allendia link / entitlement are not required for Cloud Run.
     const auto package = openyourbox::train::assembleCloudJobPackage(
         *request, audioProcessor.getTrainingLibrary(),
         cloudSettings.getClientInstanceId(),

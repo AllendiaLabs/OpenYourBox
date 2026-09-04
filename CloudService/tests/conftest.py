@@ -188,6 +188,7 @@ def link_headers(client: TestClient, customer_id: str = "cust-1") -> dict[str, s
 def client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> TestClient:
     """Unauthenticated TestClient with the real worker disabled (gates/Stop)."""
     monkeypatch.setenv("CLOUD_AUTO_WORKER", "0")
+    monkeypatch.setenv("CLOUD_ALLOW_ANONYMOUS", "0")
     monkeypatch.setenv("CLOUD_DATA_DIR", str(tmp_path))
     monkeypatch.setenv("CLOUD_API_PUBLIC_URL", "http://testserver")
     STORE.reset()
@@ -202,6 +203,7 @@ def client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> TestClient:
 def live_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> TestClient:
     """TestClient that claims queued jobs and runs real recipes."""
     monkeypatch.setenv("CLOUD_AUTO_WORKER", "1")
+    monkeypatch.setenv("CLOUD_ALLOW_ANONYMOUS", "0")
     monkeypatch.setenv("CLOUD_DATA_DIR", str(tmp_path))
     monkeypatch.setenv("CLOUD_API_PUBLIC_URL", "http://testserver")
     monkeypatch.setenv("CLOUD_HEARTBEAT_TIMEOUT_SECONDS", "120")
