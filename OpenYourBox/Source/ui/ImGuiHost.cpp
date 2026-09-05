@@ -1,4 +1,5 @@
 #include "ImGuiHost.h"
+#include "VisualLanguage.h"
 
 #include <imgui.h>
 #include <imgui_impl_opengl3.h>
@@ -105,7 +106,8 @@ bool ImGuiHost::keyStateChanged(bool isKeyDown) {
 void ImGuiHost::newOpenGLContextCreated() {
   imguiContext = ImGui::CreateContext();
   ImGui::SetCurrentContext(imguiContext);
-  ImGui::StyleColorsDark();
+  VisualLanguage::loadFonts();
+  VisualLanguage::applyStyle();
   auto &io = ImGui::GetIO();
   io.IniFilename = nullptr;
   io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
@@ -134,7 +136,9 @@ void ImGuiHost::renderOpenGL() {
   wantsKeyboardCapture.store(io.WantCaptureKeyboard || io.WantTextInput,
                              std::memory_order_release);
 
-  juce::OpenGLHelpers::clear(juce::Colour(20, 23, 30));
+  juce::OpenGLHelpers::clear(juce::Colour::fromFloatRGBA(
+      VisualLanguage::Surface::page.r, VisualLanguage::Surface::page.g,
+      VisualLanguage::Surface::page.b, VisualLanguage::Surface::page.a));
   juce::gl::glViewport(
       0, 0, juce::roundToInt(static_cast<float>(getWidth()) * scale),
       juce::roundToInt(static_cast<float>(getHeight()) * scale));

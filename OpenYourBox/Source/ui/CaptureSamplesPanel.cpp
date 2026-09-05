@@ -1,4 +1,5 @@
 #include "CaptureSamplesPanel.h"
+#include "InstrumentWidgets.h"
 
 namespace openyourbox::ui {
 void CaptureSamplesPanel::render(
@@ -39,13 +40,13 @@ void CaptureSamplesPanel::render(
 
   if (!slave && role == capture::PairingRole::unpaired) {
     if (!searching) {
-      if (ImGui::Button("Search for instances") && callbacks.beginDiscovery)
+      if (InstrumentWidgets::button("Search for instances") && callbacks.beginDiscovery)
         callbacks.beginDiscovery();
       ImGui::TextWrapped(
           "Instances appear here only while they are searching. "
           "Click Search for instances on both, then Connect.");
     } else {
-      if (ImGui::Button("Stop searching") && callbacks.stopDiscovery)
+      if (InstrumentWidgets::button("Stop searching") && callbacks.stopDiscovery)
         callbacks.stopDiscovery();
       if (peers.empty())
         ImGui::TextWrapped(
@@ -76,20 +77,20 @@ void CaptureSamplesPanel::render(
                           ? "Processed (y)"
                           : "Unassigned");
     if (!slave) {
-      if (ImGui::Button("This instance: Clean") && callbacks.setRole)
+      if (InstrumentWidgets::button("This instance: Clean") && callbacks.setRole)
         callbacks.setRole(capture::CaptureRole::clean);
       ImGui::SameLine();
-      if (ImGui::Button("This instance: Processed") && callbacks.setRole)
+      if (InstrumentWidgets::button("This instance: Processed") && callbacks.setRole)
         callbacks.setRole(capture::CaptureRole::processed);
     }
     bool bypass = pairing.isCaptureBypassEnabled();
-    if (ImGui::Checkbox("Bypass graph (default)", &bypass) &&
+    if (InstrumentWidgets::checkbox("Bypass graph (default)", &bypass) &&
         callbacks.setBypass)
       callbacks.setBypass(bypass);
     bool startTransport = true;
     if (callbacks.getStartTransportOnRecord)
       startTransport = callbacks.getStartTransportOnRecord();
-    if (ImGui::Checkbox("Start transport if stopped", &startTransport) &&
+    if (InstrumentWidgets::checkbox("Start transport if stopped", &startTransport) &&
         callbacks.setStartTransportOnRecord)
       callbacks.setStartTransportOnRecord(startTransport);
 
@@ -99,13 +100,13 @@ void CaptureSamplesPanel::render(
             captureRole != capture::CaptureRole::unassigned;
         if (!canRecord)
           ImGui::BeginDisabled();
-        if (ImGui::Button("Record") && callbacks.startRecording)
+        if (InstrumentWidgets::button("Record") && callbacks.startRecording)
           callbacks.startRecording();
         if (!canRecord) {
           ImGui::EndDisabled();
           ImGui::TextDisabled("Assign complementary Clean/Processed roles.");
         }
-      } else if (ImGui::Button("Stop") && callbacks.stopRecording) {
+      } else if (InstrumentWidgets::button("Stop") && callbacks.stopRecording) {
         callbacks.stopRecording();
       }
     } else if (sync == capture::SyncState::recording) {
@@ -113,7 +114,7 @@ void CaptureSamplesPanel::render(
                          "Recording under master control");
     }
 
-    if (ImGui::Button("Unpair") && callbacks.unpair)
+    if (InstrumentWidgets::button("Unpair") && callbacks.unpair)
       callbacks.unpair();
   }
 
@@ -123,18 +124,18 @@ void CaptureSamplesPanel::render(
     ImGui::TextWrapped(
         "Single capture records this instance input into an unpaired clip.");
     bool bypass = pairing.isCaptureBypassEnabled();
-    if (ImGui::Checkbox("Bypass graph (default)", &bypass) &&
+    if (InstrumentWidgets::checkbox("Bypass graph (default)", &bypass) &&
         callbacks.setBypass)
       callbacks.setBypass(bypass);
     if (sync != capture::SyncState::recording) {
-      if (ImGui::Button("Record") && callbacks.startSingleRecording)
+      if (InstrumentWidgets::button("Record") && callbacks.startSingleRecording)
         callbacks.startSingleRecording();
-    } else if (ImGui::Button("Stop") && callbacks.stopRecording) {
+    } else if (InstrumentWidgets::button("Stop") && callbacks.stopRecording) {
       callbacks.stopRecording();
     }
   }
 
-  if (!slave && ImGui::Button("Open Library") && callbacks.openLibrary)
+  if (!slave && InstrumentWidgets::button("Open Library") && callbacks.openLibrary)
     callbacks.openLibrary();
 }
 } // namespace openyourbox::ui

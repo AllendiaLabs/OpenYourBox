@@ -1,4 +1,5 @@
 #include "UserBoxLibraryPanel.h"
+#include "InstrumentWidgets.h"
 
 #include "../graph/BoxFlowOrder.h"
 
@@ -326,6 +327,7 @@ void UserBoxLibraryPanel::render(
     const std::function<juce::ValueTree(const juce::String &, juce::String &)>
         &loadSnapshot) {
   snapshotLoader = loadSnapshot;
+  InstrumentWidgets::pushTreeStyle();
   const auto hideForeignDragHover = ImGui::GetDragDropPayload() != nullptr &&
                                     !isBoxLibraryDrag();
   if (hideForeignDragHover) {
@@ -376,6 +378,7 @@ void UserBoxLibraryPanel::render(
   renderDialogs(library, callbacks);
   if (hideForeignDragHover)
     ImGui::PopStyleColor(2);
+  InstrumentWidgets::popTreeStyle();
 }
 
 void UserBoxLibraryPanel::renderFolder(library::UserBoxLibrary &library,
@@ -651,13 +654,13 @@ void UserBoxLibraryPanel::renderDialogs(library::UserBoxLibrary &library,
       ImGui::BeginPopupModal("Delete Box", nullptr,
                              ImGuiWindowFlags_AlwaysAutoResize)) {
     ImGui::TextUnformatted("Delete this box from the library?");
-    if (ImGui::Button("Delete")) {
+    if (InstrumentWidgets::button("Delete")) {
       library.removeEntry(pendingDeleteEntryId);
       pendingDeleteEntryId.clear();
       ImGui::CloseCurrentPopup();
     }
     ImGui::SameLine();
-    if (ImGui::Button("Cancel")) {
+    if (InstrumentWidgets::button("Cancel")) {
       pendingDeleteEntryId.clear();
       ImGui::CloseCurrentPopup();
     }
@@ -672,7 +675,7 @@ void UserBoxLibraryPanel::renderDialogs(library::UserBoxLibrary &library,
                        pendingDeleteFolderContents
                            ? "Delete this folder and every box inside it?"
                            : "Delete this empty folder?");
-    if (ImGui::Button("Delete")) {
+    if (InstrumentWidgets::button("Delete")) {
       juce::String error;
       if (!library.removeFolder(pendingDeleteFolder, pendingDeleteFolderContents,
                                 error) &&
@@ -684,7 +687,7 @@ void UserBoxLibraryPanel::renderDialogs(library::UserBoxLibrary &library,
       ImGui::CloseCurrentPopup();
     }
     ImGui::SameLine();
-    if (ImGui::Button("Cancel")) {
+    if (InstrumentWidgets::button("Cancel")) {
       pendingDeleteFolder.clear();
       ImGui::CloseCurrentPopup();
     }
@@ -706,7 +709,7 @@ void UserBoxLibraryPanel::renderDialogs(library::UserBoxLibrary &library,
         ImGui::InputText("##newFolderName", newFolderBuffer.data(),
                          newFolderBuffer.size(),
                          ImGuiInputTextFlags_EnterReturnsTrue);
-    const auto submit = ImGui::Button("Create") || enter;
+    const auto submit = InstrumentWidgets::button("Create") || enter;
     if (submit) {
       auto leaf = juce::String(newFolderBuffer.data()).trim();
       juce::String error;
@@ -725,7 +728,7 @@ void UserBoxLibraryPanel::renderDialogs(library::UserBoxLibrary &library,
         callbacks.showMessage(error.toStdString());
     }
     ImGui::SameLine();
-    if (ImGui::Button("Cancel"))
+    if (InstrumentWidgets::button("Cancel"))
       ImGui::CloseCurrentPopup();
     ImGui::EndPopup();
   }

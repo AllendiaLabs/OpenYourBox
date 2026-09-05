@@ -1,5 +1,7 @@
 #include "NodeRenderer.h"
 #include "FactoryPalette.h"
+#include "../ui/InstrumentWidgets.h"
+#include "../ui/VisualLanguage.h"
 
 #include <imgui.h>
 #include <imgui_internal.h>
@@ -59,9 +61,9 @@ constexpr const char *rootCanvasLabel = "Main";
 /** @brief Sentinel id for the Project structure Main row double-click. */
 constexpr std::int32_t mainStructureRowId = -1;
 /** @brief Idle cable colour before RMS fill is applied. */
-constexpr ImU32 idleLinkColour = IM_COL32(100, 180, 255, 220);
+constexpr ImU32 idleLinkColour = IM_COL32(72, 148, 232, 220);
 /** @brief RMS fill colour drawn from source toward destination. */
-constexpr ImU32 levelLinkColour = IM_COL32(255, 176, 64, 255);
+constexpr ImU32 levelLinkColour = IM_COL32(232, 176, 64, 255);
 /** @brief Thickness of the idle cable in canvas units. */
 constexpr float idleLinkThickness = 2.0f;
 /** @brief Thickness of the RMS fill overlay in canvas units. */
@@ -712,6 +714,7 @@ void NodeRenderer::render(NodeGraph &graph,
                     ImGuiWindowFlags_NoScrollbar |
                         ImGuiWindowFlags_NoScrollWithMouse);
   ed::SetCurrentEditor(context);
+  openyourbox::ui::VisualLanguage::applyNodeEditorStyle();
   // Canvas cut/copy shortcuts must not steal Cmd/Ctrl+C/V from InputText.
   ed::EnableShortcuts(!ImGui::GetIO().WantTextInput);
 
@@ -1188,7 +1191,14 @@ void NodeRenderer::renderPalette(NodeGraph &graph,
   width = std::min(width, std::max(minPalette, avail.x - minCanvas - splitterWidth));
   leftPaletteWidth = width;
   ImGui::BeginChild("ElementPalette", ImVec2(width, 0.0f), true);
-  ImGui::TextColored(ImVec4(0.39f, 0.70f, 1.0f, 1.0f), "Library");
+  openyourbox::ui::InstrumentWidgets::pushTreeStyle();
+  openyourbox::ui::VisualLanguage::pushStrong();
+  ImGui::TextColored(
+      ImVec4(openyourbox::ui::VisualLanguage::accent.r,
+             openyourbox::ui::VisualLanguage::accent.g,
+             openyourbox::ui::VisualLanguage::accent.b, 1.0f),
+      "Library");
+  openyourbox::ui::VisualLanguage::popFont();
   ImGui::TextDisabled("Drag onto the graph");
   ImGui::Separator();
 
@@ -1289,6 +1299,7 @@ void NodeRenderer::renderPalette(NodeGraph &graph,
   ImGui::TextWrapped(
       "Scroll to pan. Ctrl/Cmd+scroll or pinch to zoom at the pointer. "
       "Double-click a group to open it. Use Main > group at the top to go back.");
+  openyourbox::ui::InstrumentWidgets::popTreeStyle();
   ImGui::EndChild();
   ImGui::SameLine(0.0f, 0.0f);
   ImGui::InvisibleButton("PaletteSplitter",
@@ -1327,7 +1338,7 @@ void NodeRenderer::renderNode(NodeGraph &graph, GraphNode &node,
   ImGui::PushTextWrapPos(ImGui::GetCursorPos().x + nodeBodyWidth);
 
   if (node.state == NodeState::frozenGold)
-    drawPassiveBoxText("\xF0\x9F\x94\x92");
+    drawPassiveBoxText(openyourbox::ui::VisualLanguage::Icon::lock);
   if (node.state == NodeState::frozenGold)
     ImGui::SameLine();
   drawPassiveBoxText(node.label.c_str());
@@ -1386,8 +1397,8 @@ void NodeRenderer::renderKnobControl(NodeGraph &graph, GraphNode &node,
       value = node.conditioningValues[static_cast<std::size_t>(index)];
     else if (index == 0)
       value = node.conditioningValue;
-    if (ImGui::VSliderFloat("##knob", ImVec2(28.0f, 72.0f), &value,
-                            conditioningMinimum, conditioningMaximum, "")) {
+    if (openyourbox::ui::InstrumentWidgets::circularKnob(
+            "##knob", &value, conditioningMinimum, conditioningMaximum)) {
       graph.setConditioningValue(node.id, index, value);
       if (callbacks.knobChanged)
         callbacks.knobChanged(node.id, value);
@@ -1408,43 +1419,19 @@ void NodeRenderer::renderKnobControl(NodeGraph &graph, GraphNode &node,
 
 void NodeRenderer::renderXyPad(NodeGraph &graph, GraphNode &node,
                                const NodeRendererCallbacks &callbacks) {
-  const ImVec2 padSize{118.0f, 118.0f};
-  const auto origin = ImGui::GetCursorScreenPos();
-  ImGui::InvisibleButton("##xypad", padSize);
-  const auto hovered = ImGui::IsItemHovered();
-  const auto active = ImGui::IsItemActive();
-  auto *draw = ImGui::GetWindowDrawList();
-  draw->AddRectFilled(origin,
-                      ImVec2(origin.x + padSize.x, origin.y + padSize.y),
-                      ImGui::GetColorU32(ImGuiCol_FrameBg), 4.0f);
-  draw->AddRect(origin, ImVec2(origin.x + padSize.x, origin.y + padSize.y),
-                ImGui::GetColorU32(ImGuiCol_Border), 4.0f);
-  const auto normalize = [](float value) {
-    return (clampConditioning(value) - conditioningMinimum) /
-           (conditioningMaximum - conditioningMinimum);
-  };
-  auto handle = ImVec2(origin.x + normalize(node.conditioningX) * padSize.x,
-                       origin.y + (1.0f - normalize(node.conditioningY)) *
-                                      padSize.y);
-  if ((hovered || active) && ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
-    const auto mouse = ImGui::GetIO().MousePos;
-    const auto nx = std::clamp((mouse.x - origin.x) / padSize.x, 0.0f, 1.0f);
-    const auto ny =
-        std::clamp(1.0f - (mouse.y - origin.y) / padSize.y, 0.0f, 1.0f);
-    const auto x =
-        conditioningMinimum + nx * (conditioningMaximum - conditioningMinimum);
-    const auto y =
-        conditioningMinimum + ny * (conditioningMaximum - conditioningMinimum);
+  float x = node.conditioningX;
+  float y = node.conditioningY;
+  const bool changed = openyourbox::ui::InstrumentWidgets::xyPad(
+      "##xypad", &x, &y, conditioningMinimum, conditioningMaximum);
+  if (changed) {
     graph.setConditioningPad(node.id, x, y);
     if (callbacks.xyChanged)
       callbacks.xyChanged(node.id, node.conditioningX, node.conditioningY);
-    handle = ImVec2(origin.x + nx * padSize.x, origin.y + (1.0f - ny) * padSize.y);
   }
-  if (active) {
+  if (ImGui::IsItemActive()) {
     patchGestureHeldThisFrame = true;
     patchGestureLabel = "Parameter edit";
   }
-  draw->AddCircleFilled(handle, 5.0f, ImGui::GetColorU32(ImGuiCol_SliderGrabActive));
   ImGui::Text("X %.2f  Y %.2f", static_cast<double>(node.conditioningX),
               static_cast<double>(node.conditioningY));
 }
@@ -1563,7 +1550,11 @@ void NodeRenderer::handleConnections(NodeGraph &graph,
         recompileThisFrame = true;
       }
     } else {
-      ed::RejectNewItem(ImVec4(1.0f, 0.15f, 0.15f, 1.0f), 3.0f);
+      ed::RejectNewItem(
+          ImVec4(openyourbox::ui::VisualLanguage::danger.r,
+                 openyourbox::ui::VisualLanguage::danger.g,
+                 openyourbox::ui::VisualLanguage::danger.b, 1.0f),
+          3.0f);
       transientMessage = result.message;
       transientMessageDeadline = ImGui::GetTime() + 2.5;
       if (callbacks.showMessage)

@@ -1,4 +1,5 @@
 #include "CopyrightModal.h"
+#include "InstrumentWidgets.h"
 
 namespace openyourbox::ui {
 bool CopyrightModal::render(library::CopyrightAcknowledgment &acknowledgment,
@@ -7,6 +8,7 @@ bool CopyrightModal::render(library::CopyrightAcknowledgment &acknowledgment,
   if (!visible || acknowledgment.isAcknowledged())
     return false;
 
+  InstrumentWidgets::pushModalCard();
   ImGui::OpenPopup("Copyright acknowledgment");
   const auto center = ImGui::GetMainViewport()->GetCenter();
   ImGui::SetNextWindowPos(center, ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
@@ -14,10 +16,12 @@ bool CopyrightModal::render(library::CopyrightAcknowledgment &acknowledgment,
   if (ImGui::BeginPopupModal("Copyright acknowledgment", &open,
                              ImGuiWindowFlags_AlwaysAutoResize)) {
     ImGui::TextWrapped("%s", acknowledgment.getCertificationText().toRawUTF8());
-    ImGui::Checkbox("I certify this statement", &certified);
+    InstrumentWidgets::checkbox("I certify this statement", &certified);
     if (!certified)
       ImGui::BeginDisabled();
-    if (ImGui::Button("Confirm") && acknowledgment.acknowledge()) {
+    if (InstrumentWidgets::button("Confirm", ImVec2(0.0f, 0.0f),
+                                  InstrumentButtonKind::primary) &&
+        acknowledgment.acknowledge()) {
       if (onConfirmed)
         onConfirmed();
       certified = false;
@@ -27,13 +31,14 @@ bool CopyrightModal::render(library::CopyrightAcknowledgment &acknowledgment,
     if (!certified)
       ImGui::EndDisabled();
     ImGui::SameLine();
-    if (ImGui::Button("Cancel")) {
+    if (InstrumentWidgets::button("Cancel")) {
       certified = false;
       ImGui::CloseCurrentPopup();
       open = false;
     }
     ImGui::EndPopup();
   }
+  InstrumentWidgets::popModalCard();
   return open;
 }
 } // namespace openyourbox::ui

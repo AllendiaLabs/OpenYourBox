@@ -1,4 +1,6 @@
 #include "InfoPanel.h"
+#include "InstrumentWidgets.h"
+#include "VisualLanguage.h"
 
 #include <imgui.h>
 
@@ -65,14 +67,18 @@ void InfoPanel::render(std::uint64_t receptiveFieldSamples, double sampleRate,
               static_cast<unsigned long long>(parameterCount));
 
   if (milliseconds > 1000.0) {
-    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.65f, 0.2f, 1.0f));
+    ImGui::PushStyleColor(
+        ImGuiCol_Text, ImVec4(VisualLanguage::warning.r, VisualLanguage::warning.g,
+                              VisualLanguage::warning.b, 1.0f));
     ImGui::TextWrapped("Warning: this receptive field exceeds one second and "
                        "may be too expensive for real-time playback.");
     ImGui::PopStyleColor();
   }
 
   if (buildError.isNotEmpty()) {
-    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.3f, 0.3f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_Text,
+                          ImVec4(VisualLanguage::danger.r, VisualLanguage::danger.g,
+                                 VisualLanguage::danger.b, 1.0f));
     ImGui::TextUnformatted("Model error");
     ImGui::PopStyleColor();
     ImGui::SameLine();
@@ -81,13 +87,17 @@ void InfoPanel::render(std::uint64_t receptiveFieldSamples, double sampleRate,
   }
 
   if (graphWarning.isNotEmpty()) {
-    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.72f, 0.25f, 1.0f));
+    ImGui::PushStyleColor(
+        ImGuiCol_Text, ImVec4(VisualLanguage::warning.r, VisualLanguage::warning.g,
+                              VisualLanguage::warning.b, 1.0f));
     ImGui::TextUnformatted("Graph warning");
     ImGui::PopStyleColor();
     ImGui::SameLine();
     if (ImGui::SmallButton("View##warning") && viewWarning)
       viewWarning();
-    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.72f, 0.25f, 1.0f));
+    ImGui::PushStyleColor(
+        ImGuiCol_Text, ImVec4(VisualLanguage::warning.r, VisualLanguage::warning.g,
+                              VisualLanguage::warning.b, 1.0f));
     ImGui::TextWrapped("%s", graphWarning.toRawUTF8());
     ImGui::PopStyleColor();
   }
@@ -174,11 +184,7 @@ void InfoPanel::renderPlot(const AnalysisPanelState &analysis,
   const auto origin = ImGui::GetCursorScreenPos();
   ImGui::InvisibleButton("##analysisplot", plotSize);
   auto *draw = ImGui::GetWindowDrawList();
-  draw->AddRectFilled(origin,
-                      ImVec2(origin.x + plotSize.x, origin.y + plotSize.y),
-                      IM_COL32(18, 22, 30, 255), 4.0f);
-  draw->AddRect(origin, ImVec2(origin.x + plotSize.x, origin.y + plotSize.y),
-                IM_COL32(70, 80, 95, 255), 4.0f);
+  InstrumentWidgets::analysisWell(origin, plotSize);
 
   const auto &snapshot = analysis.snapshot;
   auto boundsOf = [](const std::vector<dsp::AnalysisSeries> &family, float &minX,

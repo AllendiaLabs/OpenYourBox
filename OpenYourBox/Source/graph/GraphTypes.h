@@ -2,6 +2,7 @@
 
 #include <JuceHeader.h>
 
+#include "../ui/VisualLanguage.h"
 #include "ExpressionParser.h"
 
 #include <algorithm>
@@ -222,25 +223,41 @@ enum class AnalysisView {
   oscilloscope = 3
 };
 
+/**
+ * @brief Converts a visual-language token to a JUCE colour.
+ * @param colour Token RGBA in 0–1.
+ * @return Opaque (or token-alpha) JUCE colour.
+ */
+inline juce::Colour juceColourFromToken(const openyourbox::ui::Rgba &colour) noexcept {
+  return juce::Colour::fromFloatRGBA(colour.r, colour.g, colour.b, colour.a);
+}
+
 /** @brief Learned-layer chrome (Linear, Conv1D, ConvTranspose1d, TCN, Bottleneck). */
-inline const juce::Colour liveBlueColour{100, 180, 255};
+inline const juce::Colour liveBlueColour =
+    juceColourFromToken(openyourbox::ui::VisualLanguage::live);
 /** @brief Frozen Gold node colour. */
-inline const juce::Colour frozenGoldColour{218, 165, 32};
+inline const juce::Colour frozenGoldColour =
+    juceColourFromToken(openyourbox::ui::VisualLanguage::frozen);
 /**
  * @brief Host and group-hub audio I/O chrome (Audio/Group Input and Output).
  */
-inline const juce::Colour audioIoColour{70, 200, 150};
+inline const juce::Colour audioIoColour =
+    juceColourFromToken(openyourbox::ui::VisualLanguage::Family::audioIo);
 /** @brief Conditioning source node colour for Knob Input and XY Trackpad. */
-inline const juce::Colour conditioningColour{180, 140, 255};
+inline const juce::Colour conditioningColour =
+    juceColourFromToken(openyourbox::ui::VisualLanguage::Family::conditioning);
 /**
  * @brief Pointwise / DSP-helper chrome (Activation, BatchNorm, Utility, Math,
  *        PQMF, Noise Synth).
  */
-inline const juce::Colour helperLayerColour{185, 200, 55};
+inline const juce::Colour helperLayerColour =
+    juceColourFromToken(openyourbox::ui::VisualLanguage::Family::helper);
 /** @brief Training-only Data Loader / Loss chrome. */
-inline const juce::Colour trainOnlyColour{230, 140, 70};
+inline const juce::Colour trainOnlyColour =
+    juceColourFromToken(openyourbox::ui::VisualLanguage::Family::trainOnly);
 /** @brief Distinct data-loader cable colour (no RMS fill). */
-inline const juce::Colour dataLoaderCableColour{255, 120, 40};
+inline const juce::Colour dataLoaderCableColour =
+    juceColourFromToken(openyourbox::ui::VisualLanguage::Family::trainOnly);
 
 /** @brief Inclusive lower bound for Knob/XY conditioning scalars. */
 inline constexpr float conditioningMinimum = -10.0f;

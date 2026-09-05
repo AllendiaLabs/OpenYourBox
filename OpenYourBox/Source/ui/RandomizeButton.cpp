@@ -1,11 +1,11 @@
 #include "RandomizeButton.h"
 #include "../params/ParamIDs.h"
-
-#include <imgui.h>
+#include "InstrumentWidgets.h"
 
 namespace openyourbox::ui {
 void RandomizeButton::render(juce::AudioProcessorValueTreeState &state) const {
-  if (!ImGui::Button("Randomize Weights", ImVec2(-1.0f, 36.0f)))
+  if (!InstrumentWidgets::button("Randomize Weights", ImVec2(-1.0f, 36.0f),
+                                 InstrumentButtonKind::primary))
     return;
 
   if (auto *parameter = state.getParameter(params::randomize)) {

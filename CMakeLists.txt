@@ -132,7 +132,10 @@ juce_add_binary_data(OpenYourBoxResources
         OpenYourBox/Resources/examples/training/mapping-style-graph.xml
         OpenYourBox/Resources/examples/training/mapping-style-config.json
         OpenYourBox/Resources/examples/training/reconstruction-style-graph.xml
-        OpenYourBox/Resources/examples/training/reconstruction-style-config.json)
+        OpenYourBox/Resources/examples/training/reconstruction-style-config.json
+        OpenYourBox/Resources/fonts/Inter-Regular.ttf
+        OpenYourBox/Resources/fonts/Inter-SemiBold.ttf
+        OpenYourBox/Resources/fonts/Phosphor-Regular.ttf)
 
 target_sources(OpenYourBox PRIVATE
     OpenYourBox/Source/PluginEditor.cpp
@@ -175,11 +178,13 @@ target_sources(OpenYourBox PRIVATE
     OpenYourBox/Source/ui/ErrorModal.cpp
     OpenYourBox/Source/ui/ImGuiHost.cpp
     OpenYourBox/Source/ui/InfoPanel.cpp
+    OpenYourBox/Source/ui/InstrumentWidgets.cpp
     OpenYourBox/Source/ui/RandomizeButton.cpp
     OpenYourBox/Source/ui/TrainPanel.cpp
     OpenYourBox/Source/ui/TrainingLibraryPanel.cpp
     OpenYourBox/Source/ui/UserBoxLibraryPanel.cpp
-    OpenYourBox/Source/ui/UserPresetPanel.cpp)
+    OpenYourBox/Source/ui/UserPresetPanel.cpp
+    OpenYourBox/Source/ui/VisualLanguage.cpp)
 
 target_include_directories(OpenYourBox PRIVATE
     OpenYourBox/Source
@@ -485,6 +490,12 @@ if(BUILD_TESTING)
         juce::juce_recommended_config_flags
         juce::juce_recommended_warning_flags)
     add_test(NAME OpenYourBoxGeneralizedTrain COMMAND OpenYourBoxGeneralizedTrainTests)
+
+    add_executable(OpenYourBoxVisualLanguageTests Tests/VisualLanguageTests.cpp)
+    target_include_directories(OpenYourBoxVisualLanguageTests PRIVATE
+        OpenYourBox/Source)
+    target_compile_features(OpenYourBoxVisualLanguageTests PRIVATE cxx_std_17)
+    add_test(NAME OpenYourBoxVisualLanguage COMMAND OpenYourBoxVisualLanguageTests)
 
     add_test(NAME OpenYourBoxCloudApi
         COMMAND "${Python3_EXECUTABLE}" -m pytest

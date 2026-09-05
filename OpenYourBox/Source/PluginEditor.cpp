@@ -158,7 +158,11 @@ OpenYourBoxAudioProcessorEditor::~OpenYourBoxAudioProcessorEditor() {
 }
 
 void OpenYourBoxAudioProcessorEditor::paint(juce::Graphics &graphics) {
-  graphics.fillAll(juce::Colour(20, 23, 30));
+  graphics.fillAll(juce::Colour::fromFloatRGBA(
+      openyourbox::ui::VisualLanguage::Surface::page.r,
+      openyourbox::ui::VisualLanguage::Surface::page.g,
+      openyourbox::ui::VisualLanguage::Surface::page.b,
+      openyourbox::ui::VisualLanguage::Surface::page.a));
 }
 
 void OpenYourBoxAudioProcessorEditor::resized() {
@@ -208,7 +212,13 @@ void OpenYourBoxAudioProcessorEditor::renderFrame() {
                          ImGuiWindowFlags_NoBringToFrontOnFocus;
   ImGui::Begin("OpenYourBox", nullptr, flags);
 
-  ImGui::TextColored(ImVec4(0.39f, 0.70f, 1.0f, 1.0f), "OpenYourBox");
+  openyourbox::ui::VisualLanguage::pushStrong();
+  ImGui::TextColored(
+      ImVec4(openyourbox::ui::VisualLanguage::accent.r,
+             openyourbox::ui::VisualLanguage::accent.g,
+             openyourbox::ui::VisualLanguage::accent.b, 1.0f),
+      "OpenYourBox");
+  openyourbox::ui::VisualLanguage::popFont();
   ImGui::SameLine();
   const auto &currentPreset = audioProcessor.getCurrentPreset();
   if (currentPreset.isAssociated())
@@ -220,12 +230,12 @@ void OpenYourBoxAudioProcessorEditor::renderFrame() {
   {
     auto &history = audioProcessor.getEditHistory();
     ImGui::BeginDisabled(!history.canUndo());
-    if (ImGui::SmallButton("Undo"))
+    if (openyourbox::ui::InstrumentWidgets::button("Undo"))
       performUndo();
     ImGui::EndDisabled();
     ImGui::SameLine();
     ImGui::BeginDisabled(!history.canRedo());
-    if (ImGui::SmallButton("Redo"))
+    if (openyourbox::ui::InstrumentWidgets::button("Redo"))
       performRedo();
     ImGui::EndDisabled();
   }
@@ -256,23 +266,35 @@ void OpenYourBoxAudioProcessorEditor::renderFrame() {
   const auto runtimeError = audioProcessor.getModelError();
   if (runtimeError.isNotEmpty()) {
     ImGui::SameLine();
-    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.55f, 0.12f, 0.12f, 1.0f));
-    if (ImGui::SmallButton("Error"))
+    if (openyourbox::ui::InstrumentWidgets::button(
+            "Error", ImVec2(0.0f, 0.0f),
+            openyourbox::ui::InstrumentButtonKind::danger))
       showError(runtimeError, true);
-    ImGui::PopStyleColor();
   }
   const auto graphWarning = juce::String(nodeGraph.graphWarningMessage());
   if (graphWarning.isNotEmpty()) {
     ImGui::SameLine();
-    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.55f, 0.38f, 0.08f, 1.0f));
+    ImGui::PushStyleColor(
+        ImGuiCol_Button,
+        ImVec4(openyourbox::ui::VisualLanguage::warning.r,
+               openyourbox::ui::VisualLanguage::warning.g,
+               openyourbox::ui::VisualLanguage::warning.b, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_Text,
+                          ImVec4(openyourbox::ui::VisualLanguage::Surface::page.r,
+                                 openyourbox::ui::VisualLanguage::Surface::page.g,
+                                 openyourbox::ui::VisualLanguage::Surface::page.b,
+                                 1.0f));
     if (ImGui::SmallButton("Warning"))
       showWarning(graphWarning);
-    ImGui::PopStyleColor();
+    ImGui::PopStyleColor(2);
   }
   if (graphMessage.isNotEmpty() && ImGui::GetTime() < graphMessageDeadline) {
     ImGui::SameLine();
-    ImGui::TextColored(ImVec4(1.0f, 0.72f, 0.25f, 1.0f), "%s",
-                       graphMessage.toRawUTF8());
+    ImGui::TextColored(
+        ImVec4(openyourbox::ui::VisualLanguage::warning.r,
+               openyourbox::ui::VisualLanguage::warning.g,
+               openyourbox::ui::VisualLanguage::warning.b, 1.0f),
+        "%s", graphMessage.toRawUTF8());
   }
   const auto freezeStatus = freezeCoordinator.getStatus();
   if (freezeStatus == openyourbox::freeze::FreezeStatus::compiling) {
@@ -282,8 +304,11 @@ void OpenYourBoxAudioProcessorEditor::renderFrame() {
         static_cast<float>(std::fmod(ImGui::GetTime() * 0.35, 1.0));
     ImGui::ProgressBar(progress, ImVec2(110.0f, 0.0f), "##freeze");
     ImGui::SameLine();
-    ImGui::TextColored(ImVec4(1.0f, 0.72f, 0.25f, 1.0f), "%s",
-                       status.toRawUTF8());
+    ImGui::TextColored(
+        ImVec4(openyourbox::ui::VisualLanguage::warning.r,
+               openyourbox::ui::VisualLanguage::warning.g,
+               openyourbox::ui::VisualLanguage::warning.b, 1.0f),
+        "%s", status.toRawUTF8());
   }
   ImGui::Separator();
 
@@ -395,43 +420,25 @@ void OpenYourBoxAudioProcessorEditor::renderFrame() {
     ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
 
   ImGui::SameLine(0.0f, 0.0f);
+  ImGui::PushStyleColor(
+      ImGuiCol_ChildBg,
+      ImVec4(openyourbox::ui::VisualLanguage::Surface::panel.r,
+             openyourbox::ui::VisualLanguage::Surface::panel.g,
+             openyourbox::ui::VisualLanguage::Surface::panel.b, 1.0f));
   ImGui::BeginChild("InfoArea", ImVec2(right, 0.0f), true);
   if (nodeRenderer.consumeForceParametersTab())
     pendingSidePanelTab = 1;
   auto &pairing = audioProcessor.getCapturePairing();
   auto &library = audioProcessor.getTrainingLibrary();
-  if (ImGui::BeginTabBar("SideTabs", ImGuiTabBarFlags_FittingPolicyScroll)) {
-    const auto tabFlags = [this](int index) {
-      return pendingSidePanelTab == index ? ImGuiTabItemFlags_SetSelected
-                                          : ImGuiTabItemFlags_None;
-    };
-    if (ImGui::BeginTabItem("Info", nullptr, tabFlags(0))) {
-      sidePanelTab = 0;
-      ImGui::EndTabItem();
-    }
-    if (ImGui::BeginTabItem("Parameters", nullptr, tabFlags(1))) {
-      sidePanelTab = 1;
-      ImGui::EndTabItem();
-    }
-    if (ImGui::BeginTabItem("Library", nullptr, tabFlags(2))) {
-      sidePanelTab = 2;
-      ImGui::EndTabItem();
-    }
-    if (ImGui::BeginTabItem("Capture", nullptr, tabFlags(3))) {
-      sidePanelTab = 3;
-      ImGui::EndTabItem();
-    }
-    if (pairing.getPairingRole() != openyourbox::capture::PairingRole::slave &&
-        ImGui::BeginTabItem("Train", nullptr, tabFlags(4))) {
-      sidePanelTab = 4;
-      ImGui::EndTabItem();
-    }
-    if (ImGui::BeginTabItem("Presets", nullptr, tabFlags(5))) {
-      sidePanelTab = 5;
-      ImGui::EndTabItem();
-    }
+  {
+    std::vector<openyourbox::ui::InstrumentWidgets::Tab> tabs{
+        {"Info", 0}, {"Parameters", 1}, {"Library", 2}, {"Capture", 3}};
+    if (pairing.getPairingRole() != openyourbox::capture::PairingRole::slave)
+      tabs.push_back({"Train", 4});
+    tabs.push_back({"Presets", 5});
+    openyourbox::ui::InstrumentWidgets::tabBar("SideTabs", tabs, &sidePanelTab,
+                                               pendingSidePanelTab);
     pendingSidePanelTab = -1;
-    ImGui::EndTabBar();
   }
   if (sidePanelTab == 0) {
   if (auto *dryWetParameter = audioProcessor.getParameterState().getParameter(
@@ -440,9 +447,8 @@ void OpenYourBoxAudioProcessorEditor::renderFrame() {
     ImGui::AlignTextToFramePadding();
     ImGui::TextUnformatted("Dry/Wet");
     ImGui::SameLine();
-    ImGui::SetNextItemWidth(-1.0f);
     const auto changed =
-        ImGui::SliderFloat("##dryWet", &mixPercent, 0.0f, 100.0f, "%.0f%%");
+        openyourbox::ui::InstrumentWidgets::dryWetSlider("##dryWet", &mixPercent);
     if (ImGui::IsItemActive()) {
       if (!dryWetGestureActive) {
         beginHistoryGesture("Dry/Wet");
@@ -732,6 +738,7 @@ void OpenYourBoxAudioProcessorEditor::renderFrame() {
   copyrightModal.render(copyrightAcknowledgment, copyrightModalVisible,
                         [this] { copyrightModalVisible = false; });
   ImGui::EndChild();
+  ImGui::PopStyleColor();
   errorModal.render();
   warningModal.render();
 

@@ -1,4 +1,5 @@
 #include "CloudSettingsPanel.h"
+#include "InstrumentWidgets.h"
 
 #include <cstring>
 
@@ -58,16 +59,16 @@ void CloudSettingsPanel::render(const train::CloudSettings &settings,
     ImGui::Text("Enter this code on Allendia: %s", flow.userCode.toRawUTF8());
     if (flow.message.isNotEmpty())
       ImGui::TextDisabled("%s", flow.message.toRawUTF8());
-    if (ImGui::Button("Cancel") && callbacks.cancelLink)
+    if (InstrumentWidgets::button("Cancel") && callbacks.cancelLink)
       callbacks.cancelLink();
   } else if (status != train::CloudSettings::LinkStatus::linked) {
-    if (ImGui::Button("Sign in with Allendia") && callbacks.linkAccount)
+    if (InstrumentWidgets::button("Sign in with Allendia") && callbacks.linkAccount)
       callbacks.linkAccount();
-  } else if (ImGui::Button("Sign out") && callbacks.disconnect) {
+  } else if (InstrumentWidgets::button("Sign out") && callbacks.disconnect) {
     callbacks.disconnect();
   }
   ImGui::SameLine();
-  if (ImGui::Button("Manage account") && callbacks.openStorefront)
+  if (InstrumentWidgets::button("Manage account") && callbacks.openStorefront)
     callbacks.openStorefront();
 
   ImGui::Separator();
@@ -86,17 +87,17 @@ void CloudSettingsPanel::render(const train::CloudSettings &settings,
         "Storefront / link URL (often same as API for staging)",
         storefrontUrlBuffer.data(), storefrontUrlBuffer.size());
 
-    if (ImGui::Button("Use same as API")) {
+    if (InstrumentWidgets::button("Use same as API")) {
       std::memcpy(storefrontUrlBuffer.data(), apiBaseUrlBuffer.data(),
                   storefrontUrlBuffer.size());
     }
     ImGui::SameLine();
-    if (ImGui::Button("Clear to defaults")) {
+    if (InstrumentWidgets::button("Clear to defaults")) {
       apiBaseUrlBuffer[0] = '\0';
       storefrontUrlBuffer[0] = '\0';
     }
     ImGui::SameLine();
-    if (ImGui::Button("Apply endpoint") && callbacks.applyEndpointOverrides) {
+    if (InstrumentWidgets::button("Apply endpoint") && callbacks.applyEndpointOverrides) {
       const juce::String api(apiBaseUrlBuffer.data());
       const juce::String storefront(storefrontUrlBuffer.data());
       callbacks.applyEndpointOverrides(api, storefront);

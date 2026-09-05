@@ -17,9 +17,11 @@
 #include "ui/ErrorModal.h"
 #include "ui/ImGuiHost.h"
 #include "ui/InfoPanel.h"
+#include "ui/InstrumentWidgets.h"
 #include "ui/TrainPanel.h"
 #include "ui/TrainingLibraryPanel.h"
 #include "ui/UserPresetPanel.h"
+#include "ui/VisualLanguage.h"
 #include <JuceHeader.h>
 
 #include <memory>

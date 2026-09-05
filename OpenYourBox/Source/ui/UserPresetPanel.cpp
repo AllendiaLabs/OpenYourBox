@@ -1,4 +1,5 @@
 #include "UserPresetPanel.h"
+#include "InstrumentWidgets.h"
 
 #include <algorithm>
 #include <cstring>
@@ -35,13 +36,13 @@ void UserPresetPanel::render(library::UserPresetLibrary &library,
 
   const auto canSave = current.isAssociated();
   ImGui::BeginDisabled(!canSave);
-  if (ImGui::Button("Save") && callbacks.save)
+  if (InstrumentWidgets::button("Save") && callbacks.save)
     callbacks.save();
   ImGui::EndDisabled();
   if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled) && !canSave)
     ImGui::SetTooltip("Save As a name first");
   ImGui::SameLine();
-  if (ImGui::Button("Save As")) {
+  if (InstrumentWidgets::button("Save As")) {
     fillBuffer(nameBuffer, {});
     saveAsOverwrite = false;
     openSaveAsPopup = true;
@@ -49,16 +50,16 @@ void UserPresetPanel::render(library::UserPresetLibrary &library,
   ImGui::SameLine();
   const auto *selected = library.findEntry(selectedId);
   ImGui::BeginDisabled(selected == nullptr);
-  if (ImGui::Button("Load") && selected != nullptr && callbacks.load)
+  if (InstrumentWidgets::button("Load") && selected != nullptr && callbacks.load)
     callbacks.load(selected->id);
   ImGui::SameLine();
-  if (ImGui::Button("Rename") && selected != nullptr) {
+  if (InstrumentWidgets::button("Rename") && selected != nullptr) {
     renamingId = selected->id;
     fillBuffer(nameBuffer, selected->name);
     openRenamePopup = true;
   }
   ImGui::SameLine();
-  if (ImGui::Button("Delete") && selected != nullptr)
+  if (InstrumentWidgets::button("Delete") && selected != nullptr)
     pendingDeleteId = selected->id;
   ImGui::EndDisabled();
 
@@ -123,12 +124,12 @@ void UserPresetPanel::renderDialogs(library::UserPresetLibrary &library,
     ImGui::InputText("##saveAsName", nameBuffer.data(), nameBuffer.size());
     if (saveAsOverwrite)
       ImGui::TextWrapped("A preset with this name exists and will be replaced.");
-    if (ImGui::Button("Save") && callbacks.saveAs) {
+    if (InstrumentWidgets::button("Save") && callbacks.saveAs) {
       const auto name = juce::String(nameBuffer.data());
       callbacks.saveAs(name, saveAsOverwrite);
     }
     ImGui::SameLine();
-    if (ImGui::Button("Cancel")) {
+    if (InstrumentWidgets::button("Cancel")) {
       saveAsOverwrite = false;
       ImGui::CloseCurrentPopup();
     }
@@ -144,13 +145,13 @@ void UserPresetPanel::renderDialogs(library::UserPresetLibrary &library,
     ImGui::TextUnformatted("Name");
     ImGui::SetNextItemWidth(260.0f);
     ImGui::InputText("##renamePreset", nameBuffer.data(), nameBuffer.size());
-    if (ImGui::Button("Rename") && callbacks.rename) {
+    if (InstrumentWidgets::button("Rename") && callbacks.rename) {
       callbacks.rename(renamingId, juce::String(nameBuffer.data()));
       renamingId.clear();
       ImGui::CloseCurrentPopup();
     }
     ImGui::SameLine();
-    if (ImGui::Button("Cancel")) {
+    if (InstrumentWidgets::button("Cancel")) {
       renamingId.clear();
       ImGui::CloseCurrentPopup();
     }
@@ -164,7 +165,7 @@ void UserPresetPanel::renderDialogs(library::UserPresetLibrary &library,
     const auto *entry = library.findEntry(pendingDeleteId);
     ImGui::TextWrapped("Delete preset \"%s\"? This cannot be undone.",
                        entry != nullptr ? entry->name.toRawUTF8() : "this preset");
-    if (ImGui::Button("Delete") && callbacks.remove) {
+    if (InstrumentWidgets::button("Delete") && callbacks.remove) {
       callbacks.remove(pendingDeleteId);
       if (selectedId == pendingDeleteId)
         selectedId.clear();
@@ -172,7 +173,7 @@ void UserPresetPanel::renderDialogs(library::UserPresetLibrary &library,
       ImGui::CloseCurrentPopup();
     }
     ImGui::SameLine();
-    if (ImGui::Button("Cancel")) {
+    if (InstrumentWidgets::button("Cancel")) {
       pendingDeleteId.clear();
       ImGui::CloseCurrentPopup();
     }

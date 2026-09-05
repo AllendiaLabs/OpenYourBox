@@ -1,6 +1,7 @@
 #include "TrainPanel.h"
 #include "../train/CloudJobPackage.h"
 #include "../graph/GraphTypes.h"
+#include "InstrumentWidgets.h"
 
 #include <imgui.h>
 #include <imgui_internal.h>
@@ -114,7 +115,7 @@ void renderFreezeStructureItem(TrainPanel::LossStageDraft &stage,
     ImGui::PushStyleColor(ImGuiCol_Text, kDisabledGray);
     ImGui::BeginDisabled();
   }
-  const bool toggled = ImGui::Checkbox("##freeze", &checked);
+  const bool toggled = InstrumentWidgets::checkbox("##freeze", &checked);
   if (forceDisabled) {
     ImGui::EndDisabled();
   }
@@ -373,28 +374,32 @@ void TrainPanel::render(const train::TrainCoordinator &coordinator,
   if (!gates.copyrightAcknowledged) {
     ImGui::TextColored(ImVec4(1.0f, 0.72f, 0.25f, 1.0f),
                        "Copyright acknowledgment required.");
-    if (ImGui::Button("Acknowledge samples") && callbacks.requestCopyright)
+    if (InstrumentWidgets::button("Acknowledge samples") && callbacks.requestCopyright)
       callbacks.requestCopyright();
   }
 
   if (gated && !busy)
     ImGui::BeginDisabled();
   if (!busy) {
-    if (ImGui::Button("Run") && callbacks.run)
+    if (InstrumentWidgets::button("Run", ImVec2(0.0f, 0.0f),
+                                  InstrumentButtonKind::primary) &&
+        callbacks.run)
       callbacks.run();
   }
   ImGui::SameLine();
   const bool canStop = busy;
   if (!canStop)
     ImGui::BeginDisabled();
-  if (ImGui::Button("Stop") && callbacks.stop)
+  if (InstrumentWidgets::button("Stop", ImVec2(0.0f, 0.0f),
+                                InstrumentButtonKind::danger) &&
+      callbacks.stop)
     callbacks.stop();
   if (!canStop)
     ImGui::EndDisabled();
   if (gated && !busy)
     ImGui::EndDisabled();
 
-  if (ImGui::Checkbox("Hear changes while training", &hearWhileTraining) &&
+  if (InstrumentWidgets::checkbox("Hear changes while training", &hearWhileTraining) &&
       callbacks.hearWhileTrainingChanged)
     callbacks.hearWhileTrainingChanged(hearWhileTraining);
 
@@ -539,7 +544,7 @@ void TrainPanel::render(const train::TrainCoordinator &coordinator,
                        });
       bool included = entryIt != stage.losses.end();
       ImGui::PushID(loss.first);
-      if (ImGui::Checkbox(loss.second.toRawUTF8(), &included)) {
+      if (InstrumentWidgets::checkbox(loss.second.toRawUTF8(), &included)) {
         if (included)
           stage.losses.push_back(
               {loss.first, graph::defaultLossWeight});
@@ -640,7 +645,7 @@ void TrainPanel::render(const train::TrainCoordinator &coordinator,
 
   ImGui::Separator();
   ImGui::TextUnformatted("MLflow");
-  ImGui::Checkbox("Log to MLflow", &logToMlflow);
+  InstrumentWidgets::checkbox("Log to MLflow", &logToMlflow);
   if (!logToMlflow)
     ImGui::BeginDisabled();
   ImGui::SetNextItemWidth(-1.0f);
@@ -680,7 +685,7 @@ void TrainPanel::render(const train::TrainCoordinator &coordinator,
   if (showErrorAction && !busy) {
     ImGui::TextColored(ImVec4(1.0f, 0.35f, 0.35f, 1.0f), "Status: failed");
     ImGui::SameLine();
-    if (ImGui::Button("View error") && callbacks.viewError) {
+    if (InstrumentWidgets::button("View error") && callbacks.viewError) {
       juce::String detail = statusText;
       const juce::String progressError(progress.errorMessage);
       if (progressError.isNotEmpty() && !detail.contains(progressError)) {
@@ -739,11 +744,11 @@ void TrainPanel::render(const train::TrainCoordinator &coordinator,
   }
   if (gates.manualCloudLoadAvailable) {
     ImGui::TextUnformatted("Success on another machine: download and load manually.");
-    if (ImGui::Button("Download / Load") && callbacks.manualCloudLoad)
+    if (InstrumentWidgets::button("Download / Load") && callbacks.manualCloudLoad)
       callbacks.manualCloudLoad();
   }
 
-  if (gates.retryAvailable && ImGui::Button("Retry load") && callbacks.retryLoad)
+  if (gates.retryAvailable && InstrumentWidgets::button("Retry load") && callbacks.retryLoad)
     callbacks.retryLoad();
 }
 } // namespace openyourbox::ui
